@@ -1,0 +1,187 @@
+name: Linux Build Fixed
+
+on:
+  workflow_dispatch:
+    inputs:
+      products:
+        description: "要构建的产物（建议先 cli 探路）"
+        required: false
+        default: "cli"
+        type: choice
+        options:
+          - "app"
+          - "cli"
+          - "all"
+      cli_arches:
+        description: "CLI 架构（普通电脑选 x86_64 或 host）"
+        required: false
+        default: "x86_64"
+        type: choice
+        options:
+          - "host"
+          - "all"
+          - "x86_64"
+          - "aarch64"
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      RUSTFLAGS: -Awarnings
+      RUST_TOOLCHAIN_VERSION: 1.95.0
+      FVM_VERSION: 4.3.0
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            cmake \
+            gcc-aarch64-linux-gnu \
+            libgstreamer-plugins-base1.0-dev \
+            libgstreamer1.0-dev \
+            libgtk-3-dev \
+            liblzma-dev \
+            libwebkit2gtk-4.1-dev \
+            libc6-dev-arm64-cross \
+            musl-tools \
+            ninja-build \
+            pkg-config
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install bootstrap Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: 3.11.5
+
+      - name: Install Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Prepare build hook dependencies (venv + TypeScript)
+        if: inputs.products != 'cli'
+        run: |
+          set -euo pipefail
+          # hook/build.dart 在非 Windows 上调用仓库根目录下 .venv/bin/python，
+          # 官方 workflow 未创建，会导致构建钩子直接崩。
+          python3 -m venv .venv
+          ./.venv/bin/python -m pip install --upgrade pip
+          test -x ./.venv/bin/python || { echo "venv python 缺失"; exit 1; }
+          echo "hook python: $(./.venv/bin/python -V)"
+          mkdir -p .ci-tools/typescript
+          npm install --prefix .ci-tools/typescript --no-audit --no-fund typescript@5.9.3
+          test -x .ci-tools/typescript/node_modules/.bin/tsc || { echo "tsc 未就位"; exit 1; }
+
+      - name: Install built-in plugin dependencies
+        if: inputs.products != 'cli'
+        working-directory: plugins/packages/buildin/workflow
+        run: |
+          corepack enable pnpm
+          corepack pnpm install --frozen-lockfile
+
+      - name: Install FVM
+        run: |
+          dart pub global activate fvm "$FVM_VERSION"
+          echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
+
+      - name: Install project Flutter SDK
+        working-directory: apps/flutter/app
+        run: fvm install --skip-pub-get
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-gnu
+
+      - name: Check build environment
+        run: python3 tools/build_scripts/check_build_environment.py --products "${{ inputs.products }}" --cli-arches "${{ inputs.cli_arches }}" --github-runner
+
+      - name: Pre-warm Flutter pub cache (retry on gitee.com DNS failure)
+        if: inputs.products != 'cli'
+        working-directory: apps/flutter/app
+        run: |
+          set -uo pipefail
+          # pubspec.lock 里有多个 ohos 插件依赖 gitee.com 上的 git 仓库，
+          # runner 解析 gitee.com 时好时坏，这里反复预热直到成功。
+          for i in $(seq 1 8); do
+            echo "===== flutter pub get 第 $i 次 ====="
+            if fvm flutter pub get --enforce-lockfile; then
+              echo "pub 缓存预热成功（第 $i 次）"
+              exit 0
+            fi
+            echo "失败，等待 20 秒后重试..."
+            sleep 20
+          done
+          echo "flutter pub get 连续 8 次失败：gitee.com 依赖无法拉取，请 Re-run 重试"
+          exit 1
+
+      - name: Generate Dart proxy artifacts (cargo check on core proxy crate)
+        if: inputs.products != 'cli'
+        run: |
+          set -euo pipefail
+          # apps/flutter/app/lib/core/proxy/generated/ 被 .gitignore 排除，
+          # 必须由 cargo check 现场生成，否则大量 Dart 类型找不到。
+          cargo check --manifest-path core/crates/proxy/local/Cargo.toml --quiet
+          for f in CoreProxyModels.g.dart CoreProxyClients.g.dart; do
+            test -f "apps/flutter/app/lib/core/proxy/generated/$f" || {
+              echo "Dart proxy 产物缺失: $f"; exit 1; }
+          done
+          ls -la apps/flutter/app/lib/core/proxy/generated/
+
+      - name: Build and package Linux app
+        if: inputs.products != 'cli'
+        run: |
+          set -uo pipefail
+          python3 tools/build_scripts/build_flutter_linux.py \
+            --archive-path tools/release/dist/operit2-app-linux-x86_64.tar.gz \
+            --enforce-lockfile 2>&1 | tee build-linux.log
+          code=${PIPESTATUS[0]}
+          echo "----- 构建日志末尾 300 行 -----"
+          tail -n 300 build-linux.log
+          echo "----- 结束 (exit=$code) -----"
+          exit $code
+
+      - name: Build and package Linux CLI
+        if: inputs.products != 'app'
+        run: python3 tools/build_scripts/build_cli_linux.py --arches "${{ inputs.cli_arches }}"
+
+      - name: Upload Linux app artifact
+        if: inputs.products != 'cli'
+        uses: actions/upload-artifact@v7
+        with:
+          name: operit2-linux-app-${{ github.sha }}
+          path: tools/release/dist/operit2-app-linux-x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Linux CLI artifacts
+        if: inputs.products != 'app'
+        uses: actions/upload-artifact@v7
+        with:
+          name: operit2-linux-cli-${{ github.sha }}
+          path: tools/release/dist/operit2-cli-linux-*.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build log (always)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-log-linux-run${{ github.run_number }}
+          path: build-linux.log
+          if-no-files-found: warn
+          retention-days: 30
