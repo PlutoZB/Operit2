@@ -1,13 +1,19 @@
-name: Android Flutter Build (Self-Signed)
+name: Android Build Diagnose (Self-Signed)
 
 on:
   workflow_dispatch:
+    inputs:
+      skip_runtime:
+        description: '跳过 runtime 编译（复用上次产物，可省约20分钟）'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   build-android-runtime:
+    if: ${{ !inputs.skip_runtime }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
 
@@ -17,7 +23,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Android runtime build tools
         run: |
@@ -52,9 +58,10 @@ jobs:
           bash tools/android-runtime/build_alpine_rootfs_wsl.sh
 
       - name: Upload Android terminal runtime
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
-          name: operit2-android-runtime-${{ github.sha }}
+          name: operit2-android-runtime
+          overwrite: true
           path: |
             apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/libbash.so
             apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/liboperit_busybox.so
@@ -63,10 +70,11 @@ jobs:
             apps/flutter/app/android/app/src/main/assets/android-runtime/arm64-v8a/rootfs.tar.gz.bin
             apps/flutter/app/android/app/src/main/assets/android-runtime/arm64-v8a/rootfs.tar.gz.bin.sha256
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 30
 
   build-android:
     needs: build-android-runtime
+    if: ${{ !cancelled() }}
     runs-on: windows-2025
     timeout-minutes: 90
     env:
@@ -76,13 +84,27 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download Android terminal runtime
-        uses: actions/download-artifact@v4
+        id: dl_runtime
+        continue-on-error: true
+        uses: actions/download-artifact@v5
         with:
-          name: operit2-android-runtime-${{ github.sha }}
+          name: operit2-android-runtime
           path: apps/flutter/app/android/app/src/main
+
+      - name: Verify Android terminal runtime present
+        shell: pwsh
+        run: |
+          $need = @(
+            "apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/liboperit_proot.so",
+            "apps/flutter/app/android/app/src/main/assets/android-runtime/arm64-v8a/rootfs.tar.gz.bin"
+          )
+          $missing = $need | Where-Object { -not (Test-Path -LiteralPath $_) }
+          if ($missing.Count -gt 0) {
+            throw "Android runtime 产物缺失，请用 skip_runtime=false 重新运行一次: $($missing -join ', ')"
+          }
 
       - name: Install bootstrap Dart
         uses: dart-lang/setup-dart@v1
@@ -90,12 +112,12 @@ jobs:
           sdk: 3.11.5
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
 
       - name: Install Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -161,20 +183,36 @@ jobs:
         run: python tools/build_scripts/check_build_environment.py --products app --github-runner
 
       - name: Build and package Android app
+        id: build_app
         shell: pwsh
         run: |
+          $log = "build-android.log"
           $version = (Select-String -Path apps/flutter/app/pubspec.yaml -Pattern '^version:\s*(\d+\.\d+\.\d+)\+(\d+)\s*$').Matches
           if ($version.Count -ne 1) {
             throw "apps/flutter/app/pubspec.yaml must contain exactly one release version line"
           }
-          python tools/build_scripts/build_flutter_android.py --build-name $version[0].Groups[1].Value --build-number $version[0].Groups[2].Value --enforce-lockfile
+          python tools/build_scripts/build_flutter_android.py --build-name $version[0].Groups[1].Value --build-number $version[0].Groups[2].Value --enforce-lockfile *> $log
+          $code = $LASTEXITCODE
+          Write-Host "----- 构建日志末尾 200 行 -----"
+          if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Tail 200 }
+          Write-Host "----- 结束 (exit=$code) -----"
+          if ($code -ne 0) { exit $code }
 
       - name: Upload Android artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: operit2-android-${{ github.sha }}
           path: |
             tools/release/dist/operit2-app-android-arm64-v8a.apk
             tools/release/secrets/operit2-release.keystore
           if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build log (always)
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: build-log-run${{ github.run_number }}
+          path: build-android.log
+          if-no-files-found: warn
           retention-days: 30
