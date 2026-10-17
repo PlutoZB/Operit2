@@ -289,6 +289,27 @@ pub fn core_route_watch_request(method_name: &str, args: CoreValue) -> CoreWatch
     )
 }
 
+/// Routes a typed ReverseStream through the existing Push transport and preserves completion errors.
+pub async fn core_route_reverse_stream<T>(
+    runtime: &dyn CoreRouteRuntime,
+    method_name: &str,
+    args: CoreValue,
+    mut input: ReverseStream<T>,
+) -> Result<(), CoreLinkError>
+where
+    T: serde::Serialize + Send,
+{
+    let request = operit_link::CorePushRequest::new(
+        operit_link::nextCoreRouteRequestId(method_name), operit_link::CORE_INTERNAL_TARGET, method_name,
+    ).withArgs(args);
+    let mut session = runtime.openPush(request).await?;
+    while let Some(value) = input.recv().await {
+        let value = operit_link::toCoreValue(value).map_err(|error| CoreLinkError::internal(error.to_string()))?;
+        session.send(value).await?;
+    }
+    session.close().await
+}
+
 /// Routes one annotation-generated call through the installed Core route runtime.
 pub async fn core_route_call_response(
     runtime: &dyn CoreRouteRuntime,
@@ -1062,7 +1083,7 @@ fn core_route_embedded_stream_source(
 }
 
 /// Adds the route origin metadata required to reopen one embedded stream.
-fn core_route_embedded_stream_open_args(
+pub fn core_route_embedded_stream_open_args(
     open_args: CoreValue,
     source_mode: &'static str,
     source_method: String,

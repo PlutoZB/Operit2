@@ -95,3 +95,8 @@ impl crate::OperitFlutterBridge {
         })
     }
 }
+
+/// Creates only the platform secret-store adapter without starting Core or owner services.
+pub(crate) fn rescue_secret_store(default_runtime: &std::path::Path) -> Result<Option<std::sync::Arc<dyn operit_host_api::HostSecretStore>>, String> {
+    Ok(None)
+}

@@ -1157,6 +1157,7 @@ fn assembleRuntimeBootstrapScript() -> String {
                 }}
 
                 ensureToolPkgIpcApi();
+                __operitInstallToolPkgRouteApi();
                 if (!registrationMode) {{
                     ensureToolPkgWasmApi();
                 }}
@@ -1390,6 +1391,7 @@ fn assembleRuntimeBootstrapScript() -> String {
         loadPluginConfigJs(),
         loadRuntimeContextJs(),
         buildLazyLibraryBootstrapScript(),
-        JsExecutionScriptBuilder::buildExecutionRuntimeBridgeScript()
+        format!("{}\n{}", include_str!("../../../sdk/src/js_sdk/toolpkg_route_runtime.js"),
+            JsExecutionScriptBuilder::buildExecutionRuntimeBridgeScript())
     )
 }

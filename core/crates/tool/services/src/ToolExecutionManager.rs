@@ -249,6 +249,21 @@ pub struct RouteChangeIntent {
     pub targetNodeId: String,
 }
 
+/// Owns finalized results and the exact markup shared by display and model history.
+pub struct ToolExecutionBatch {
+    pub results: Vec<ToolResult>,
+    pub message: String,
+    pub routeChangeIntent: Option<RouteChangeIntent>,
+}
+
+impl ToolExecutionBatch {
+    /// Formats each invocation result once without imposing a batch-wide output limit.
+    pub fn new(results: Vec<ToolResult>, routeChangeIntent: Option<RouteChangeIntent>) -> Self {
+        let message = ConversationMarkupManager::buildToolResultMessage(&results);
+        Self { results, message, routeChangeIntent }
+    }
+}
+
 /// Parses model tool calls, checks permissions, and executes tools through handlers.
 pub struct ToolExecutionManager;
 
@@ -259,8 +274,6 @@ pub enum ToolExecutionPolicy {
     Ai { exposure: ToolExposureMode },
     /// Executes an ordinary JavaScript or application request without AI lifecycle hooks or permission preflight.
     Direct,
-    /// Applies receiver-owned permission preflight and lifecycle to an authenticated device request.
-    Device,
 }
 
 impl ToolExecutionManager {
@@ -326,7 +339,7 @@ impl ToolExecutionManager {
         invocations
     }
 
-    /// Executes a batch and returns emitted markup and results.
+    /// Executes a serial batch and finalizes one shared display/history result per invocation.
     pub async fn executeInvocations(
         invocations: &[ToolInvocation],
         toolHandler: &mut AIToolHandler,
@@ -339,7 +352,7 @@ impl ToolExecutionManager {
         toolExposureMode: ToolExposureMode,
         extensionOwner: String,
         messageExtension: serde_json::Map<String, serde_json::Value>,
-    ) -> Result<(Vec<String>, Vec<ToolResult>, Option<RouteChangeIntent>), String> {
+    ) -> Result<ToolExecutionBatch, String> {
         let runtimeContext = ToolRuntimeContext {
             callerChatId: callerChatId.clone(),
             callerParticipantId: callerParticipantId.clone(),
@@ -351,7 +364,6 @@ impl ToolExecutionManager {
         };
         runtimeContext.validateSnapshot()?;
         Self::scopeToolRuntimeContext(runtimeContext, async move {
-        let mut emitted = Vec::new();
         let mut results = Vec::new();
         let mut routeChangeIntent = None;
         let requestedToolNames = invocations
@@ -395,7 +407,7 @@ impl ToolExecutionManager {
             AppLogger::d(
                 TAG,
                 &format!(
-                    "tool.execution.start tool={} params={} rawChars={}",
+                    "tool.execution.start tool={} params={} rawBytes={}",
                     displayToolName,
                     invocation.tool.parameters.len(),
                     invocation.rawText.len()
@@ -415,11 +427,6 @@ impl ToolExecutionManager {
                     collected.len()
                 ),
             );
-            for result in &collected {
-                emitted.push(ensureEndsWithNewline(
-                    &ConversationMarkupManager::formatToolResultForMessage(result),
-                ));
-            }
             {
                 let last = collected.last().expect("collected not empty");
                 let combinedResultString = collected
@@ -452,7 +459,7 @@ impl ToolExecutionManager {
                 AppLogger::d(
                     TAG,
                     &format!(
-                        "tool.execution.complete tool={} success={} rawResultCount={} combinedChars={}",
+                        "tool.execution.complete tool={} success={} rawResultCount={} combinedBytes={}",
                         displayToolName,
                         finalResult.success,
                         collected.len(),
@@ -463,23 +470,18 @@ impl ToolExecutionManager {
             }
         }
 
-        let emittedChars = emitted.iter().map(|content| content.len()).sum::<usize>();
+        let batch = ToolExecutionBatch::new(results, routeChangeIntent);
         AppLogger::d(
             TAG,
             &format!(
-                "tool.execution.batch_complete requestedCount={} emittedMessages={} emittedChars={} resultCount={}",
+                "tool.execution.batch_complete requestedCount={} resultCount={} messageBytes={}",
                 invocations.len(),
-                emitted.len(),
-                emittedChars,
-                results.len()
+                batch.results.len(),
+                batch.message.len()
             ),
         );
-        Ok((emitted, results, routeChangeIntent))
+        Ok(batch)
         }).await
-    }
-
-    fn ensureEndsWithNewline(content: &str) -> String {
-        ensureEndsWithNewline(content)
     }
 
     /// Builds a route-change intent from the successful switch_core tool result.
@@ -775,6 +777,26 @@ pub struct ToolValidationResult {
 mod tests {
     use super::*;
 
+    /// Keeps same-name invocation results ordered and shares their finalized markup with history.
+    #[test]
+    fn finalized_batch_retains_all_same_name_results_and_route_intent() {
+        let batch = ToolExecutionBatch::new(
+            ["a".repeat(100_000), "second result".to_string()].into_iter().map(|value| ToolResult {
+                toolName: "grep_code".to_string(), success: true,
+                result: stringResultData(value), error: None,
+            }).collect(),
+            Some(RouteChangeIntent { targetNodeId: "next-node".to_string() }),
+        );
+        let blocks = ChatMarkupRegex::tool_result_blocks(&batch.message);
+        assert_eq!(blocks.len(), batch.results.len());
+        assert_eq!(batch.results.len(), 2);
+        assert!(blocks[0].body.starts_with("<content>aaa"));
+        assert_eq!(blocks[1].body, "<content>second result</content>");
+        assert_eq!(batch.routeChangeIntent.as_ref().unwrap().targetNodeId, "next-node");
+        assert_eq!(blocks.iter().map(|block| block.raw.as_str()).collect::<Vec<_>>().join("\n"), batch.message);
+    }
+
+
     /// Creates an explicit opaque turn snapshot for task-local tests without a package-manager fixture.
     fn turn_snapshot(owner: &str) -> ToolRuntimeContext {
         ToolRuntimeContext {
@@ -887,13 +909,5 @@ mod tests {
         let mut mismatched = result;
         mismatched.toolName = "other_tool".to_string();
         assert!(ToolExecutionManager::routeChangeIntentForResult(&tool, &mismatched).is_none());
-    }
-}
-
-fn ensureEndsWithNewline(content: &str) -> String {
-    if content.ends_with('\n') {
-        content.to_string()
-    } else {
-        format!("{content}\n")
     }
 }

@@ -3,6 +3,7 @@ use super::compose_dsl_material3_generated::*;
 use super::toolpkg::ToolPkgJsonValue;
 use super::{JsDate, JsFuture, JsOptional};
 use serde::{Deserialize, Serialize};
+use operit_plugin_sdk_macros::js_declaration;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 /// Options for deriving a theme color token with adjusted opacity.
@@ -2694,6 +2695,8 @@ pub struct ComposeLazyViewport {
     pub itemCount: u32,
     /// Unscaled main-axis item extent; Flutter applies the current text scale.
     pub itemExtent: f64,
+    /// Number of eager items before the windowed items in a sliver host.
+    pub staticItemCount: Option<u32>,
     /// Requests the next materialized range through normal action dispatch.
     pub onRangeChanged: Arc<dyn Fn(ComposeLazyRange) -> () + Send + Sync>,
 }
@@ -3291,6 +3294,8 @@ pub trait ComposeDslContextMethods: Send + Sync {
         factory: Arc<dyn Fn() -> T + Send + Sync>,
         deps: Option<Vec<serde_json::Value>>,
     ) -> T;
+    /// Runs composition-owned work and cleans it up on dependency change or disposal.
+    fn useEffect(&self, key: String, setup: Arc<dyn Fn() -> Arc<dyn Fn() + Send + Sync> + Send + Sync>, dependencies: Vec<super::JsAny>);
     /// Measures text using host font metrics and the supplied layout constraints.
     fn measureText(&self, request: ComposeTextMeasureRequest) -> ComposeTextMeasureResult;
     /// Invokes a resolved tool by name and asynchronously decodes its result.
@@ -3382,6 +3387,7 @@ pub trait ComposeDslContextMethods: Send + Sync {
 /// Screen renderer that receives a host context and produces a root node tree.
 pub type ComposeDslScreen = Arc<dyn Fn(ComposeDslContext) -> ComposeDslScreenOutput + Send + Sync>;
 /// Defines numeric unit accessors installed on the JavaScript `Number` interface.
+#[js_declaration(scope = "global", name = "Number")]
 pub struct ComposeNumberExtensions {
     /// Converts the number to a pixel unit value.
     pub px: ComposeUnitValue,

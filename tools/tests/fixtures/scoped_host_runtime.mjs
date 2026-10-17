@@ -68,7 +68,7 @@ export function domainToolResult(name, payload, request) {
       case 'execute': case 'transaction': return {op,results:payload};
       case 'define_table': return {op,...payload};
       case 'get': return {op,entry:payload};
-      case 'list': case 'changes': return {op,entries:payload};
+      case 'list': return {op,entries:payload};
       case 'commit': return {op,...payload};
       default: throw new Error('Unexpected test Storage operation: ' + op);
     }

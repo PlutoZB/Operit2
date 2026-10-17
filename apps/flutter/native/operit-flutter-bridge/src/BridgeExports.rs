@@ -897,3 +897,38 @@ pub(crate) fn set_last_create_error(value: String) {
         .lock()
         .expect("Create error lock must not be poisoned") = value;
 }
+
+/// Runs offline data rescue without allocating or starting an OperitFlutterBridge.
+#[no_mangle]
+#[cfg(not(target_arch = "wasm32"))]
+pub unsafe extern "C" fn operit_flutter_bridge_data_rescue(
+    default_runtime_root: *const c_char,
+    request: *const c_char,
+) -> *mut c_char {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if default_runtime_root.is_null() || request.is_null() {
+            return serde_json::json!({"ok": false, "error": "Data rescue arguments must not be null"}).to_string();
+        }
+        let root = match CStr::from_ptr(default_runtime_root).to_str() {
+            Ok(value) => PathBuf::from(value),
+            Err(error) => return serde_json::json!({"ok": false, "error": error.to_string()}).to_string(),
+        };
+        let request = match CStr::from_ptr(request).to_str() {
+            Ok(value) => value,
+            Err(error) => return serde_json::json!({"ok": false, "error": error.to_string()}).to_string(),
+        };
+        crate::PlatformRuntimeAbi::NativeDataRescue::execute(root, request)
+    }));
+    let encoded = match result {
+        Ok(value) => value,
+        Err(payload) => serde_json::json!({"ok": false, "error": format!("Data rescue panic: {}", panic_payload_message(payload.as_ref()))}).to_string(),
+    };
+    CString::new(encoded).expect("JSON must not contain raw NUL").into_raw()
+}
+
+/// Exposes the independent browser storage engine without creating a Core tree.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = operitDataRescue)]
+pub fn operit_data_rescue(request: &str) -> String {
+    operit_host_web::executeDataRescue(request)
+}

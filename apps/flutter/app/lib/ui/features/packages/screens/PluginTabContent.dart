@@ -124,6 +124,9 @@ class PluginTabContent extends StatelessWidget {
                             trailingActions: <Widget>[
                               ExtensionScopeAction(
                                 scope: scopes[plugin.packageName]!,
+                                requiredScope:
+                                    plugin.manifestExtensions['installation_scope']
+                                        as String?,
                                 onMove: () => onMoveScope(plugin.packageName),
                               ),
                               if (toolPkgHasUi(plugin))

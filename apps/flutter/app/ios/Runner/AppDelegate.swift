@@ -1,6 +1,7 @@
 import Flutter
 import UIKit
 import UserNotifications
+import file_selector_ios
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
@@ -13,7 +14,14 @@ import UserNotifications
   }
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
-    GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    if AppleRuntimeChannel.dataRescueRequested || ProcessInfo.processInfo.arguments.contains("--data-rescue") {
+      // The iOS plugin registry returns an optional registrar.
+      if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "FileSelectorPlugin") {
+        FileSelectorPlugin.register(with: registrar)
+      }
+    } else {
+      GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    }
     AppleRuntimeChannel.register(binaryMessenger: engineBridge.applicationRegistrar.messenger())
   }
 

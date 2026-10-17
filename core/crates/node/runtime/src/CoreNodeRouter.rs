@@ -2271,6 +2271,11 @@ impl CoreLinkSharedClient for CoreNodeRouter {
 }
 
 impl CoreRouteRuntime for CoreNodeRouter {
+    /// Opens plugin input streams through the existing Binding-selected Link Push path.
+    fn openPush(&self, request: CorePushRequest) -> Pin<Box<dyn Future<Output = Result<Box<dyn CoreLinkPushSession>, CoreLinkError>>>> {
+        let router = self.clone();
+        Box::pin(async move { router.openSpacePush(request).await })
+    }
     /// Resolves one annotation binding before the wrapper enters a remote route.
     fn shouldRoute(&self, methodName: &str, args: &CoreValue) -> Result<bool, CoreLinkError> {
         if operit_link::coreForceLocal() {
@@ -3576,6 +3581,22 @@ mod tests {
         }).unwrap();
     }
 
+    /// Verifies built-in storage roles authorize both replication endpoints without custom grants.
+    #[tokio::test]
+    async fn admin_user_and_relay_roles_provide_space_storage() {
+        let _guard = routeTestGlobalLock().lock().await;
+        installTestRuntimeScheduler();
+        let router = testCoreNodeRouter("role-local", "role-peer", "role-binding");
+        for role in ["admin", "user", "relay"] {
+            router.networkControlStore.setIdentity(operit_store::NetworkControlStore::NetworkControlIdentityAssignment {
+                nodeId: "role-peer".into(), roleId: role.into(),
+            }).unwrap();
+            assert!(router.requirePeerStorageProviders("role-local", "role-peer").is_ok(), "{role}");
+            assert!(router.requirePeerStorageProviders("role-peer", "role-local").is_ok(), "{role}");
+        }
+    }
+
+    /// Verifies edge roles cannot replicate data and returning to the user role restores storage.
     #[tokio::test]
     async fn non_storage_members_cannot_enter_replication_or_blob_receivers() {
         let _guard = routeTestGlobalLock().lock().await;
@@ -3595,7 +3616,7 @@ mod tests {
             PeerSyncMethod::SyncApplyOperations, PeerSyncMethod::SyncBlobExists, PeerSyncMethod::SyncReadBlobChunk] {
             let mut call = request.clone();
             call.payload = method.request("storage-denied".into(),
-                operit_link::toCoreValue(serde_json::json!({"operations":[]})).unwrap());
+                operit_link::toCoreValue(serde_json::json!({"operations":[],"complete":true})).unwrap());
             assert_eq!(router.routedCall("storage-peer".into(), call).await.result.unwrap_err().code,
                 "SPACE_STORAGE_PERMISSION_DENIED");
         }
@@ -3617,6 +3638,10 @@ mod tests {
         grantTestReplicaRole(&router.networkControlStore, "storage-peer");
         assert!(router.requirePeerStorageProviders("storage-peer", "storage-local").is_ok());
         router.networkControlStore.clearIdentity("storage-peer".into()).unwrap();
+        assert!(router.requirePeerStorageProviders("storage-peer", "storage-local").is_ok());
+        router.networkControlStore.setIdentity(operit_store::NetworkControlStore::NetworkControlIdentityAssignment {
+            nodeId: "storage-peer".into(), roleId: "edge".into(),
+        }).unwrap();
         assert_eq!(router.routedCall("storage-peer".into(), request).await.result.unwrap_err().code,
             "SPACE_STORAGE_PERMISSION_DENIED");
     }
@@ -3632,6 +3657,7 @@ mod tests {
         }
     }
 
+    /// Verifies assigning an edge role stops an open blob stream before another write or commit.
     #[tokio::test]
     async fn storage_revocation_stops_an_already_open_blob_stream_before_commit() {
         let _guard = routeTestGlobalLock().lock().await;
@@ -3642,7 +3668,9 @@ mod tests {
         let mut stream = router.guardPeerSyncPush("stream-peer".into(), "stream-local".into(),
             router.spaceStore.space().unwrap().spaceId, Box::new(CountingSyncPush(count.clone())));
         stream.send(CoreValue::Null).await.unwrap();
-        router.networkControlStore.clearIdentity("stream-peer".into()).unwrap();
+        router.networkControlStore.setIdentity(operit_store::NetworkControlStore::NetworkControlIdentityAssignment {
+            nodeId: "stream-peer".into(), roleId: "edge".into(),
+        }).unwrap();
         assert_eq!(stream.send(CoreValue::Null).await.unwrap_err().code, "SPACE_STORAGE_PERMISSION_DENIED");
         assert_eq!(stream.close().await.unwrap_err().code, "SPACE_STORAGE_PERMISSION_DENIED");
         assert_eq!(count.load(Ordering::SeqCst), 1, "no chunk or final commit reaches persistence after revocation");
@@ -3659,10 +3687,8 @@ mod tests {
             router.localCore.clone(), router.clone(), router.spaceStore.clone(),
         );
         let before = router.localCore.runtimeStorageHost().readBytes("runtime/sync/clocks.json").unwrap();
-        assert!(!worker.replicaBootstrapRequired(&router.spaceStore.space().unwrap().spaceId).unwrap(),
-            "a creator must not discard its own Space's data");
         assert!(!worker.storageReplicationAllowed("worker-peer").unwrap());
-        worker.synchronizeReachablePeer("worker-peer".into(), 512, true).await.unwrap();
+        worker.synchronizeReachablePeer("worker-peer".into(), 512).await.unwrap();
         assert_eq!(endpoint.callCount.load(Ordering::SeqCst), 2);
         assert_eq!(router.localCore.runtimeStorageHost().readBytes("runtime/sync/clocks.json").unwrap(), before);
         grantTestReplicaRole(&router.networkControlStore, "worker-peer");
@@ -3673,9 +3699,8 @@ mod tests {
         let before = router.localCore.runtimeStorageHost().readBytes("runtime/sync/clocks.json").unwrap();
         // A lightweight endpoint has no Core store even with a broad user role.
         assert!(!worker.storageReplicationAllowed("worker-peer").unwrap());
-        worker.synchronizeReachablePeer("worker-peer".into(), 512, true).await.unwrap();
+        worker.synchronizeReachablePeer("worker-peer".into(), 512).await.unwrap();
         assert_eq!(endpoint.methodNames(), vec!["exchange", "exchangePreferences", "exchange", "exchangePreferences"]);
-        assert!(!router.localCore.runtimeStorageHost().exists("runtime/link_access/storage_replica.preferences.json").unwrap());
         assert_eq!(router.localCore.runtimeStorageHost().readBytes("runtime/sync/clocks.json").unwrap(), before,
             "skipped initial sync must not reset/advance replication clocks");
         profile.coreVersion = Some("test-core-version".into()); profile.updatedAt += 1;
@@ -3684,29 +3709,20 @@ mod tests {
         link.close();
     }
 
+    /// Checks that storage authorization changes without resetting an existing operation clock.
     #[tokio::test]
-    async fn deferred_storage_grant_still_requires_a_first_replica_bootstrap() {
+    async fn storage_grant_preserves_existing_replication_clock() {
         let _guard = routeTestGlobalLock().lock().await;
         installTestRuntimeScheduler();
-        let creator = testCoreNodeRouter("bootstrap-creator", "bootstrap-joined", "bootstrap-binding");
-        let joined = testCoreNodeRouter("bootstrap-joined", "bootstrap-creator", "bootstrap-binding");
-        let mut adopted = creator.spaceStore.space().unwrap();
-        adopted.spaceRevision = adopted.spaceRevision.max(joined.spaceStore.space().unwrap().spaceRevision) + 1;
-        creator.spaceStore.adopt(adopted.clone()).unwrap();
-        joined.spaceStore.adopt(adopted).unwrap();
-        joined.networkControlStore.projectControlOperations(&creator.networkControlStore.currentSpaceOperations().unwrap()).unwrap();
+        let router = testCoreNodeRouter("grant-local", "grant-peer", "grant-binding");
         let worker = crate::SpacePersistenceSyncService::SpacePersistenceSyncService::new(
-            joined.localCore.clone(), joined.clone(), joined.spaceStore.clone(),
+            router.localCore.clone(), router.clone(), router.spaceStore.clone(),
         );
-        let spaceId = joined.spaceStore.space().unwrap().spaceId;
-        assert!(worker.replicaBootstrapRequired(&spaceId).unwrap());
-        let marker = operit_store::PreferencesDataStore::CoreNodeStateStore::newWithStorage(
-            joined.localCore.runtimeStorageHost(), "runtime/link_access/storage_replica.preferences.json");
-        let mut preferences = operit_store::PreferencesDataStore::emptyPreferences();
-        preferences.set(&operit_store::PreferencesDataStore::stringPreferencesKey("spaceId"), spaceId.clone());
-        marker.replace(preferences).unwrap();
-        assert!(!worker.replicaBootstrapRequired(&spaceId).unwrap());
-        assert!(worker.replicaBootstrapRequired("new-space-without-a-replica").unwrap());
+        let before = router.localCore.runtimeStorageHost().readBytes("runtime/sync/clocks.json").unwrap();
+        assert!(!worker.storageReplicationAllowed("grant-peer").unwrap());
+        grantTestReplicaRole(&router.networkControlStore, "grant-peer");
+        assert!(worker.storageReplicationAllowed("grant-peer").unwrap());
+        assert_eq!(router.localCore.runtimeStorageHost().readBytes("runtime/sync/clocks.json").unwrap(), before);
     }
 
     /// Creates one real router with synthetic local runtime and in-memory route state.

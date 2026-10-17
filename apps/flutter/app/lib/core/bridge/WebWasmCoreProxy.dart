@@ -1,6 +1,7 @@
 // ignore_for_file: file_names
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:js_interop';
 import 'dart:js_interop_unsafe';
 import 'dart:typed_data';
@@ -11,6 +12,25 @@ import 'CoreProxy.dart';
 
 class WebWasmCoreProxy extends CoreProxy {
   const WebWasmCoreProxy();
+
+  /// Calls the independent browser maintenance worker without loading the Core worker.
+  @override
+  Future<Object?> dataRescue(Map<String, Object?> request) async {
+    final ready = globalContext.getProperty<JSPromise<JSAny?>>(
+      '__operitDataRescueReady'.toJS,
+    );
+    await ready.toDart;
+    final callback = globalContext.getProperty<JSFunction>(
+      '__operitDataRescue'.toJS,
+    );
+    final promise =
+        callback.callAsFunction(null, jsonEncode(request).toJS)
+            as JSPromise<JSString>;
+    final encoded = (await promise.toDart).toDart;
+    final response = jsonDecode(encoded) as Map<String, Object?>;
+    if (response['ok'] != true) throw StateError(response['error'] as String);
+    return response['value'];
+  }
 
   /// Reads the browser Host's default logical Runtime storage roots.
   @override

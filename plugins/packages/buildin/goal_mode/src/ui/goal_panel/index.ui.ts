@@ -1,14 +1,8 @@
 import type { ComposeDslContext, ComposeNode } from "../../../../../../types/compose-dsl";
 import {
-  clearGoalAsync,
-  readGoalAsync,
-  setGoalStatusAsync,
+  GoalService,
 } from "../../shared/goal_mode_ipc.js";
 import type { GoalRecord } from "../../shared/goal_mode_state.js";
-
-const refreshEpochs = new Map<string, number>();
-const refreshPendingEpochs = new Map<string, number>();
-const refreshTimers = new Map<string, { intervalId: number; epoch: number }>();
 
 /** Calculates active goal time from its persisted timing checkpoints. */
 function calculateGoalElapsedMs(goal: GoalRecord, now: number): number {
@@ -29,97 +23,50 @@ function formatGoalDuration(durationMs: number): string {
 export default function Screen(ctx: ComposeDslContext): ComposeNode {
   const [chatId] = ctx.useState<string>("chatId", "");
   const [goal, setGoal] = ctx.useState<GoalRecord | null>("goal", null);
-  if (!refreshEpochs.has(chatId)) {
-    refreshEpochs.set(chatId, 0);
-  }
-
-  /** Stops the chat-scoped refresh and invalidates reads started before this stop. */
-  const stopRefreshTimer = (): void => {
-    const epoch = (refreshEpochs.get(chatId) ?? 0) + 1;
-    refreshEpochs.set(chatId, epoch);
-    const timer = refreshTimers.get(chatId);
-    if (timer) {
-      clearInterval(timer.intervalId);
-      refreshTimers.delete(chatId);
-    }
-    refreshPendingEpochs.delete(chatId);
-  };
-
-  /** Starts one shared elapsed-time refresh for the chat. */
-  const ensureRefreshTimer = (): void => {
-    if (refreshTimers.has(chatId)) {
-      return;
-    }
-    const epoch = refreshEpochs.get(chatId)!;
-    const timer = { intervalId: 0, epoch };
-    timer.intervalId = setInterval(() => {
-      if (refreshTimers.get(chatId) !== timer || refreshEpochs.get(chatId) !== epoch) {
-        return;
-      }
-      void refreshGoal(epoch);
-    }, 1000);
-    refreshTimers.set(chatId, timer);
-  };
-
-  /** Reads the persisted goal and refreshes the rendered elapsed time. */
-  const refreshGoal = async (expectedEpoch = refreshEpochs.get(chatId)!): Promise<void> => {
-    if (expectedEpoch !== refreshEpochs.get(chatId)) {
-      return;
-    }
-    if (refreshPendingEpochs.get(chatId) === expectedEpoch) {
-      return;
-    }
-    refreshPendingEpochs.set(chatId, expectedEpoch);
-    try {
-      const nextGoal = await readGoalAsync(chatId);
-      if (expectedEpoch !== refreshEpochs.get(chatId)) {
-        return;
-      }
-      if (!nextGoal || nextGoal.status !== "active") {
-        stopRefreshTimer();
-        setGoal(nextGoal);
-        return;
-      }
-      ensureRefreshTimer();
-      setGoal(nextGoal);
-    } finally {
-      if (refreshPendingEpochs.get(chatId) === expectedEpoch) {
-        refreshPendingEpochs.delete(chatId);
-      }
-    }
-  };
-
-  /** Refreshes the goal snapshot stored by the owning plugin runtime. */
-  const refresh = async (): Promise<void> => {
-    await refreshGoal();
-  };
-
-  /** Pauses an active goal. */
-  const pause = async (): Promise<void> => {
-    stopRefreshTimer();
-    setGoal(await setGoalStatusAsync(chatId, "paused"));
-  };
-
-  /** Resumes a paused goal. */
-  const resume = async (): Promise<void> => {
-    stopRefreshTimer();
-    setGoal(await setGoalStatusAsync(chatId, "active"));
-    ensureRefreshTimer();
-  };
-
-  /** Removes the current goal. */
-  const clear = async (): Promise<void> => {
-    stopRefreshTimer();
-    await clearGoalAsync(chatId);
+  const goalRef = ctx.useRef<GoalRecord | null>("currentGoal", goal);
+  goalRef.current = goal;
+  /** Owns the subscription and elapsed-time refresh for this exact chat context. */
+  ctx.useEffect("goal", () => {
     setGoal(null);
-  };
+    const iterator = GoalService.watch(chatId);
+    let active = true;
+    /** Consumes routed state until the composition releases this collector. */
+    const observe = async (): Promise<void> => {
+      for await (const next of iterator) {
+        if (!active) return;
+        setGoal(next);
+      }
+    };
+    void observe().catch((error) => { if (active) ctx.reportError(error); });
+    /** Releases the chat subscription and timer together. */
+    return () => {
+      active = false;
+      void iterator.return(undefined).catch((error) => { ctx.reportError(error); });
+    };
+  }, [chatId]);
+  /** Refreshes elapsed time only while the currently displayed goal is active. */
+  ctx.useEffect("goal-clock", () => {
+    if (goal?.status !== "active") return () => {};
+    const timer = setInterval(() => {
+      if (goalRef.current?.status === "active") setGoal({ ...goalRef.current });
+    }, 1000);
+    /** Releases this composition's elapsed-time timer. */
+    return () => { clearInterval(timer); };
+  }, [chatId, goal?.status]);
+
+  /** Pauses the durable goal on its Binding owner. */
+  const pause = async (): Promise<void> => { await GoalService.status(chatId, "paused"); };
+  /** Resumes the durable goal on its Binding owner. */
+  const resume = async (): Promise<void> => { await GoalService.status(chatId, "active"); };
+  /** Removes the durable goal on its Binding owner. */
+  const clear = async (): Promise<void> => { await GoalService.clear(chatId); };
 
   const active = goal?.status === "active";
 
   // Keep the empty slot zero-height while the initial read is pending too.
   // Transient padding here resizes the transcript and nudges its bottom twice.
   if (goal === null) {
-    return ctx.UI.Column({ fillMaxWidth: true, onLoad: refresh }, []);
+    return ctx.UI.Column({ fillMaxWidth: true }, []);
   }
 
   const paused = goal?.status === "paused";
@@ -127,7 +74,7 @@ export default function Screen(ctx: ComposeDslContext): ComposeNode {
   const elapsed = goal ? formatGoalDuration(calculateGoalElapsedMs(goal, Date.now())) : "00:00:00";
 
   return ctx.UI.Column(
-    { fillMaxWidth: true, padding: { horizontal: 8, vertical: 2 }, onLoad: refresh },
+    { fillMaxWidth: true, padding: { horizontal: 8, vertical: 2 } },
     [
       ctx.UI.Card(
         {

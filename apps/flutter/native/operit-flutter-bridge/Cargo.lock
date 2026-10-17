@@ -36,6 +36,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "aes-gcm"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "831010a0f742e1209b3bcea8fab6a8e149051ba6099432c8cb2cc117dec3ead1"
+dependencies = [
+ "aead",
+ "aes",
+ "cipher",
+ "ctr",
+ "ghash",
+ "subtle",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -573,6 +587,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "constant_time_eq"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c74b8349d32d297c9134b8c88677813a227df8f779daa29bfc29c183fe3dca6"
+
+[[package]]
 name = "convert_case"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -659,6 +679,15 @@ dependencies = [
  "generic-array",
  "rand_core 0.6.4",
  "typenum",
+]
+
+[[package]]
+name = "ctr"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0369ee1ad671834580515889b80f2ea915f23b8be8d0daa4bbaf2ac5c7590835"
+dependencies = [
+ "cipher",
 ]
 
 [[package]]
@@ -950,6 +979,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "futures-channel"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1081,6 +1120,16 @@ dependencies = [
  "r-efi 6.0.0",
  "wasip2",
  "wasip3",
+]
+
+[[package]]
+name = "ghash"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0d8a4362ccb29cb0b265253fb0a2728f592895ee6854fd9bc13f2ffda266ff1"
+dependencies = [
+ "opaque-debug",
+ "polyval",
 ]
 
 [[package]]
@@ -2145,6 +2194,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "operit-data-rescue"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "operit-host-api",
+ "serde",
+ "serde_json",
+ "sha2",
+ "uuid",
+ "zip",
+]
+
+[[package]]
 name = "operit-edge-contract"
 version = "0.1.0"
 dependencies = [
@@ -2167,8 +2229,10 @@ dependencies = [
  "js-sys",
  "mdns-sd",
  "operit-core-application",
+ "operit-data-rescue",
  "operit-host-android-native",
  "operit-host-api",
+ "operit-host-data-rescue",
  "operit-host-ios-native",
  "operit-host-linux-native",
  "operit-host-macos-native",
@@ -2247,6 +2311,24 @@ dependencies = [
  "tungstenite",
  "uuid",
  "zip",
+]
+
+[[package]]
+name = "operit-host-data-rescue"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "base64",
+ "fs2",
+ "getrandom 0.3.4",
+ "operit-data-rescue",
+ "operit-host-api",
+ "operit-host-native-storage",
+ "serde",
+ "serde_json",
+ "sha2",
+ "uuid",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2399,6 +2481,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "js-sys",
+ "operit-data-rescue",
  "operit-host-api",
  "operit-proxy-local",
  "operit-runtime",
@@ -2509,6 +2592,7 @@ dependencies = [
  "operit-host-api",
  "operit-link",
  "operit-peer-link",
+ "operit-rslink-runtime",
  "operit-runtime",
  "operit-store",
  "operit-tools",
@@ -2549,6 +2633,7 @@ dependencies = [
  "json5",
  "operit-host-api",
  "operit-plugin-sdk-codegen",
+ "operit-plugin-sdk-macros",
  "operit-plugin-theme",
  "regex",
  "rquickjs",
@@ -2590,6 +2675,14 @@ dependencies = [
  "operit-host-api",
  "operit-link",
  "operit-plugin-sdk-ipc",
+]
+
+[[package]]
+name = "operit-plugin-sdk-macros"
+version = "2.0.0-preview.15"
+dependencies = [
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2819,6 +2912,7 @@ dependencies = [
  "operit-plugin-sdk",
  "operit-plugin-sdk-codegen",
  "operit-route-macros",
+ "operit-rslink-runtime",
  "operit-store",
  "operit-util",
  "quickjs-wasm-rs",
@@ -2867,6 +2961,16 @@ name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f38d5652c16fde515bb1ecef450ab0f6a219d619a7274976324d5e377f7dceba"
+
+[[package]]
+name = "pbkdf2"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
+dependencies = [
+ "digest",
+ "hmac",
+]
 
 [[package]]
 name = "percent-encoding"
@@ -3028,6 +3132,18 @@ version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8159bd90725d2df49889a078b54f4f79e87f1f8a8444194cdca81d38f5393abf"
 dependencies = [
+ "cpufeatures",
+ "opaque-debug",
+ "universal-hash",
+]
+
+[[package]]
+name = "polyval"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d1fe60d06143b2430aa532c94cfe9e29783047f06c0d7fd359a9a51b729fa25"
+dependencies = [
+ "cfg-if",
  "cpufeatures",
  "opaque-debug",
  "universal-hash",
@@ -5384,14 +5500,21 @@ version = "2.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fabe6324e908f85a1c52063ce7aa26b68dcb7eb6dbc83a2d148403c9bc3eba50"
 dependencies = [
+ "aes",
  "arbitrary",
+ "constant_time_eq",
  "crc32fast",
  "crossbeam-utils",
  "displaydoc",
  "flate2",
+ "getrandom 0.3.4",
+ "hmac",
  "indexmap",
  "memchr",
+ "pbkdf2",
+ "sha1",
  "thiserror 2.0.18",
+ "zeroize",
  "zopfli",
 ]
 

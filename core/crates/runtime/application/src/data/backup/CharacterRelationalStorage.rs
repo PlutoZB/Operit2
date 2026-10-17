@@ -13,10 +13,19 @@ use std::sync::{
     Arc,
 };
 
+/// Selects the explicit SQL NULL encoding for an added nullable scalar.
+#[derive(Clone, Deserialize)]
+enum NullEncoding {
+    #[serde(rename = "column")]
+    Column,
+}
+
 #[derive(Clone, Deserialize)]
 /// Describes declared typed fields and ordered child relations, never stored object payloads.
 struct Node {
     kind: String,
+    #[serde(default, rename = "nullEncoding")]
+    null_encoding: Option<NullEncoding>,
     #[serde(default)]
     nullable: bool,
     #[serde(default)]
@@ -92,7 +101,7 @@ fn layout(name: String, node: Node, child: bool) -> Layout {
         columns: &mut Vec<StorageColumn>,
         children: &mut Vec<Layout>,
     ) {
-        if node.optional || node.nullable {
+        if node.null_encoding.is_none() && (node.optional || node.nullable) {
             columns.push(column(
                 &format!("{}__state", field(prefix)),
                 StorageColumnType::Integer,
@@ -242,7 +251,7 @@ fn encode(
             row: &mut Row,
             rows: &mut BTreeMap<String, Vec<Row>>,
         ) -> Result<(), String> {
-            if node.optional || node.nullable {
+            if node.null_encoding.is_none() && (node.optional || node.nullable) {
                 row.insert(
                     format!("{}__state", field(prefix)),
                     StorageSqlValue::Integer(
@@ -413,7 +422,12 @@ fn decode(current: &Layout, row: &Row, rows: &BTreeMap<String, Vec<Row>>) -> Res
         row: &Row,
         rows: &BTreeMap<String, Vec<Row>>,
     ) -> Result<Option<Value>, String> {
-        if node.optional || node.nullable {
+        if matches!(node.null_encoding, Some(NullEncoding::Column))
+            && matches!(row.get(field(prefix)), Some(StorageSqlValue::Null))
+        {
+            return Ok(Some(Value::Null));
+        }
+        if node.null_encoding.is_none() && (node.optional || node.nullable) {
             match integer(row, &format!("{}__state", field(prefix)))? {
                 0 if node.optional => return Ok(None),
                 1 if node.nullable => return Ok(Some(Value::Null)),
@@ -522,7 +536,7 @@ impl CharacterRelationalStorage {
             "/../../../../plugins/packages/buildin/character_cards/src/storage/schema.json"
         )))
         .map_err(|e| e.to_string())?;
-        if schema.version != 1 {
+        if schema.version != 2 {
             return Err("Unsupported relational schema".into());
         }
         let session = PluginStorageSession::default();
@@ -533,6 +547,7 @@ impl CharacterRelationalStorage {
                 StorageRequest::Open {
                     path: format!("{directory}/characters-relational.sqlite"),
                     kind: StorageKind::Sqlite,
+                    merge: None,
                 },
                 &device,
             )
@@ -781,6 +796,7 @@ impl CharacterRelationalStorage {
             return Err("Relational migration batch exceeds 1000 SQL statements".into());
         }
         self.request(StorageRequest::Transaction {
+            when_absent: None,
             handle: self.handle.clone(),
             statements,
         })?;
@@ -815,6 +831,7 @@ impl CharacterRelationalStorage {
             });
         }
         self.request(StorageRequest::Transaction {
+            when_absent: None,
             handle: self.handle.clone(),
             statements,
         })?;

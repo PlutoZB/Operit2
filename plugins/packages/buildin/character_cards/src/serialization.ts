@@ -198,7 +198,7 @@ export function encodeCharacterExport(card: Card, format: "operit" | "tavern", t
             otherContentChat: card.otherContentChat, otherContentVoice: card.otherContentVoice,
             avatarUri: card.avatarUri, attachedTagIds: [...card.attachedTagIds], attachedTags,
             advancedCustomPrompt: card.advancedCustomPrompt, marks: card.marks,
-            chatModelBindingMode: card.chatModelBindingMode, chatModelId: card.chatModelId,
+            chatModelBindingMode: card.chatModelBindingMode, chatModelId: card.chatModelId, chatProviderId: card.chatProviderId,
             ttsConfigId: card.ttsConfigId, themeConfigId: card.themeConfigId, memoryBindingMode: card.memoryBindingMode,
             sharedMemoryId: card.sharedMemoryId, sharedMemoryMounts: card.sharedMemoryMounts,
             toolAccessConfig: card.toolAccessConfig,

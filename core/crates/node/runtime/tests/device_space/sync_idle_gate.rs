@@ -179,6 +179,12 @@ impl operit_link::CoreLinkSharedClient for GateTestApplicationClient {
     }
 }
 
+/// Installs the control journal application used by fixtures that exchange replication calls.
+pub(super) fn installControlSyncTestApplication(router: &mut CoreNodeRouter) {
+    let control = router.networkControlStore.clone();
+    router.installTestApplicationClient(Arc::new(GateTestApplicationClient { control }));
+}
+
 /// Builds a two-node authorized Space whose routers carry the minimal gate
 /// application, so full passes run their business leg against real stores.
 fn gateMesh(
@@ -196,8 +202,7 @@ fn gateMesh(
         .map(|(router, _)| router.clone())
         .collect::<Vec<_>>();
     for router in routers.iter_mut() {
-        let control = router.networkControlStore.clone();
-        router.installTestApplicationClient(Arc::new(GateTestApplicationClient { control }));
+        installControlSyncTestApplication(router);
     }
     let access = services
         .iter()
@@ -221,25 +226,6 @@ fn gateMesh(
     (routers, access, peers)
 }
 
-/// The joining member needs a custom storage capability role: clock probes are
-/// storage-replication calls, and the idle gate only skips passes whose probe
-/// succeeds. The owning administrator already satisfies the check through its
-/// wildcard capability, and reassigning it would drop the administrator.
-fn grantStorageRole(routers: &[CoreNodeRouter], access: &[RuntimeRemoteLinkService]) {
-    access[0].defineDeviceSpaceRole(operit_store::NetworkControlStore::NetworkControlRole {
-        roleId: "replica".into(), displayName: "Test replica".into(),
-        capabilities: std::collections::BTreeSet::from(["storage.provide".into()]),
-    }).unwrap();
-    access[0]
-        .setDeviceSpaceIdentity(
-            operit_store::NetworkControlStore::NetworkControlIdentityAssignment {
-                nodeId: routers[1].localNodeId(),
-                roleId: "replica".into(),
-            },
-        )
-        .unwrap();
-}
-
 /// Verifies the change-gated synchronization floor: after one converging pass,
 /// idle cycles only probe the remote clock, one remote authority change costs
 /// exactly one more full pass, and the following cycles idle again.
@@ -248,7 +234,6 @@ async fn idle_cycles_probe_clocks_without_repeating_full_exchanges() {
     let _guard = routeTestGlobalLock().lock().await;
     installTestRuntimeScheduler();
     let (routers, access, peers) = gateMesh("sync-idle");
-    grantStorageRole(&routers, &access);
     let observer = idleObserver(&routers[1]);
 
     // The first pass converges with the remote and seeds the clock baseline.
@@ -315,8 +300,7 @@ async fn idle_cycles_probe_clocks_without_repeating_full_exchanges() {
 async fn a_failed_pass_backs_off_before_retrying_the_full_exchange() {
     let _guard = routeTestGlobalLock().lock().await;
     installTestRuntimeScheduler();
-    let (routers, access, peers) = gateMesh("sync-backoff");
-    grantStorageRole(&routers, &access);
+    let (routers, _access, peers) = gateMesh("sync-backoff");
     let observer = idleObserver(&routers[1]);
 
     // One-shot fault: the control exchange with the remote is lost. The
@@ -364,7 +348,6 @@ async fn preference_edits_reopen_a_settled_storage_provider_gate() {
     let _guard = routeTestGlobalLock().lock().await;
     installTestRuntimeScheduler();
     let (routers, access, peers) = gateMesh("sync-device-preferences");
-    grantStorageRole(&routers, &access);
     let observer = idleObserver(&routers[1]);
     observer.synchronizeOnce().await.unwrap();
     observer.synchronizeOnce().await.unwrap();

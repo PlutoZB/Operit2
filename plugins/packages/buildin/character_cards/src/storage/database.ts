@@ -3,10 +3,14 @@ import type {
   CharacterDirectories,
   CharacterState,
   Card,
+  ActivePrompt,
   Group,
   GlobalMemoryPreferences,
   MemorySettings,
   MemorySearchConfig,
+  Snapshot,
+  Store,
+  Tag,
   UserDocument,
   UserDocumentWrite,
 } from "../model";
@@ -25,16 +29,17 @@ import {
   storedValue,
 } from "./records";
 import type { StoredRecord } from "./records";
-import { RelationalDatabase, decodeScalarProjection } from "./relational";
+import { RelationalDatabase, decodeScalarProjection, migrateCharacterSchema, characterSchemaVersion } from "./relational";
 import type { RelationalMutation } from "./relational";
 import {
   assertBoolean,
   assertCard,
   assertGroup,
   assertObject,
+  assertString,
+  assertTag,
   assertMemorySettings,
   assertSearchConfig,
-  assertString,
   requireId,
 } from "../validation";
 import { userDocumentPath } from "./state";
@@ -70,25 +75,31 @@ export class DatabaseCharacterRepository implements CharacterRepositoryOwner {
       directory,
       directories,
     );
-    const metadata = await database.get("meta", "state");
-    if (metadata === null) {
-      const rows = await repository.readRecords();
-      if (rows.length !== 0)
-        throw new Error("Character database has records without metadata");
+    const existingMetadata = await database.get("meta", "state");
+    if (existingMetadata === null) {
       const state = createInitialState(Date.now());
       assertCharacterState(state);
-      const documents = state.owners.map((owner) => ({
-        ownerKey: owner.ownerKey,
-        path: directory + "/" + owner.userDocumentPath,
-        content: "",
-        newDocument: true,
-      }));
-      await repository.publish(state, [], documents, [], null, {});
+      const initialized = await database.commit([
+        { op: "put", collection: "schema_migrations", key: "character", expectedVersion: null, value: { version: characterSchemaVersion } },
+        ...records(state).map(row => ({ op: "put" as const, ...row, expectedVersion: null })),
+        { op: "put", collection: "meta", key: "state", expectedVersion: null,
+          value: { version: state.version, nextId: state.nextId,
+            active: "Model" in state.active ? null : storedValue(state.active),
+            memoryPreferences: storedValue(state.memoryPreferences) } },
+      ], { collection: "meta", key: "state" });
+      if (initialized !== null) {
+        for (const owner of state.owners) {
+          const path = directory + "/" + owner.userDocumentPath;
+          completed(await Tools.Files.mkdir(path.slice(0, path.lastIndexOf("/")), true));
+          completed(await Tools.Files.write(path, "", false));
+        }
+      }
     } else {
-      assertCharacterState(
-        stateFromRecords(metadata.value, await repository.readRecords()),
-      );
+      await migrateCharacterSchema(database, async () => directories === null ? [] : directories.listModels());
     }
+    const metadata = await database.get("meta", "state");
+    if (metadata === null) throw new Error("Character initialization did not publish metadata");
+    assertCharacterState(stateFromRecords(metadata.value, await repository.readRecords()));
     return repository;
   }
 
@@ -176,50 +187,131 @@ export class DatabaseCharacterRepository implements CharacterRepositoryOwner {
     }
   }
 
-  /** Reads only complete role presentation records under the shared operation queue. */
-  async readSidebarDirectory(): Promise<{ cards: Card[]; groups: Group[] }> {
-    await this.acquire();
-    try {
-      if (this.publicationFailure !== null) throw this.publicationFailure.error;
-      const metadata = await this.database.get("meta", "state");
-      if (metadata === null)
-        throw new Error("Character database metadata disappeared");
-      assertObject(metadata.value, "character metadata");
-      if (metadata.value.migrationStatus === "writing")
-        throw new Error("Character migration has not completed");
-      const result = await Promise.allSettled([
-        this.database.read("cards"),
-        this.database.read("groups"),
-      ]);
-      const cards: Card[] = [],
-        groups: Group[] = [];
-      for (const read of result)
-        if (read.status === "rejected") throw read.reason;
-      if (result[0].status === "fulfilled") {
-        for (const row of result[0].value) {
-          assertCard(row.value);
-          cards.push(row.value);
-        }
-      }
-      if (result[1].status === "fulfilled") {
-        for (const row of result[1].value) {
-          assertGroup(row.value);
-          groups.push(row.value);
-        }
-      }
-      const ids = new Set(cards.map((card) => card.id));
-      for (const group of groups)
-        for (const member of group.members) {
-          if (!ids.has(member.characterCardId))
-            throw new Error("Missing group member: " + member.characterCardId);
-        }
-      const checked = await this.database.get("meta", "state");
-      if (checked === null || checked.version !== metadata.version)
-        throw new Error("Character directory changed during the read");
-      return { cards, groups };
-    } finally {
-      this.release();
+  private requirePublicationReady(): void {
+    if (this.publicationFailure !== null) throw this.publicationFailure.error;
+  }
+
+  /** Retries only overlapping commits; readers never reserve the editing queue. */
+  private async readConsistent<T>(read: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      this.requirePublicationReady();
+      const before = await this.database.get("meta", "state");
+      if (before === null) throw new Error("Character database metadata disappeared");
+      assertObject(before.value, "character metadata");
+      if (before.value.migrationStatus === "writing") throw new Error("Character migration has not completed");
+      let result: T | undefined;
+      let failure: { error: unknown } | null = null;
+      try { result = await read(); } catch (error) { failure = { error }; }
+      const after = await this.database.get("meta", "state");
+      this.requirePublicationReady();
+      if (after === null) throw new Error("Character database metadata disappeared");
+      if (before.version !== after.version) continue;
+      if (failure !== null) throw failure.error;
+      return result as T;
     }
+    throw new Error("Character records kept changing during the read; retry the operation");
+  }
+
+  /** Reads role presentation independently of memory editing and background jobs. */
+  readSidebarDirectory(): Promise<Pick<Snapshot, "cards" | "groups">> {
+    return this.readConsistent(async () => {
+      const [cards, groups] = await Promise.all([this.readCharacters(), this.readGroups()]);
+      const ids = new Set(cards.map(card => card.id));
+      for (const group of groups)
+        for (const member of group.members)
+          if (!ids.has(member.characterCardId)) throw new Error("Missing group member: " + member.characterCardId);
+      return { cards, groups };
+    });
+  }
+
+  readActive(): Promise<ActivePrompt> {
+    this.requirePublicationReady();
+    return this.readMetadata().then(metadata => metadata.active);
+  }
+
+  /** Reads configuration records only; memory content and vectors remain in their own queries. */
+  readConfigurationSnapshot(): Promise<Snapshot> {
+    if (this.directories === null) throw new Error("External directory readers are unavailable");
+    const directories = this.directories;
+    return this.readConsistent(async () => {
+      const [cards, groups, stores, tags, models, ttsConfigs, toolCatalog, metadata] = await Promise.all([
+        this.readCharacters(),
+        this.readGroups(),
+        this.database.read<Store>("stores").then(rows => rows.map(row => row.value)),
+        this.readTags(),
+        Promise.resolve().then(() => directories.listModels()),
+        Promise.resolve().then(() => directories.listTtsConfigs()),
+        Promise.resolve().then(() => directories.readToolCatalog()),
+        this.readMetadata(),
+      ]);
+      return { cards, groups, stores, tags, models, ttsConfigs, toolCatalog, ...metadata };
+    });
+  }
+
+  listCharacters(): Promise<Card[]> { return this.readConsistent(() => this.readCharacters()); }
+  listGroups(): Promise<Group[]> { return this.readConsistent(() => this.readGroups()); }
+  listStores(): Promise<Store[]> {
+    return this.readConsistent(async () => (await this.database.read<Store>("stores")).map(row => row.value));
+  }
+  listTags(): Promise<Tag[]> { return this.readConsistent(() => this.readTags()); }
+
+  private async readCharacters(): Promise<Card[]> {
+    return (await this.database.read<Card>("cards")).map(row => {
+      assertCard(row.value);
+      return row.value;
+    });
+  }
+
+  private async readGroups(): Promise<Group[]> {
+    return (await this.database.read<Group>("groups")).map(row => {
+      assertGroup(row.value);
+      return row.value;
+    });
+  }
+
+  private async readTags(): Promise<Tag[]> {
+    return (await this.database.read<Tag>("tags")).map(row => {
+      assertTag(row.value);
+      return row.value;
+    });
+  }
+
+  getCharacter(id: string): Promise<Card> {
+    requireId(id, "角色卡标识");
+    return this.readConsistent(async () => {
+      const row = await this.database.get<Card>("cards", id);
+      if (row === null) throw new Error("Character not found: " + id);
+      assertCard(row.value);
+      return row.value;
+    });
+  }
+
+  getGroup(id: string): Promise<Group> {
+    requireId(id, "群组标识");
+    return this.readConsistent(async () => {
+      const row = await this.database.get<Group>("groups", id);
+      if (row === null) throw new Error("Group not found: " + id);
+      assertGroup(row.value);
+      return row.value;
+    });
+  }
+
+  private async readMetadata(): Promise<Pick<Snapshot, "active" | "memoryPreferences">> {
+    const row = await this.database.get<{
+      active: Exclude<ActivePrompt, { Model: { id: "chat" } }> | null;
+      memoryPreferences: GlobalMemoryPreferences;
+      migrationStatus?: string;
+    }>("meta", "state");
+    if (row === null) throw new Error("Character database metadata disappeared");
+    assertObject(row.value, "character metadata");
+    if (row.value.migrationStatus === "writing") throw new Error("Character migration has not completed");
+    assertObject(row.value.memoryPreferences, "global memory preferences");
+    assertBoolean(row.value.memoryPreferences.userDescriptionEnabled, "user description enabled");
+    assertBoolean(row.value.memoryPreferences.autoUpdateEnabled, "memory auto update enabled");
+    return {
+      active: row.value.active ?? { Model: { id: "chat" } },
+      memoryPreferences: row.value.memoryPreferences,
+    };
   }
 
   /** Reads memory settings without loading bodies, vectors or job relations. */
@@ -240,28 +332,9 @@ export class DatabaseCharacterRepository implements CharacterRepositoryOwner {
     });
   }
 
-  /** Reads global behavior flags directly from metadata without loading any owner records. */
   async readGlobalMemoryPreferences(): Promise<GlobalMemoryPreferences> {
-    await this.acquire();
-    try {
-      if (this.publicationFailure !== null) throw this.publicationFailure.error;
-      const entry = await this.database.get("meta", "state");
-      if (entry === null)
-        throw new Error("Character database metadata disappeared");
-      assertObject(entry.value, "character metadata");
-      if (entry.value.migrationStatus === "writing")
-        throw new Error("Character migration has not completed");
-      const flags = entry.value.memoryPreferences;
-      assertObject(flags, "global memory preferences");
-      assertBoolean(flags.userDescriptionEnabled, "user description enabled");
-      assertBoolean(flags.autoUpdateEnabled, "memory auto update enabled");
-      return {
-        userDescriptionEnabled: flags.userDescriptionEnabled,
-        autoUpdateEnabled: flags.autoUpdateEnabled,
-      };
-    } finally {
-      this.release();
-    }
+    this.requirePublicationReady();
+    return (await this.readMetadata()).memoryPreferences;
   }
 
   /** Reads the selected owner's actual USER.md document. */
@@ -293,31 +366,22 @@ export class DatabaseCharacterRepository implements CharacterRepositoryOwner {
     return this.directory + "/" + row.userDocumentPath;
   }
 
-  /** Serializes one indexed owner query with domain mutations and checks migration readiness. */
+  /** Reads one owner directly; file IO never occupies the full-state editing queue. */
   private async readOwnerMetadata<T>(
     ownerKey: string,
     action: (row: Record<string, Storage.SqlValue>) => T | Promise<T>,
   ): Promise<T> {
     requireId(ownerKey, "memory owner");
-    await this.acquire();
-    try {
-      if (this.publicationFailure !== null) throw this.publicationFailure.error;
-      const rows = await this.database.sql.query(
-        `SELECT o.* FROM "owners" o JOIN "meta" state ON state."_key" = 'state'
-        WHERE o."_key" = ? AND (state."migrationStatus__state" = 0 OR state."migrationStatus" = 'complete')
-        AND (EXISTS (SELECT 1 FROM "cards" c WHERE 'character:' || c."id" = o."ownerKey")
-          OR EXISTS (SELECT 1 FROM "stores" s WHERE 'shared:' || s."id" = o."ownerKey"))`,
-        [ownerKey],
-      );
-      if (rows.length !== 1 || rows[0].ownerKey !== ownerKey) {
-        throw new Error(
-          "Memory owner is missing or its migration is incomplete: " + ownerKey,
-        );
-      }
-      return await action(rows[0]);
-    } finally {
-      this.release();
-    }
+    if (this.publicationFailure !== null) throw this.publicationFailure.error;
+    const rows = await this.database.sql.query(
+      `SELECT o.* FROM "owners" o JOIN "meta" state ON state."_key" = 'state'
+      WHERE o."_key" = ? AND (state."migrationStatus__state" = 0 OR state."migrationStatus" = 'complete')
+      AND (EXISTS (SELECT 1 FROM "cards" c WHERE 'character:' || c."id" = o."ownerKey")
+        OR EXISTS (SELECT 1 FROM "stores" s WHERE 'shared:' || s."id" = o."ownerKey"))`,
+      [ownerKey],
+    );
+    if (rows.length !== 1) throw new Error("Memory owner is missing or its migration is incomplete: " + ownerKey);
+    return action(rows[0]);
   }
 
   /** Serializes domain sessions within this execution while exact host versions guard other executions. */

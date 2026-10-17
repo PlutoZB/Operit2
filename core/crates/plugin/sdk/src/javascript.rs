@@ -294,6 +294,70 @@ pub trait JsExecutionHost: Send + Sync {
         completion: JsToolPkgIpcCompletion,
     ) -> Result<(), String>;
 
+    /// Calls one Core route through the Rust route runtime and generated route rules.
+    fn should_route_toolpkg(&self, _binding: String, _streaming: bool) -> Result<bool, String> {
+        Err("Plugin route resolution is unavailable on this host".to_string())
+    }
+
+    /// Opens a plugin consumer using the standard Link Push family.
+    fn open_toolpkg_route_push(&self, _method: String, _args: Value) -> JsExecutionFuture<Result<Value, String>> {
+        Box::pin(async { Err("Plugin Push is unavailable on this host".to_string()) })
+    }
+
+    /// Sends one ordered value to an authenticated plugin Push session.
+    fn send_toolpkg_route_push(&self, _id: String, _value: Value) -> JsExecutionFuture<Result<Value, String>> {
+        Box::pin(async { Err("Plugin Push is unavailable on this host".to_string()) })
+    }
+
+    /// Completes or abandons an authenticated plugin Push session.
+    fn close_toolpkg_route_push(&self, _id: String, _abort: bool) -> JsExecutionFuture<Result<Value, String>> {
+        Box::pin(async { Err("Plugin Push is unavailable on this host".to_string()) })
+    }
+
+    /// Calls an authenticated plugin route using the generated Binding entry point.
+    fn call_core_route(
+        &self,
+        _target: String,
+        _method: String,
+        _args: Value,
+    ) -> JsExecutionFuture<Result<Value, String>> {
+        Box::pin(async { Err("Core route calls are unavailable on this host".to_string()) })
+    }
+
+    /// Opens one Core route watch and returns its subscription id and initial snapshot.
+    fn open_core_route_watch(
+        &self,
+        _target: String,
+        _property: String,
+        _args: Value,
+    ) -> JsExecutionFuture<Result<Value, String>> {
+        Box::pin(async { Err("Core route watches are unavailable on this host".to_string()) })
+    }
+
+    /// Waits for one event from an existing Core route watch subscription.
+    fn next_core_route_watch(
+        &self,
+        _subscription_id: String,
+    ) -> JsExecutionFuture<Result<Value, String>> {
+        Box::pin(async { Err("Core route watches are unavailable on this host".to_string()) })
+    }
+
+    /// Closes one Core route watch subscription.
+    fn close_core_route_watch(&self, _subscription_id: String) -> Result<(), String> {
+        Err("Core route watches are unavailable on this host".to_string())
+    }
+
+    /// Observes one authenticated collection key, emitting its initial state and version changes.
+    fn wait_plugin_storage_record(
+        &self,
+        _handle: String,
+        _collection: String,
+        _key: String,
+        _after: Option<operit_host_api::PluginStorage::StorageRecordWatchState>,
+    ) -> JsExecutionFuture<Result<Value, String>> {
+        Box::pin(async { Err("Plugin storage record watches are unavailable on this host".to_string()) })
+    }
+
     /// Waits for the host runtime to advance JavaScript work on a later turn.
     fn wait_for_javascript_runtime_turn(&self) -> operit_host_api::HostRuntimeTurnFuture;
 }
@@ -556,6 +620,13 @@ pub trait JsExecutionEngine: Send + Sync {
         dispatch_intermediate_on_main: bool,
         timeout_millis: u64,
     ) -> JsExecutionFuture<JsExecutionResult<Option<String>>>;
+
+    /// Executes one stream step until completion or caller cancellation, with bounded CPU slices.
+    fn execute_script_function_until_cancelled(
+        &self, _script: String, _function_name: String, _params: BTreeMap<String, Value>, _env_overrides: BTreeMap<String, String>,
+    ) -> JsExecutionFuture<JsExecutionResult<Option<String>>> {
+        Box::pin(async { Err(crate::execution_result::JsExecutionError::invalid_request("This JavaScript engine does not support owner-scoped stream execution")) })
+    }
 
     /// Executes a ToolPkg registration function and returns captured declarations.
     fn execute_toolpkg_main_registration_function_with_text_resources(

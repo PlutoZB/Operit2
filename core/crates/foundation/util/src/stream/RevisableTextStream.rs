@@ -34,6 +34,35 @@ pub trait TextStreamEventCarrier {
     fn event_channel(&self) -> &MutableSharedStreamImpl<TextStreamEvent>;
 }
 
+/// Shares a terminal producer failure with a cold stream wrapper.
+#[derive(Clone, Debug, Default)]
+pub struct TerminalFailureState {
+    value: Arc<Mutex<Option<String>>>,
+}
+
+impl TerminalFailureState {
+    /// Creates an empty terminal failure state.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records the error that ended the producer.
+    pub fn set(&self, error: String) {
+        *self
+            .value
+            .lock()
+            .expect("terminal failure state mutex poisoned") = Some(error);
+    }
+
+    /// Returns the producer error retained by the wrapper.
+    pub fn get(&self) -> Option<String> {
+        self.value
+            .lock()
+            .expect("terminal failure state mutex poisoned")
+            .clone()
+    }
+}
+
 impl<T> TextStreamEventCarrier for Box<T>
 where
     T: ?Sized + TextStreamEventCarrier,
@@ -44,6 +73,9 @@ where
 }
 
 pub trait RevisableTextStream: Stream<Item = String> + TextStreamEventCarrier {
+    /// Returns the producer failure after collection, separately from normal channel closure.
+    fn terminal_failure(&self) -> Option<String>;
+
     /// Collects response text and revision instructions in source order.
     fn collect_ordered<'a>(
         &'a mut self,
@@ -61,6 +93,11 @@ impl<T> RevisableTextStream for Box<T>
 where
     T: ?Sized + RevisableTextStream,
 {
+    /// Preserves the wrapped producer's terminal failure through trait-object erasure.
+    fn terminal_failure(&self) -> Option<String> {
+        (**self).terminal_failure()
+    }
+
     /// Delegates ordered collection to the wrapped stream.
     fn collect_ordered<'a>(
         &'a mut self,
@@ -85,6 +122,7 @@ where
 {
     upstream: S,
     event_channel: MutableSharedStreamImpl<TextStreamEvent>,
+    terminalFailure: TerminalFailureState,
 }
 
 impl<S> DelegatingRevisableTextStream<S>
@@ -92,9 +130,19 @@ where
     S: Stream<Item = String>,
 {
     pub fn new(upstream: S, event_channel: MutableSharedStreamImpl<TextStreamEvent>) -> Self {
+        Self::new_with_failure(upstream, event_channel, TerminalFailureState::new())
+    }
+
+    /// Creates a text stream wrapper with an externally writable terminal failure state.
+    pub fn new_with_failure(
+        upstream: S,
+        event_channel: MutableSharedStreamImpl<TextStreamEvent>,
+        terminalFailure: TerminalFailureState,
+    ) -> Self {
         Self {
             upstream,
             event_channel,
+            terminalFailure,
         }
     }
 }
@@ -143,6 +191,12 @@ impl<S> RevisableTextStream for DelegatingRevisableTextStream<S>
 where
     S: Stream<Item = String>,
 {
+    /// Reports no producer failure for an infallible text-only upstream.
+    fn terminal_failure(&self) -> Option<String> {
+        self.terminalFailure.get()
+    }
+
+    /// Collects the text-only source without synthesizing revision events.
     fn collect_ordered<'a>(
         &'a mut self,
         collector: &'a mut dyn FnMut(ResponseStreamItem),
@@ -341,6 +395,12 @@ impl TextStreamEventCarrier for DelegatingRevisableSharedTextStream {
 }
 
 impl RevisableTextStream for DelegatingRevisableSharedTextStream {
+    /// Exposes the recorded producer failure to provider-stream consumers.
+    fn terminal_failure(&self) -> Option<String> {
+        DelegatingRevisableSharedTextStream::terminal_failure(self)
+    }
+
+    /// Collects chunks and revisions with the configured ordering contract.
     fn collect_ordered<'a>(
         &'a mut self,
         collector: &'a mut dyn FnMut(ResponseStreamItem),
@@ -443,6 +503,18 @@ where
     DelegatingRevisableTextStream::new(stream, event_channel)
 }
 
+/// Wraps a cold stream while exposing a producer failure state to consumers.
+pub fn with_event_channel_and_failure<S>(
+    stream: S,
+    event_channel: MutableSharedStreamImpl<TextStreamEvent>,
+    terminalFailure: TerminalFailureState,
+) -> DelegatingRevisableTextStream<S>
+where
+    S: Stream<Item = String>,
+{
+    DelegatingRevisableTextStream::new_with_failure(stream, event_channel, terminalFailure)
+}
+
 pub fn with_event_channel_shared(
     stream: MutableSharedStreamImpl<String>,
     event_channel: MutableSharedStreamImpl<TextStreamEvent>,
@@ -526,5 +598,35 @@ mod tests {
         stream.emit_chunk("second".to_string());
 
         assert_eq!(stream.current_render_content(), "prefix first second");
+    }
+
+    /// Preserves the failure and partial text through shared clones and trait-object erasure.
+    #[tokio::test]
+    async fn boxed_stream_retains_terminal_failure_after_collection() {
+        let stream = DelegatingRevisableSharedTextStream::new_ordered(
+            mutable_shared_stream(usize::MAX), mutable_shared_stream(usize::MAX),
+        );
+        let producer = stream.clone();
+        let mut response: Box<dyn RevisableTextStreamLike> = Box::new(stream);
+        producer.emit_chunk("partial response".to_string());
+        producer.set_terminal_failure("original transport error".to_string());
+        producer.close();
+        let mut items = Vec::new();
+        response.collect_ordered(&mut |item| items.push(item)).await;
+        assert_eq!(items, vec![ResponseStreamItem::Chunk("partial response".to_string())]);
+        assert_eq!(RevisableTextStream::terminal_failure(&response), Some("original transport error".to_string()));
+    }
+
+    /// Distinguishes successful empty completion from a producer failure.
+    #[tokio::test]
+    async fn successful_empty_stream_has_no_terminal_failure() {
+        let mut stream = DelegatingRevisableSharedTextStream::new_ordered(
+            mutable_shared_stream(usize::MAX), mutable_shared_stream(usize::MAX),
+        );
+        stream.close();
+        let mut items = Vec::new();
+        stream.collect_ordered(&mut |item| items.push(item)).await;
+        assert!(items.is_empty());
+        assert_eq!(RevisableTextStream::terminal_failure(&stream), None);
     }
 }

@@ -89,25 +89,33 @@ Widget themed(Widget child) => OperitTheme(
   child: child,
 );
 
+/// Renders sidebar lists through their shared sliver protocol and other nodes as boxes.
 Widget renderSidebar(
   Map<String, Object?> node,
   List<String> actions, {
   Future<Object?> Function(String, [Object?])? onAction,
-}) => buildComposeDslLayoutForTest(
-  node: node,
-  hostContext: ComposeDslWebViewHostContext(
-    packageName: 'fixture.character-sidebar',
-    routeInstanceId: 'sidebar-layout-test',
-    executionContextKey: 'sidebar-layout-test',
-    dispatchAction: (id, [payload]) async {
-      actions.add('$id:$payload');
-      return onAction == null ? null : await onAction(id, payload);
-    },
-    runtimeOptionsProvider: () => {},
-  ),
-  onTextInput: (_, _) async => null,
-  splitMarkdownContent: (_) async => [],
-);
+}) {
+  final sliver = node['type'] == 'LazyColumn';
+  final renderer = buildComposeDslLayoutForTest(
+    node: node,
+    contentBuilder: (context, content) =>
+        sliver ? content.sliver : content.body,
+    onLoadHandledByHost: true,
+    hostContext: ComposeDslWebViewHostContext(
+      packageName: 'fixture.character-sidebar',
+      routeInstanceId: 'sidebar-layout-test',
+      executionContextKey: 'sidebar-layout-test',
+      dispatchAction: (id, [payload]) async {
+        actions.add('$id:$payload');
+        return onAction == null ? null : await onAction(id, payload);
+      },
+      runtimeOptionsProvider: () => {},
+    ),
+    onTextInput: (_, _) async => null,
+    splitMarkdownContent: (_) async => [],
+  );
+  return sliver ? CustomScrollView(slivers: [renderer]) : renderer;
+}
 
 /// Counts real ink features rather than accepting a gesture-only click region.
 class RecordingSplashFactory extends InteractiveInkFeatureFactory {

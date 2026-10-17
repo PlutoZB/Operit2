@@ -88,6 +88,9 @@ fn create_cli_plugin_sdk_ipc_host(
 
 /// Creates the CLI host manager with frontend-owned toast presentation.
 fn create_cli_host_manager_with_toast_host(toastHost: Arc<dyn ToastHost>) -> HostManager {
+    static LEASE: std::sync::OnceLock<operit_host_data_rescue::StorageLease> = std::sync::OnceLock::new();
+    LEASE.get_or_init(|| operit_host_data_rescue::StorageLease::acquire(&NativeRuntimeStorageHost::defaultRuntimeRoot(), false)
+        .unwrap_or_else(|error| panic!("Storage access denied: {error}")));
     let storageConfig = CliStorageConfig::read();
     let (runtimeRoot, workspaceRoot) = storageConfig.activeRoots();
     let pluginSdkIpcHost = create_cli_plugin_sdk_ipc_host(&runtimeRoot);
@@ -682,3 +685,26 @@ mod tests {
         }
     }
 }
+
+/// Returns native roots for offline rescue without constructing the CLI Host manager.
+pub(crate) fn rescue_default_runtime() -> PathBuf { NativeRuntimeStorageHost::defaultRuntimeRoot() }
+
+/// Reads explicit CLI storage roots without creating missing configuration or identities.
+pub(crate) fn rescue_roots() -> Result<operit_host_data_rescue::RescueRoots, String> {
+    let bytes = fs::read(cli_storage_config_path()).map_err(|error| error.to_string())?;
+    let config: CliStorageConfig = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    Ok(operit_host_data_rescue::RescueRoots { runtime_root: config.runtimeRoot, workspace_root: config.workspaceRoot, cli_config_root: Some(cli_config_dir()) })
+}
+
+/// Returns the CLI configuration directory for an explicitly selected damaged-config rescue.
+pub(crate) fn rescue_config_root() -> PathBuf { cli_config_dir() }
+
+/// Creates only the selected secret-store adapter for a CLI maintenance session.
+pub(crate) fn rescue_secret_store(root: &std::path::Path) -> Option<Arc<dyn operit_host_api::HostSecretStore>> {
+    if env::var("OPERIT_CLI_SECRET_STORE").as_deref() == Ok("file") {
+        // Every identity's file-backed secrets are already included in the raw runtime namespace.
+        return None;
+    }
+    Some(Arc::new(NativeRuntimeStorageHost::new(root.to_path_buf(), root.with_file_name("workspaces"))))
+}
+

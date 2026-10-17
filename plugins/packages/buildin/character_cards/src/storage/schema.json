@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "collections": {
     "cards": {
       "kind": "object",
@@ -47,6 +47,11 @@
         "chatModelId": {
           "kind": "text",
           "nullable": true
+        },
+        "chatProviderId": {
+          "kind": "text",
+          "nullable": true,
+          "nullEncoding": "column"
         },
         "ttsConfigId": {
           "kind": "text",
@@ -664,6 +669,14 @@
         "migrationSource": {
           "kind": "text",
           "optional": true
+        }
+      }
+    },
+    "schema_migrations": {
+      "kind": "object",
+      "fields": {
+        "version": {
+          "kind": "integer"
         }
       }
     },

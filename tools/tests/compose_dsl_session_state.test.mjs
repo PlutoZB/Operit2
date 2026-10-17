@@ -364,3 +364,45 @@ test('pipeline diagnostics are opt-in and preserve the production retained respo
   assert.ok(profiledLogs.some(line => line.includes('stage=js-send-inclusive')));
   assert.equal(Object.hasOwn(second, 'metrics'), false);
 });
+
+/** Owns cancellable asynchronous work using the actual compiled Compose lifecycle. */
+test('effects clean up on dependency change and execution-context replacement', async () => {
+  const s = session(`module.exports.default = function(ctx) {
+    const [identity, setIdentity] = ctx.useState('identity', 'first');
+    ctx.useEffect('subscription', () => {
+      globalThis.effectEvents.push('open:' + identity);
+      return () => { globalThis.effectEvents.push('close:' + identity); };
+    }, [identity]);
+    return ctx.UI.Text({text: identity, change: setIdentity});
+  };`);
+  s.context.effectEvents = [];
+  s.render();
+  s.render();
+  assert.deepEqual(Array.from(s.context.effectEvents), ['open:first']);
+  await s.action('change', 'second');
+  assert.deepEqual(Array.from(s.context.effectEvents), ['open:first', 'close:first', 'open:second']);
+  s.render({executionContextKey:'page-b'});
+  assert.deepEqual(Array.from(s.context.effectEvents), ['open:first', 'close:first', 'open:second', 'close:second', 'open:first']);
+});
+
+/** Releases effects removed by a compiled conditional branch while preserving other owners. */
+test('effects in removed composition branches release their subscriptions', async () => {
+  const s = session(`module.exports.default = function(ctx) {
+    const [visible, setVisible] = ctx.useState('visible', true);
+    let content = [];
+    if (visible) {
+      ctx.useEffect('branch', () => {
+        globalThis.effectEvents.push('open');
+        return () => { globalThis.effectEvents.push('close'); };
+      }, []);
+      content = [ctx.UI.Text({text:'visible'})];
+    }
+    return ctx.UI.Column({toggle: () => setVisible(!visible)}, content);
+  };`);
+  s.context.effectEvents = [];
+  s.render();
+  await s.action('toggle');
+  assert.deepEqual(Array.from(s.context.effectEvents), ['open', 'close']);
+  await s.action('toggle');
+  assert.deepEqual(Array.from(s.context.effectEvents), ['open', 'close', 'open']);
+});

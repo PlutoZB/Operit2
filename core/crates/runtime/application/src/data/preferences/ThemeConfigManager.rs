@@ -1,3 +1,6 @@
+use operit_store::PreferenceMerge::{
+    PreferenceMergeCatalog, PreferenceMergeReference, PreferenceMergeStore,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -16,7 +19,7 @@ use super::ThemePreferenceSnapshot::{
     validateThemePreferenceSnapshot, writeThemePreferenceSnapshot,
 };
 
-const THEME_CONFIGS_KEY: &str = "theme_configs";
+pub(super) const THEME_CONFIG_PREFIX: &str = "theme_config_";
 const ACTIVE_THEME_CONFIG_ID_KEY: &str = "active_theme_config_id";
 
 /// Stores one independent named appearance configuration with a complete Flutter snapshot.
@@ -45,6 +48,47 @@ pub struct ThemeConfigManager {
 }
 
 impl ThemeConfigManager {
+    /// Declares this owner's entity identity, name and content metadata for Core merging.
+    pub(crate) fn spaceMergeCatalog() -> PreferenceMergeCatalog {
+        PreferenceMergeCatalog {
+            store: PreferenceMergeStore {
+                path: operit_util::RuntimeStorageLayout::USER_PREFERENCES_PATH,
+                encrypted: false,
+            },
+            keyPrefix: THEME_CONFIG_PREFIX,
+            keySuffix: "",
+            identityField: "id",
+            nameField: "name",
+            ignoredFields: &["createdAt", "updatedAt"],
+            retiredKeys: &[],
+        }
+    }
+
+    /// Declares the current selection as a scalar reference into this owner's catalog.
+    pub(crate) fn spaceMergeReference() -> PreferenceMergeReference {
+        let catalog = Self::spaceMergeCatalog();
+        PreferenceMergeReference {
+            store: catalog.store,
+            key: ACTIVE_THEME_CONFIG_ID_KEY,
+            path: &[],
+            target: catalog.store.path,
+        }
+    }
+
+    /// Declares how the active saved appearance materializes ordinary owner preferences.
+    pub(crate) fn spaceMergeProjection() -> operit_store::PreferenceMerge::PreferenceMergeProjection
+    {
+        operit_store::PreferenceMerge::PreferenceMergeProjection {
+            store: Self::spaceMergeCatalog().store,
+            selectionKey: ACTIVE_THEME_CONFIG_ID_KEY,
+            sourceField: "snapshot",
+            fields: super::ThemePreferenceSnapshot::snapshotFields()
+                .map(|field| (field.json_key, field.preference_key))
+                .collect(),
+            retiredKeys: &["use_system_theme"],
+        }
+    }
+
     /// Opens ordinary user preferences through the owning runtime's actual storage host.
     pub fn new(storageHost: Arc<dyn RuntimeStorageHost>) -> Self {
         Self {
@@ -316,12 +360,22 @@ fn commitAppearance(
 
 /// Decodes saved configurations independently of the ordinary appearance being replaced.
 fn readCatalogState(preferences: &Preferences) -> Result<ThemeConfigState, PreferencesDataStoreError> {
-    // Absent new-domain keys mean an untouched, genuinely empty catalog and custom appearance.
-    // Malformed stored values never enter these initial-state branches.
-    let configs = match preferences.get(&stringPreferencesKey(THEME_CONFIGS_KEY)) {
-        Some(value) => serde_json::from_value::<Vec<ThemeConfig>>(value.clone())?,
-        None => Vec::new(),
-    };
+    // Each identity has its own synchronized record; malformed records remain errors.
+    let mut configs = Vec::new();
+    for (key, value) in preferences.iterEntries() {
+        if let Some(id) = key.strip_prefix(THEME_CONFIG_PREFIX) {
+            let config: ThemeConfig = serde_json::from_value(value.clone())?;
+            if config.id != id {
+                return Err(PreferencesDataStoreError::Message(format!(
+                    "Theme record identity mismatch: {key}"
+                )));
+            }
+            configs.push(config);
+        }
+    }
+    configs.sort_by(|left, right| {
+        left.createdAt.cmp(&right.createdAt).then(left.id.cmp(&right.id))
+    });
     let activeThemeConfigId =
         match preferences.get(&stringPreferencesKey(ACTIVE_THEME_CONFIG_ID_KEY)) {
             Some(value) => serde_json::from_value::<Option<String>>(value.clone())?,
@@ -353,10 +407,22 @@ fn writeState(
     if let Some(id) = &state.activeThemeConfigId {
         assertThemePreferenceSnapshot(preferences, &findConfig(state, id)?.snapshot)?;
     }
-    preferences.set(
-        &stringPreferencesKey(THEME_CONFIGS_KEY),
-        serde_json::to_value(&state.configs)?,
-    );
+    let ids = state.configs.iter().map(|config| config.id.as_str()).collect::<BTreeSet<_>>();
+    let keys = preferences.iterEntries()
+        .filter_map(|(key, _)| {
+            let id = key.strip_prefix(THEME_CONFIG_PREFIX)?;
+            (!ids.contains(id)).then(|| key.to_owned())
+        })
+        .collect::<Vec<_>>();
+    for key in keys {
+        preferences.remove(&stringPreferencesKey(&key));
+    }
+    for config in &state.configs {
+        preferences.set(
+            &stringPreferencesKey(&format!("{THEME_CONFIG_PREFIX}{}", config.id)),
+            serde_json::to_value(config)?,
+        );
+    }
     preferences.set(
         &stringPreferencesKey(ACTIVE_THEME_CONFIG_ID_KEY),
         serde_json::to_value(&state.activeThemeConfigId)?,
@@ -383,7 +449,7 @@ fn validateState(state: &ThemeConfigState) -> Result<(), PreferencesDataStoreErr
 }
 
 /// Validates the complete saved snapshot and host-assigned record metadata.
-fn validateConfig(config: &ThemeConfig) -> Result<(), PreferencesDataStoreError> {
+pub(super) fn validateConfig(config: &ThemeConfig) -> Result<(), PreferencesDataStoreError> {
     validateIdentifier(&config.id)?;
     if config.name.trim().is_empty() {
         return Err(PreferencesDataStoreError::Message(

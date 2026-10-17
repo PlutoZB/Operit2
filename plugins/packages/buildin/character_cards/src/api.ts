@@ -116,7 +116,7 @@ export type ChatConfigurationResult = ChatConfigurationDisplayResult | ChatConfi
 export interface CharacterRecord {
   id: string; name: string; description: string; characterSetting: string; openingStatement: string;
   otherContentChat: string; otherContentVoice: string; avatarUri: string | null; attachedTagIds: string[];
-  advancedCustomPrompt: string; marks: string; chatModelBindingMode: string; chatModelId: string | null;
+  advancedCustomPrompt: string; marks: string; chatModelBindingMode: string; chatModelId: string | null; chatProviderId: string | null;
   ttsConfigId: string | null; themeConfigId: string | null; memoryBindingMode: string; sharedMemoryId: string | null;
   sharedMemoryMounts: { sharedMemoryId: string; readable: boolean; writable: boolean }[];
   toolAccessConfig: { enabled: boolean; allowedBuiltinTools: string[]; allowedPackages: string[]; allowedSkills: string[]; allowedMcpServers: string[] };

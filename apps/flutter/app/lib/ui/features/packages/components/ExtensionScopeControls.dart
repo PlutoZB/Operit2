@@ -89,14 +89,25 @@ class ExtensionScopeAction extends StatelessWidget {
     required this.scope,
     required this.onMove,
     this.localMcp = false,
+    this.requiredScope,
   });
   final String scope;
   final VoidCallback onMove;
   final bool localMcp;
+  final String? requiredScope;
 
   /// Builds the portable move button or the immutable location label.
   @override
   Widget build(BuildContext context) {
+    if (requiredScope != null) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        child: Text(
+          '仅${extensionScopeLabel(requiredScope!)}',
+          style: Theme.of(context).textTheme.labelSmall,
+        ),
+      );
+    }
     if (scope == 'builtin' || localMcp) {
       return Padding(
         padding: const EdgeInsets.symmetric(horizontal: 8),

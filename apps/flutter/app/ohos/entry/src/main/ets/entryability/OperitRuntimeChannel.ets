@@ -242,6 +242,8 @@ interface BleCharacteristicPayload {
 }
 
 interface RuntimeNativeModule {
+  /** Executes the independent offline storage-maintenance ABI. */
+  dataRescue(defaultRuntimeRoot: string, request: string): Promise<string>;
   create(runtimeRoot: string, workspaceRoot: string, systemLanguageCode: string): bigint;
   /** Reads the client bootstrap record before the native Runtime is created. */
   runtimeBootstrapRead(defaultRuntimeRoot: string): string;
@@ -377,6 +379,18 @@ export class OperitRuntimeChannel {
         case 'localRuntimeStorageDefaults':
           result.success(this.defaultStoragePaths());
           return;
+        case 'dataRescue': {
+          const encoded = this.requiredStringArg(call, 'dataRescue');
+          const command = JSON.parse(encoded) as Record<string, string>;
+          if (command['operation'] === 'launchMode') {
+            result.success(JSON.stringify({ ok: true, value: { rescue: AppStorage.get<boolean>('operitDataRescueRequested') === true } }));
+          } else {
+            nativeBridge.dataRescue(this.defaultStoragePaths().runtimeRoot, encoded)
+              .then((response: string): void => { result.success(response); })
+              .catch((error: Object): void => { result.error('DATA_RESCUE_ERROR', `${error}`, null); });
+          }
+          return;
+        }
         case 'runtimeBootstrapRead':
           result.success(nativeBridge.runtimeBootstrapRead(this.defaultStoragePaths().runtimeRoot));
           return;

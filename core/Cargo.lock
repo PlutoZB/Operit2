@@ -487,6 +487,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "constant_time_eq"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c74b8349d32d297c9134b8c88677813a227df8f779daa29bfc29c183fe3dca6"
+
+[[package]]
 name = "convert_case"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -648,6 +654,7 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
+ "subtle",
 ]
 
 [[package]]
@@ -1045,6 +1052,15 @@ name = "hermit-abi"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
+
+[[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest",
+]
 
 [[package]]
 name = "home"
@@ -1884,6 +1900,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "operit-data-rescue"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "operit-host-api",
+ "serde",
+ "serde_json",
+ "sha2",
+ "uuid",
+ "zip",
+]
+
+[[package]]
 name = "operit-edge-contract"
 version = "0.1.0"
 dependencies = [
@@ -2116,6 +2145,7 @@ dependencies = [
  "json5",
  "operit-host-api",
  "operit-plugin-sdk-codegen",
+ "operit-plugin-sdk-macros",
  "operit-plugin-theme",
  "regex",
  "rquickjs",
@@ -2159,6 +2189,14 @@ dependencies = [
  "operit-host-api",
  "operit-link",
  "operit-plugin-sdk-ipc",
+]
+
+[[package]]
+name = "operit-plugin-sdk-macros"
+version = "2.0.0-preview.15"
+dependencies = [
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2266,6 +2304,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "wasm-bindgen-futures",
+ "zip",
 ]
 
 [[package]]
@@ -2413,6 +2452,7 @@ dependencies = [
  "operit-plugin-sdk",
  "operit-plugin-sdk-codegen",
  "operit-route-macros",
+ "operit-rslink-runtime",
  "operit-store",
  "operit-util",
  "quickjs-wasm-rs",
@@ -2444,6 +2484,16 @@ dependencies = [
  "serde_json",
  "tokio",
  "zip",
+]
+
+[[package]]
+name = "pbkdf2"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
+dependencies = [
+ "digest",
+ "hmac",
 ]
 
 [[package]]
@@ -4563,6 +4613,20 @@ name = "zeroize"
 version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
 
 [[package]]
 name = "zerotrie"
@@ -4605,14 +4669,21 @@ version = "2.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fabe6324e908f85a1c52063ce7aa26b68dcb7eb6dbc83a2d148403c9bc3eba50"
 dependencies = [
+ "aes",
  "arbitrary",
+ "constant_time_eq",
  "crc32fast",
  "crossbeam-utils",
  "displaydoc",
  "flate2",
+ "getrandom 0.3.4",
+ "hmac",
  "indexmap",
  "memchr",
+ "pbkdf2",
+ "sha1",
  "thiserror 2.0.18",
+ "zeroize",
  "zopfli",
 ]
 

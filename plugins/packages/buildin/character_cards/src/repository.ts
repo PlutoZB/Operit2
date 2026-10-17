@@ -117,7 +117,7 @@ export class RepositorySession implements CharacterRepository {
   async createCharacter(card: Card): Promise<Card> {
     assertCard(card); const name = requireName(card.name, "character name"); uniqueName(this.state.cards, name, "");
     if (card.isDefault) throw new Error("Only the installed product default can be a default character");
-    const now = Date.now(), saved = { ...copy(card), id: "character-" + this.allocate(), name, createdAt: now, updatedAt: now };
+    const now = Date.now(), saved = { ...copy(card), id: uuid(), name, createdAt: now, updatedAt: now };
     this.state.cards.push(saved); this.addSpace("character:" + saved.id); return copy(saved);
   }
   /** Writes the full editable character while preserving its stable creation identity. */
@@ -171,7 +171,7 @@ export class RepositorySession implements CharacterRepository {
   /** Stores a complete newly created group. */
   async createGroup(group: Group): Promise<Group> {
     assertGroup(group); const name = requireName(group.name, "group name"); uniqueName(this.state.groups, name, "");
-    const now = Date.now(), saved = { ...copy(group), id: "group-" + this.allocate(), name, createdAt: now, updatedAt: now };
+    const now = Date.now(), saved = { ...copy(group), id: uuid(), name, createdAt: now, updatedAt: now };
     this.state.groups.push(saved); return copy(saved);
   }
   /** Writes every supplied group field. */
@@ -193,7 +193,7 @@ export class RepositorySession implements CharacterRepository {
   /** Writes a new tag with all editable values. */
   async createTag(values: TagValues): Promise<Tag> {
     assertTagValues(values); const name = requireName(values.name, "tag name"); uniqueName(this.state.tags, name, "");
-    const now = Date.now(), saved = { ...copy(values), name, id: "tag-" + this.allocate(), createdAt: now, updatedAt: now };
+    const now = Date.now(), saved = { ...copy(values), name, id: uuid(), createdAt: now, updatedAt: now };
     this.state.tags.push(saved); return copy(saved);
   }
   /** Writes a full existing tag. */
@@ -219,7 +219,7 @@ export class RepositorySession implements CharacterRepository {
   /** Creates the shared library and all of its real initial settings. */
   async createStore(name: string): Promise<Store> {
     name = requireName(name, "library name"); uniqueName(this.state.stores, name, ""); const now = Date.now();
-    const store = { id: "shared-" + this.allocate(), name, createdAt: now, updatedAt: now };
+    const store = { id: uuid(), name, createdAt: now, updatedAt: now };
     this.state.stores.push(store); this.addSpace("shared:" + store.id); return copy(store);
   }
   /** Renames one stored shared library. */

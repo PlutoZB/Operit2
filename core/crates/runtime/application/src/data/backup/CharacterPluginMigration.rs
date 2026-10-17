@@ -77,6 +77,7 @@ impl CharacterPluginWriter {
                 StorageRequest::Open {
                     path: format!("{directory}/characters.sqlite"),
                     kind: StorageKind::Objects,
+                    merge: None,
                 },
                 &device_id,
             )

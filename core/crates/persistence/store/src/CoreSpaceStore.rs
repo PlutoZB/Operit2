@@ -2309,6 +2309,7 @@ mod tests {
         assert_eq!(*host.files.lock().unwrap(), before);
     }
 
+    /// Keeps business clocks separate from authority projection and checks explicit storage revocation.
     #[test]
     fn authority_projection_does_not_skip_older_business_operations_after_storage_grant() {
         let source = Arc::new(MemoryStorageHost::default());
@@ -2359,7 +2360,12 @@ mod tests {
             "a storage member cannot forge an unknown command attributed to the administrator");
         assert_eq!(receiver.readBytes("runtime/link_access/space_policy.preferences.json").unwrap(), before);
         receiverPolicy.projectPeerControlOperations(&admin, std::slice::from_ref(&next)).unwrap();
-        let revoke = sourcePolicy.clearIdentity("projection-member".into()).unwrap();
+        let reset = sourcePolicy.clearIdentity("projection-member".into()).unwrap();
+        receiverPolicy.projectPeerControlOperations(&admin, std::slice::from_ref(&reset)).unwrap();
+        assert!(receiverPolicy.nodeHasCapability("projection-member", "storage.provide", None).unwrap());
+        let revoke = sourcePolicy.setIdentity(NetworkControlIdentityAssignment {
+            nodeId: "projection-member".into(), roleId: "edge".into(),
+        }).unwrap();
         receiverPolicy.projectPeerControlOperations(&admin, std::slice::from_ref(&revoke)).unwrap();
         assert!(!receiverPolicy.nodeHasCapability("projection-member", "storage.provide", None).unwrap());
         sourcePolicy.defineRole(NetworkControlRole { roleId: "limited-manager".into(), displayName: "Limited manager".into(),
@@ -2374,8 +2380,9 @@ mod tests {
         assert_eq!(SyncOperationStore::new(receiver, RUNTIME_SYNC_DIR_PATH).localClock().unwrap().sequenceFor(&admin), 0);
     }
 
+    /// Gives ordinary admitted members the declared shared storage capability.
     #[test]
-    fn network_control_admission_assigns_the_default_user_capabilities_without_storage() {
+    fn network_control_admission_assigns_the_default_user_capabilities_with_storage() {
         let host = Arc::new(MemoryStorageHost::default());
         let spaceStore = CoreSpaceStore::new(host.clone());
         initializeTestDeviceProfile(&spaceStore);
@@ -2392,10 +2399,10 @@ mod tests {
         assert!(control
             .nodeHasCapability("peer-member", "network.devices.view", None)
             .expect("default user device view capability must materialize"));
-        assert!(!control
+        assert!(control
             .nodeHasCapability("peer-member", "storage.provide", None)
             .expect("default user storage capability must be evaluated"),
-            "ordinary membership must not grant Space storage by default");
+            "ordinary membership must grant its declared Space storage capability");
         assert!(control
             .nodeHasCapability("peer-member", "network.relay", None)
             .expect("default user relay capability must materialize"));

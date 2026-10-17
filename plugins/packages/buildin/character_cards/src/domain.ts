@@ -118,7 +118,7 @@ const characterFields: Fields = {
   name: optional(nonblank), description: optional(text), characterSetting: optional(text), openingStatement: optional(text),
   otherContentChat: optional(text), otherContentVoice: optional(text), avatarUri: optional(nullable(text)), attachedTagIds: optional(identifiers),
   advancedCustomPrompt: optional(text), marks: optional(text), chatModelBindingMode: optional(enumeration("FOLLOW_GLOBAL", "FIXED_MODEL")),
-  chatModelId: optional(nullable(text)), ttsConfigId: optional(nullable(text)), themeConfigId: optional(nullable(text)), memoryBindingMode: optional(enumeration("CHARACTER", "SHARED")),
+  chatModelId: optional(nullable(text)), chatProviderId: optional(nullable(text)), ttsConfigId: optional(nullable(text)), themeConfigId: optional(nullable(text)), memoryBindingMode: optional(enumeration("CHARACTER", "SHARED")),
   sharedMemoryId: optional(nullable(text)), sharedMemoryMounts: optional(array(mount)), toolAccessConfig: optional(toolAccess),
   isDefault: optional(boolean), createdAt: optional(integer), updatedAt: optional(integer),
 };
@@ -320,9 +320,10 @@ async function chatParticipant(
     case "FOLLOW_GLOBAL": modelBinding = { ...request.defaultModelBinding }; break;
     case "FIXED_MODEL": {
       nonblank(card.chatModelId, "profile.fixedModelId");
+      nonblank(card.chatProviderId, "Fixed model provider must be explicitly selected");
       const candidates = directory.models.filter(
-        /** Resolves the legacy record's deliberately provider-free model selection exactly. */
-        model => model.modelId === card.chatModelId,
+        /** Resolves the exact provider-scoped model selected by the user. */
+        model => model.providerId === card.chatProviderId && model.modelId === card.chatModelId,
       );
       if (candidates.length !== 1) throw new Error(
         candidates.length === 0 ? "Fixed model unavailable: " + card.chatModelId : "Fixed model ambiguous: " + card.chatModelId,

@@ -212,89 +212,92 @@ async function processCandidates(ownerKey: string, candidates: MemoryCandidate[]
   }
 }
 
-/** Owns runtime scheduling only; every durable candidate, plan and result remains in the shared file repository. */
+interface MemoryJobReport {
+  owners: number;
+  rebuildWindows: number;
+  candidateBatches: number;
+}
+
+/** Coalesces interval notifications; durable job claims remain in repository transactions. */
 export class MemoryJobRunner {
-  private busy = false;
-  private readonly waiters: (() => void)[] = [];
-  /** Receives the same sole repository owner used by UI, commands and public APIs. */
+  private running: Promise<MemoryJobReport> | null = null;
+
   constructor(private readonly owner: CharacterRepositoryOwner) {}
-  /** Serializes genuine interval invocations without launching overlapping extraction batches. */
-  private async acquire(): Promise<void> {
-    if (!this.busy) { this.busy = true; return; }
-    await new Promise<void>(
-      /** Parks only this invocation until the previous interval work completes. */
-      resolve => this.waiters.push(resolve),
-    );
+
+  /** Shares the active pass and its failure instead of queuing obsolete timer notifications. */
+  tick(): Promise<MemoryJobReport> {
+    if (this.running === null) {
+      this.running = this.runTick().finally(() => {
+        this.running = null;
+      });
+    }
+    return this.running;
   }
-  /** Releases one waiting interval while retaining the same runtime owner. */
-  private release(): void { const next = this.waiters.shift(); if (next === undefined) this.busy = false; else next(); }
-  /** Advances actual rebuild windows and due pending candidates through existing interval hooks. */
-  async tick(): Promise<{ owners: number; rebuildWindows: number; candidateBatches: number }> {
-    await this.acquire();
-    try {
-      const keys = await this.owner.run(
-        /** Enumerates only genuine initialized memory spaces. */
-        repository => repository.listMemoryOwnerKeys(),
-      ), report = { owners: keys.length, rebuildWindows: 0, candidateBatches: 0 };
-      for (const ownerKey of keys) {
-        const taskId = await this.owner.run(
-          /** Reads a persisted runnable rebuild identity without fabricating a job. */
-          async repository => {
-            const space = await repository.readMemorySpace(ownerKey);
-            return space.rebuildTask !== null && (space.rebuildProgress.status === "preparing" || space.rebuildProgress.status === "running") ? space.rebuildTask.id : null;
-          },
-        );
-        if (taskId !== null) { await processRebuildWindow(ownerKey, taskId, this.owner); report.rebuildWindows += 1; }
-        const batches = await this.owner.run(
-          /** Claims only due pending records; failed attempts are never automatically retried. */
-          async repository => {
-            if (!(await repository.readGlobalMemoryPreferences()).autoUpdateEnabled) return [] as MemoryCandidate[][];
-            const space = await repository.readMemorySpace(ownerKey), now = Date.now();
-            if (space.settings.autoSaveIntervalMinutes === 0 || now < space.settings.nextAutoSaveRunAtMs) return [] as MemoryCandidate[][];
-            const pending = space.candidates.filter(
-              /** Selects genuinely pending records, not terminal failures. */
-              candidate => candidate.status === "pending",
-            );
-            const batches: MemoryCandidate[][] = [];
-            if (pending.length >= 5) {
-              const grouped = new Map<string, MemoryCandidate[]>();
-              for (const candidate of pending) { const list = grouped.get(candidate.chatId); if (list === undefined) grouped.set(candidate.chatId, [candidate]); else list.push(candidate); }
-              for (const records of grouped.values()) {
-                const capped = records.slice(0, 20);
-                for (const sourceType of ["selected_user_message", "reply_finalized_auto"] as const) {
-                  const batch = capped.filter(
-                    /** Preserves the original selected/automatic source partition. */
-                    candidate => candidate.sourceType === sourceType,
-                  );
-                  if (batch.length !== 0) batches.push(batch);
-                }
+
+  /** Advances persisted rebuild windows and due candidates once. */
+  private async runTick(): Promise<MemoryJobReport> {
+    const keys = await this.owner.run(
+      /** Enumerates only genuine initialized memory spaces. */
+      repository => repository.listMemoryOwnerKeys(),
+    ), report = { owners: keys.length, rebuildWindows: 0, candidateBatches: 0 };
+    for (const ownerKey of keys) {
+      const taskId = await this.owner.run(
+        /** Reads a persisted runnable rebuild identity without fabricating a job. */
+        async repository => {
+          const space = await repository.readMemorySpace(ownerKey);
+          return space.rebuildTask !== null && (space.rebuildProgress.status === "preparing" || space.rebuildProgress.status === "running") ? space.rebuildTask.id : null;
+        },
+      );
+      if (taskId !== null) { await processRebuildWindow(ownerKey, taskId, this.owner); report.rebuildWindows += 1; }
+      const batches = await this.owner.run(
+        /** Claims only due pending records; failed attempts are never automatically retried. */
+        async repository => {
+          if (!(await repository.readGlobalMemoryPreferences()).autoUpdateEnabled) return [] as MemoryCandidate[][];
+          const space = await repository.readMemorySpace(ownerKey), now = Date.now();
+          if (space.settings.autoSaveIntervalMinutes === 0 || now < space.settings.nextAutoSaveRunAtMs) return [] as MemoryCandidate[][];
+          const pending = space.candidates.filter(
+            /** Selects genuinely pending records, not terminal failures. */
+            candidate => candidate.status === "pending",
+          );
+          const batches: MemoryCandidate[][] = [];
+          if (pending.length >= 5) {
+            const grouped = new Map<string, MemoryCandidate[]>();
+            for (const candidate of pending) { const list = grouped.get(candidate.chatId); if (list === undefined) grouped.set(candidate.chatId, [candidate]); else list.push(candidate); }
+            for (const records of grouped.values()) {
+              const capped = records.slice(0, 20);
+              for (const sourceType of ["selected_user_message", "reply_finalized_auto"] as const) {
+                const batch = capped.filter(
+                  /** Preserves the original selected/automatic source partition. */
+                  candidate => candidate.sourceType === sourceType,
+                );
+                if (batch.length !== 0) batches.push(batch);
               }
             }
-            space.settings.nextAutoSaveRunAtMs = now + space.settings.autoSaveIntervalMinutes * 60000;
-            await repository.writeMemorySpace(ownerKey, space); return batches;
+          }
+          space.settings.nextAutoSaveRunAtMs = now + space.settings.autoSaveIntervalMinutes * 60000;
+          await repository.writeMemorySpace(ownerKey, space); return batches;
+        },
+      );
+      for (const batch of batches) {
+        const claimed = await this.owner.run(
+          /** Claims only the next actual batch so a failure leaves later sources genuinely pending. */
+          async repository => {
+            if (!(await repository.readGlobalMemoryPreferences()).autoUpdateEnabled) return false;
+            const space = await repository.readMemorySpace(ownerKey), ids = new Set<string>();
+            for (const candidate of batch) ids.add(candidate.id);
+            let count = 0;
+            for (const candidate of space.candidates) if (ids.has(candidate.id)) {
+              if (candidate.status !== "pending") throw new Error("Candidate is no longer pending: " + candidate.id);
+              candidate.status = "processing"; candidate.attemptCount += 1; candidate.updatedAt = Date.now(); count += 1;
+            }
+            if (count !== batch.length) throw new Error("A selected candidate no longer exists");
+            await repository.writeMemorySpace(ownerKey, space); return true;
           },
         );
-        for (const batch of batches) {
-          const claimed = await this.owner.run(
-            /** Claims only the next actual batch so a failure leaves later sources genuinely pending. */
-            async repository => {
-              if (!(await repository.readGlobalMemoryPreferences()).autoUpdateEnabled) return false;
-              const space = await repository.readMemorySpace(ownerKey), ids = new Set<string>();
-              for (const candidate of batch) ids.add(candidate.id);
-              let count = 0;
-              for (const candidate of space.candidates) if (ids.has(candidate.id)) {
-                if (candidate.status !== "pending") throw new Error("Candidate is no longer pending: " + candidate.id);
-                candidate.status = "processing"; candidate.attemptCount += 1; candidate.updatedAt = Date.now(); count += 1;
-              }
-              if (count !== batch.length) throw new Error("A selected candidate no longer exists");
-              await repository.writeMemorySpace(ownerKey, space); return true;
-            },
-          );
-          if (!claimed) break;
-          await processCandidates(ownerKey, batch, this.owner); report.candidateBatches += 1;
-        }
+        if (!claimed) break;
+        await processCandidates(ownerKey, batch, this.owner); report.candidateBatches += 1;
       }
-      return report;
-    } finally { this.release(); }
+    }
+    return report;
   }
 }

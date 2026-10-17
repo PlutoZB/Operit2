@@ -174,6 +174,7 @@ var characterFields = {
   marks: optional(text),
   chatModelBindingMode: optional(enumeration("FOLLOW_GLOBAL", "FIXED_MODEL")),
   chatModelId: optional(nullable(text)),
+  chatProviderId: optional(nullable(text)),
   ttsConfigId: optional(nullable(text)),
   themeConfigId: optional(nullable(text)),
   memoryBindingMode: optional(enumeration("CHARACTER", "SHARED")),
@@ -369,6 +370,11 @@ var collections = {
       chatModelId: {
         kind: "text",
         nullable: true
+      },
+      chatProviderId: {
+        kind: "text",
+        nullable: true,
+        nullEncoding: "column"
       },
       ttsConfigId: {
         kind: "text",
@@ -989,6 +995,14 @@ var collections = {
       }
     }
   },
+  schema_migrations: {
+    kind: "object",
+    fields: {
+      version: {
+        kind: "integer"
+      }
+    }
+  },
   chat_bindings: {
     kind: "object",
     fields: {
@@ -1212,6 +1226,14 @@ var schemas = collections;
 function field(path) {
   return path === "" ? "_value" : path;
 }
+function usesPresenceColumn(node) {
+  if (node.nullEncoding === "column") {
+    if (!node.nullable || node.optional || node.kind === "object" || node.kind === "array" || node.kind === "map")
+      throw new Error("Column null encoding requires a required nullable scalar");
+    return false;
+  }
+  return node.optional === true || node.nullable === true;
+}
 function layout(name, node, child = false) {
   const columns = [
     { name: "_key", affinity: "text", nullable: false },
@@ -1226,7 +1248,7 @@ function layout(name, node, child = false) {
     );
   const children = [];
   function visit(schema, path, absent) {
-    if (schema.optional || schema.nullable)
+    if (usesPresenceColumn(schema))
       columns.push({
         name: field(path) + "__state",
         affinity: "integer",
@@ -1258,6 +1280,112 @@ function layout(name, node, child = false) {
 var layouts = Object.fromEntries(
   Object.entries(schemas).map(([name, node]) => [name, layout(name, node)])
 );
+var spaceMergeDescriptor = {
+  version: 3,
+  maxEntities: 6,
+  maxReferences: 48,
+  entities: [
+    {
+      collection: "cards",
+      identityColumn: "id",
+      nameColumn: "name",
+      ignoredColumns: ["_revision", "id", "createdAt", "updatedAt"],
+      keyEncoding: "length_prefixed_root",
+      matchMode: "content",
+      keyReferences: [],
+      childCollections: tables(layouts["cards"]).slice(1).map((child) => child.name),
+      references: [
+        { collection: "cards", column: "chatProviderId", target: { kind: "preference", path: "runtime/config/preferences/model_configs.preferences.json" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "cards", column: "ttsConfigId", target: { kind: "preference", path: "runtime/config/preferences/tts_configs.preferences.json" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "cards", column: "themeConfigId", target: { kind: "preference", path: "runtime/config/preferences/user_preferences.preferences.json" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "cards", column: "sharedMemoryId", target: { kind: "collection", collection: "stores" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "cards_attachedTagIds", column: "_value", target: { kind: "collection", collection: "tags" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "cards_sharedMemoryMounts", column: "sharedMemoryId", target: { kind: "collection", collection: "stores" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" }
+      ]
+    },
+    {
+      collection: "groups",
+      identityColumn: "id",
+      nameColumn: "name",
+      ignoredColumns: ["_revision", "id", "createdAt", "updatedAt"],
+      keyEncoding: "length_prefixed_root",
+      matchMode: "content",
+      keyReferences: [],
+      childCollections: tables(layouts["groups"]).slice(1).map((child) => child.name),
+      references: [
+        { collection: "groups", column: "themeConfigId", target: { kind: "preference", path: "runtime/config/preferences/user_preferences.preferences.json" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "groups_members", column: "characterCardId", target: { kind: "collection", collection: "cards" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" }
+      ]
+    },
+    {
+      collection: "tags",
+      identityColumn: "id",
+      nameColumn: "name",
+      ignoredColumns: ["_revision", "id", "createdAt", "updatedAt"],
+      keyEncoding: "length_prefixed_root",
+      matchMode: "content",
+      keyReferences: [],
+      childCollections: [],
+      references: []
+    },
+    {
+      collection: "stores",
+      identityColumn: "id",
+      nameColumn: "name",
+      ignoredColumns: ["_revision", "id", "createdAt", "updatedAt"],
+      keyEncoding: "length_prefixed_root",
+      matchMode: "content",
+      keyReferences: [],
+      childCollections: [],
+      references: []
+    },
+    {
+      collection: "owners",
+      identityColumn: "ownerKey",
+      nameColumn: null,
+      ignoredColumns: ["_revision"],
+      keyEncoding: "slash_root",
+      matchMode: "identity",
+      keyReferences: [
+        { collection: "cards", prefix: "character:" },
+        { collection: "stores", prefix: "shared:" }
+      ],
+      childCollections: ["memories", "links", "chunks", "candidates", "embeddings"],
+      references: [
+        { collection: "owners", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "owners", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "owners", column: "userDocumentPath", target: { kind: "collection", collection: "owners" }, keyPrefix: "owners/", keySuffix: "/USER.md", valueEncoding: "uri_component" },
+        { collection: "memories", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "memories", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "links", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "links", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "chunks", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "chunks", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "candidates", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "candidates", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "embeddings", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "embeddings", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" }
+      ]
+    },
+    {
+      collection: "meta",
+      identityColumn: "_key",
+      nameColumn: null,
+      ignoredColumns: ["_revision"],
+      keyEncoding: "length_prefixed_root",
+      matchMode: "identity",
+      keyReferences: [],
+      childCollections: [],
+      references: [
+        { collection: "meta", column: "active__CharacterCard__id", target: { kind: "collection", collection: "cards" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "meta", column: "active__CharacterGroup__id", target: { kind: "collection", collection: "groups" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" }
+      ]
+    }
+  ]
+};
+function tables(root) {
+  return [root, ...root.children.flatMap(tables)];
+}
 
 // src/definition.ts
 var definition = { id: "com.operit.character_cards", title: "\u89D2\u8272\u5361", icon: "Badge", order: 150 };
@@ -1365,12 +1493,12 @@ function renderMemoryMenu(ctx) {
     });
   }
   function icon(name, color = colors.onSurfaceVariant) {
-    return OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:40759",[name,color],()=>[{ name, size: 16, tint: color }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs));
+    return OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:47827",[name,color],()=>[{ name, size: 16, tint: color }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs));
   }
   function switchRow(key, name, title) {
     if (preferences === null) throw new Error("Memory preferences are not loaded");
     const checked = preferences[key];
-    return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:40983",[{
+    return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:48051",[{
       key: "memory-" + key,
       fillMaxWidth: true,
       paddingHorizontal: 12,
@@ -1379,15 +1507,15 @@ function renderMemoryMenu(ctx) {
       onClick: () => toggle(key)
     },[
       icon(name, checked ? colors.primary : colors.onSurfaceVariant),
-      OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:41290",[],()=>[{ width: 12 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs)),
-      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:41326",[{ text: title, style: "bodySmall", color: colors.onSurface, maxLines: 1, overflow: "ellipsis", weight: 1 }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
-      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:41453",[{ text: checked ? "\u5F00" : "\u5173", style: "bodySmall", color: colors.primary, fontWeight: "600" }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
-      OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:41575",[],()=>[{ width: 8 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs)),
-      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:41610",[{ checked, width: 40, height: 28, onCheckedChange: () => toggle(key) }],(...__operitArgs)=>ctx.UI.Switch(...__operitArgs))
+      OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:48358",[],()=>[{ width: 12 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs)),
+      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:48394",[{ text: title, style: "bodySmall", color: colors.onSurface, maxLines: 1, overflow: "ellipsis", weight: 1 }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
+      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:48521",[{ text: checked ? "\u5F00" : "\u5173", style: "bodySmall", color: colors.primary, fontWeight: "600" }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
+      OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:48643",[],()=>[{ width: 8 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs)),
+      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:48678",[{ checked, width: 40, height: 28, onCheckedChange: () => toggle(key) }],(...__operitArgs)=>ctx.UI.Switch(...__operitArgs))
     ]],(...__operitArgs)=>ctx.UI.Row(...__operitArgs));
   }
-  if (preferences === null) return OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:41743",[load],()=>[{ key: "memory-menu-loading", onLoad: load }],(...__operitArgs)=>ctx.UI.Box(...__operitArgs));
-  const children = [OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:41821",[{
+  if (preferences === null) return OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:48811",[load],()=>[{ key: "memory-menu-loading", onLoad: load }],(...__operitArgs)=>ctx.UI.Box(...__operitArgs));
+  const children = [OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:48889",[{
     key: "memory-section-header",
     fillMaxWidth: true,
     paddingHorizontal: 12,
@@ -1399,26 +1527,26 @@ function renderMemoryMenu(ctx) {
     }
   },[
     icon("DataObjectOutlined", colors.onSurfaceVariant.copy({ alpha: 0.7 })),
-    OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:42175",[],()=>[{ width: 12 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs)),
-    OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:42209",[],()=>[{ text: "\u8BB0\u5FC6", style: "bodySmall" }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
-    OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:42272",[],()=>[{ width: 8 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs)),
-    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:42305",[{ text: memorySummary(preferences), style: "bodySmall", color: colors.primary, fontWeight: "600", textAlign: "end", maxLines: 1, overflow: "ellipsis", weight: 1 }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
-    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:42486",[{
+    OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:49243",[],()=>[{ width: 12 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs)),
+    OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:49277",[],()=>[{ text: "\u8BB0\u5FC6", style: "bodySmall" }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
+    OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:49340",[],()=>[{ width: 8 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs)),
+    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:49373",[{ text: memorySummary(preferences), style: "bodySmall", color: colors.primary, fontWeight: "600", textAlign: "end", maxLines: 1, overflow: "ellipsis", weight: 1 }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
+    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:49554",[{
       key: "memory-info",
       tooltip: "\u8BB0\u5FC6\u72B6\u6001\u8BF4\u660E",
       width: 24,
       height: 28,
       contentPadding: { horizontal: 0, vertical: 0 },
       onClick: showInfo,
-      content: OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:42716",[{ name: "InfoOutline", size: 16, tint: colors.onSurfaceVariant.copy({ alpha: 0.7 }) }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))
+      content: OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:49784",[{ name: "InfoOutline", size: 16, tint: colors.onSurfaceVariant.copy({ alpha: 0.7 }) }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))
     }],(...__operitArgs)=>ctx.UI.IconButton(...__operitArgs)),
-    OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:42827",[],()=>[{ width: 6 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs)),
-    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:42860",[{ name: expanded ? "KeyboardArrowUp" : "KeyboardArrowDown", size: 20, tint: colors.onSurfaceVariant }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))
+    OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:49895",[],()=>[{ width: 6 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs)),
+    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:49928",[{ name: expanded ? "KeyboardArrowUp" : "KeyboardArrowDown", size: 20, tint: colors.onSurfaceVariant }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))
   ]],(...__operitArgs)=>ctx.UI.Row(...__operitArgs))];
-  if (expanded) children.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:43012",[{ key: "memory-section-children", modifier: ctx.Modifier.padding(12, 0, 8, 4) },[
+  if (expanded) children.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:50080",[{ key: "memory-section-children", modifier: ctx.Modifier.padding(12, 0, 8, 4) },[
     switchRow("userDescriptionEnabled", "AssignmentIndOutlined", "\u63D0\u4F9B\u7528\u6237\u8D44\u6599"),
     switchRow("autoUpdateEnabled", preferences.autoUpdateEnabled ? "Save" : "SaveOutlined", "\u81EA\u52A8\u66F4\u65B0\u8BB0\u5FC6\u5E93"),
-    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:43358",[{
+    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:50426",[{
       key: "memory-manual",
       fillMaxWidth: true,
       paddingHorizontal: 12,
@@ -1427,8 +1555,8 @@ function renderMemoryMenu(ctx) {
       onClick: !busy && chatId !== null ? manual : void 0
     },[
       icon("SaveOutlined"),
-      OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:43648",[],()=>[{ width: 12 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs)),
-      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:43684",[{
+      OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:50716",[],()=>[{ width: 12 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs)),
+      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:50752",[{
         text: busy ? "\u6B63\u5728\u66F4\u65B0\u8BB0\u5FC6\u2026" : "\u624B\u52A8\u66F4\u65B0\u8BB0\u5FC6",
         style: "bodySmall",
         maxLines: 2,
@@ -1438,7 +1566,7 @@ function renderMemoryMenu(ctx) {
       }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs))
     ]],(...__operitArgs)=>ctx.UI.Row(...__operitArgs))
   ]],(...__operitArgs)=>ctx.UI.Column(...__operitArgs)));
-  return OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:44043",[children],()=>[{ key: "memory-section", fillMaxWidth: true },children],(...__operitArgs)=>ctx.UI.Column(...__operitArgs));
+  return OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:51111",[children],()=>[{ key: "memory-section", fillMaxWidth: true },children],(...__operitArgs)=>ctx.UI.Column(...__operitArgs));
 }
 
 // src/ui/chat-input-memory/index.ui.ts

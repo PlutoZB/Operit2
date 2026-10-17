@@ -8,7 +8,7 @@ use serde_json::Value;
 /// Defines the complete wire value and ordinary preference encoding for one theme field.
 #[derive(Clone, Copy)]
 pub(crate) struct SnapshotField {
-    json_key: &'static str,
+    pub(crate) json_key: &'static str,
     pub(crate) preference_key: &'static str,
     pub(crate) kind: FieldKind,
 }

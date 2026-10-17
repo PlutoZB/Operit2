@@ -27,6 +27,7 @@ struct ModuleSpec {
 }
 
 const MODULES: &[ModuleSpec] = &[
+    ModuleSpec { rust_file: "js_sdk/storage_facade.rs", additional_rust_file: None, ts_file: "storage.d.ts", nullable_wire_fields: false },
     ModuleSpec { rust_file: "js_sdk/edge.rs", additional_rust_file: None, ts_file: "edge.d.ts", nullable_wire_fields: false },
     ModuleSpec {
         rust_file: "js_sdk/storage.rs",
@@ -205,7 +206,11 @@ fn generate_declaration_file(
     let context = EmitContext::new(files, spec, catalog.clone());
     DeclarationFile {
         file_name: spec.ts_file.to_string(),
-        source: context.emit(),
+        source: if spec.ts_file == "toolpkg.d.ts" {
+            format!("{}\nimport {{ ToolPkg as ToolPkgRuntime }} from \"./toolpkg\";\ndeclare global {{ export import ToolPkg = ToolPkgRuntime; }}\n", context.emit())
+        } else if spec.ts_file == "storage.d.ts" {
+            format!("{}\nexport type {{ StorageRequest, StorageTable, StorageSqlValue, StorageMergeDescriptor, StorageKind, StorageColumn, StorageColumnType, StorageMutation, StorageStatement, StorageMergeEntity, StorageMergeReference, StorageMergeTarget, StorageMergeKeyEncoding }} from \"./storage.generated\";\n", context.emit())
+        } else { context.emit() },
     }
 }
 
@@ -346,6 +351,14 @@ impl<'a> EmitContext<'a> {
                 group.items.push(item_ref);
             }
         }
+        for group in grouped.values_mut() {
+            if group.kind == "type"
+                && group.items.iter().any(|item| matches!(item, ItemRef::Trait(_)))
+                && group.items.iter().any(|item| matches!(item, ItemRef::Struct(item) if is_flattened_intersection(item)))
+            {
+                group.kind = "interface".to_string();
+            }
+        }
         context.groups = grouped.into_values().collect();
         context
     }
@@ -373,6 +386,10 @@ impl<'a> EmitContext<'a> {
 
     /// Emits declarations directly contained by one TypeScript namespace path.
     fn emit_scope(&self, output: &mut String, scope: &[String], indent: &str) {
+        if self.current_file == "toolpkg.d.ts" && scope == ["ToolPkg"] {
+            output.push_str(&format!("{indent}/** Exposes the host registry IPC service. */\n{indent}export const ipc: IpcApi;\n"));
+            output.push_str(&format!("{indent}/** Exposes the host registry WASM service. */\n{indent}export const wasm: WasmApi;\n"));
+        }
         let mut entries = self.scope_entries(scope);
         entries.sort_by(|left, right| {
             left.order()
@@ -412,8 +429,7 @@ impl<'a> EmitContext<'a> {
                         &method.sig,
                         scope,
                         indent,
-                        true,
-                        root_function,
+                        if root_function { MethodStyle::RootFunction } else { MethodStyle::Function },
                     );
                 }
             }
@@ -463,6 +479,19 @@ impl<'a> EmitContext<'a> {
                                 order: namespace_group.order,
                                 root_function: false,
                             });
+                        }
+                    }
+                }
+            }
+        }
+        if self.current_file == "toolpkg.d.ts" && scope == ["ToolPkg"] {
+            let registry = self.groups.iter().find(|group| group.path == ["ToolPkg", "Registry"])
+                .expect("ToolPkg registry is declared by its Rust owner");
+            for item in &registry.items {
+                if let ItemRef::Trait(item_trait) = item {
+                    for trait_item in &item_trait.items {
+                        if let TraitItem::Fn(method) = trait_item {
+                            entries.push(ScopeEntry::Method { method, order: registry.order, root_function: false });
                         }
                     }
                 }
@@ -585,15 +614,61 @@ impl<'a> EmitContext<'a> {
                     item_struct,
                     scope,
                     &child_indent,
-                    group.kind == "class",
+                    group.kind == "class" || declaration_options(&item_struct.attrs).readonly,
                 );
             }
         }
-        for method in self.group_methods(group) {
-            self.emit_method(output, method.attrs(), method.signature(), scope, &child_indent, false, false);
+        let methods = self.group_methods(group);
+        for method in &methods {
+            if group.kind != "class" && !method_has_receiver(method.signature()) {
+                continue;
+            }
+            self.emit_group_method(
+                output, group, method, scope, &child_indent,
+                if group.kind == "class" { MethodStyle::Class } else { MethodStyle::Instance },
+            );
         }
         output.push_str(indent);
         output.push_str("}\n\n");
+        if group.kind != "class" {
+            self.emit_constructor_object(output, group, &methods, scope, indent);
+        }
+    }
+
+    /// Emits the value side of an interface from its constructors and associated functions.
+    fn emit_constructor_object(
+        &self,
+        output: &mut String,
+        group: &DeclarationGroup<'a>,
+        methods: &[MethodRef<'_>],
+        scope: &[String],
+        indent: &str,
+    ) {
+        let associated = methods.iter()
+            .filter(|method| !method_has_receiver(method.signature()))
+            .collect::<Vec<_>>();
+        if associated.is_empty() {
+            return;
+        }
+        let name = group.path.last().expect("declaration paths are non-empty");
+        let declaration = if scope.is_empty() { "export declare var" } else { "export var" };
+        output.push_str(&format!("{indent}{declaration} {name}: {{\n"));
+        let child_indent = format!("{indent}  ");
+        if associated.iter().any(|method| is_constructor(method.signature())) {
+            let erased_generics = group_generics(group).params.iter().filter_map(|parameter| {
+                match parameter { GenericParam::Type(_) => Some("any"), _ => None }
+            }).collect::<Vec<_>>();
+            let prototype_type = if erased_generics.is_empty() {
+                name.clone()
+            } else {
+                format!("{name}<{}>", erased_generics.join(", "))
+            };
+            output.push_str(&format!("{child_indent}prototype: {prototype_type};\n"));
+        }
+        for method in associated {
+            self.emit_group_method(output, group, method, scope, &child_indent, MethodStyle::ConstructorObject);
+        }
+        output.push_str(&format!("{indent}}};\n\n"));
     }
 
     /// Emits all visible fields from one Rust struct into an interface body.
@@ -618,7 +693,7 @@ impl<'a> EmitContext<'a> {
             }
             emit_jsdoc(output, &field.attrs, indent);
             output.push_str(indent);
-            if readonly {
+            if readonly || field_is_readonly(field) {
                 output.push_str("readonly ");
             }
             output.push_str(&field_name(field));
@@ -812,10 +887,7 @@ impl<'a> EmitContext<'a> {
                 }
                 self.emit_type(&field.ty, scope)
             }
-            Fields::Unit => match item_struct.ident.to_string().as_str() {
-                "ToolPkgGlobalBinding" => "ToolPkg.Registry".to_string(),
-                name => panic!("unit variable marker `{name}` does not carry a binding type"),
-            },
+            Fields::Unit => panic!("unit variable markers do not carry a binding type"),
             Fields::Named(_) => {
                 panic!("variable marker structs must use a tuple field")
             }
@@ -831,31 +903,20 @@ impl<'a> EmitContext<'a> {
         signature: &Signature,
         scope: &[String],
         indent: &str,
-        function: bool,
-        root_function: bool,
+        style: MethodStyle,
     ) {
         emit_jsdoc(output, attrs, indent);
         output.push_str(indent);
-        let constructor = !function
-            && signature.ident == "new"
-            && !signature
-                .inputs
-                .iter()
-                .any(|argument| matches!(argument, FnArg::Receiver(_)));
-        let static_method = !function
-            && !constructor
-            && !signature
-                .inputs
-                .iter()
-                .any(|argument| matches!(argument, FnArg::Receiver(_)));
-        if root_function {
-            output.push_str("export declare function ");
-        } else if function {
-            output.push_str("function ");
-        } else if static_method {
-            output.push_str("static ");
+        let constructor = matches!(style, MethodStyle::Class | MethodStyle::ConstructorObject)
+            && is_constructor(signature);
+        let class_constructor = constructor && matches!(style, MethodStyle::Class);
+        match style {
+            MethodStyle::RootFunction => output.push_str("export declare function "),
+            MethodStyle::Function => output.push_str("function "),
+            MethodStyle::Class if !constructor && !method_has_receiver(signature) => output.push_str("static "),
+            _ => {}
         }
-        let name = if constructor {
+        let name = if class_constructor {
             "constructor".to_string()
         } else {
             method_name(&signature.ident.to_string())
@@ -879,9 +940,10 @@ impl<'a> EmitContext<'a> {
         }
         output.push_str(&parameters.join(", "));
         output.push(')');
-        if !constructor {
+        if !class_constructor {
             output.push_str(": ");
             match &signature.output {
+                ReturnType::Default if constructor => panic!("TypeScript construct signatures require an explicit Rust return type"),
                 ReturnType::Default => output.push_str("void"),
                 ReturnType::Type(_, return_type) => {
                     output.push_str(&self.emit_type(return_type, scope))
@@ -920,12 +982,32 @@ impl<'a> EmitContext<'a> {
 
     /// Emits the generic parameters declared by one Rust declaration group.
     fn emit_item_generics(&self, group: &DeclarationGroup<'_>, scope: &[String]) -> String {
-        match group.items[0] {
-            ItemRef::Struct(item) => self.emit_rust_generics(&item.generics.params, scope),
-            ItemRef::Enum(item) => self.emit_rust_generics(&item.generics.params, scope),
-            ItemRef::Type(item) => self.emit_rust_generics(&item.generics.params, scope),
-            ItemRef::Trait(item) => self.emit_rust_generics(&item.generics.params, scope),
+        self.emit_rust_generics(&group_generics(group).params, scope)
+    }
+
+    /// Resolves Rust Self types and carries instance type parameters into construct signatures.
+    fn emit_group_method(
+        &self,
+        output: &mut String,
+        group: &DeclarationGroup<'_>,
+        method: &MethodRef<'_>,
+        scope: &[String],
+        indent: &str,
+        style: MethodStyle,
+    ) {
+        let generics = group_generics(group);
+        let name = syn::parse_str::<syn::Ident>(&group.items[0].rust_name()).expect("Rust item names are identifiers");
+        let arguments = generics.type_params().map(|parameter| &parameter.ident).collect::<Vec<_>>();
+        let owner: Type = if arguments.is_empty() { syn::parse_quote!(#name) }
+            else { syn::parse_quote!(#name<#(#arguments),*>) };
+        let mut signature = method.signature().clone();
+        SelfTypeResolver { owner }.visit_signature(&mut signature);
+        if matches!(style, MethodStyle::ConstructorObject) && is_constructor(&signature) {
+            let method_parameters = signature.generics.params.clone();
+            signature.generics.params = generics.params.clone();
+            signature.generics.params.extend(method_parameters);
         }
+        self.emit_method(output, method.attrs(), &signature, scope, indent, style);
     }
 
     /// Emits Rust generic type parameters with TypeScript defaults resolved in module context.
@@ -1003,6 +1085,8 @@ impl<'a> EmitContext<'a> {
             "f32" | "f64" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16"
             | "u32" | "u64" | "u128" | "usize" => "number".to_string(),
             "Value" => "unknown".to_string(),
+            "JsBigInt" => "bigint".to_string(),
+            "JsUint8Array" => "Uint8Array".to_string(),
             "JsAny" => "any".to_string(),
             "JsObject" => "object".to_string(),
             "JsNever" => "never".to_string(),
@@ -1023,6 +1107,8 @@ impl<'a> EmitContext<'a> {
                 "AsyncIterable<{}>",
                 self.emit_first_argument(arguments, scope)
             ),
+            "JsAsyncIterableIterator" => format!("AsyncIterableIterator<{}>", self.emit_first_argument(arguments, scope)),
+            "JsMethodDecorator" => "<TThis, TArgs extends unknown[], TResult>(method: (this: TThis, ...args: TArgs) => TResult, context: ClassMethodDecoratorContext<TThis, (this: TThis, ...args: TArgs) => TResult>) => (this: TThis, ...args: TArgs) => TResult".to_string(),
             "Arc" | "Box" | "Pin" => self.emit_first_argument(arguments, scope),
             "BTreeMap" | "HashMap" => format!(
                 "Record<{}, {}>",
@@ -1100,8 +1186,7 @@ impl<'a> EmitContext<'a> {
                     &method.sig,
                     scope,
                     "  ",
-                    false,
-                    false,
+                    MethodStyle::Instance,
                 );
             }
         }
@@ -1141,6 +1226,9 @@ impl<'a> EmitContext<'a> {
                     output.push_str("; ");
                 }
                 continue;
+            }
+            if declaration_options(&item.attrs).readonly || field_is_readonly(field) {
+                output.push_str("readonly ");
             }
             output.push_str(&field_name(field));
             if is_optional_field(&field.ty) && !self.nullable_wire_fields {
@@ -1292,7 +1380,7 @@ impl<'a> EmitContext<'a> {
         let Some(entry) = self.type_catalog.get(rust_name) else {
             return rust_name.to_string();
         };
-        if entry.ts_file == self.current_file {
+        if entry.ts_file == self.current_file || entry.path.first().is_some_and(|part| part == "global") {
             return relative_ts_path(&entry.path, scope);
         }
         let import_name = entry
@@ -1340,6 +1428,113 @@ impl ScopeEntry<'_, '_> {
             Self::Method { method, .. } => method.sig.ident.to_string(),
         }
     }
+}
+
+/// Returns the generic parameters shared by a declaration's instance and constructor sides.
+fn group_generics<'a>(group: &DeclarationGroup<'a>) -> &'a syn::Generics {
+    match group.items[0] {
+        ItemRef::Struct(item) => &item.generics,
+        ItemRef::Enum(item) => &item.generics,
+        ItemRef::Type(item) => &item.generics,
+        ItemRef::Trait(item) => &item.generics,
+    }
+}
+
+struct SelfTypeResolver {
+    owner: Type,
+}
+
+impl SelfTypeResolver {
+    /// Replaces Self throughout parameters, return types, and generic bounds.
+    fn visit_signature(&mut self, signature: &mut Signature) {
+        syn::visit_mut::VisitMut::visit_signature_mut(self, signature);
+    }
+}
+
+impl syn::visit_mut::VisitMut for SelfTypeResolver {
+    /// Substitutes the current declaration instance for an unqualified Rust Self type.
+    fn visit_type_mut(&mut self, value: &mut Type) {
+        if matches!(value, Type::Path(path) if path.qself.is_none() && path.path.is_ident("Self")) {
+            *value = self.owner.clone();
+        } else {
+            syn::visit_mut::visit_type_mut(self, value);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MethodStyle {
+    Class,
+    Instance,
+    ConstructorObject,
+    Function,
+    RootFunction,
+}
+
+/// Reports whether a Rust method belongs to the instance side of a declaration.
+fn method_has_receiver(signature: &Signature) -> bool {
+    signature.inputs.iter().any(|argument| matches!(argument, FnArg::Receiver(_)))
+}
+
+/// Recognizes constructor overloads using the same public-name mapping as other methods.
+fn is_constructor(signature: &Signature) -> bool {
+    !method_has_receiver(signature) && method_name(&signature.ident.to_string()) == "new"
+}
+
+#[derive(Default)]
+struct DeclarationOptions {
+    scope: Option<String>,
+    name: Option<String>,
+    kind: Option<String>,
+    readonly: bool,
+}
+
+/// Reads explicit declaration metadata without depending on SDK file or type names.
+fn declaration_options(attrs: &[Attribute]) -> DeclarationOptions {
+    let mut options = DeclarationOptions::default();
+    for attr in attrs.iter().filter(|attr| attr.path().is_ident("js_declaration")) {
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("readonly") {
+                if options.readonly { return Err(meta.error("duplicate readonly option")); }
+                options.readonly = true;
+                return Ok(());
+            }
+            let slot = if meta.path.is_ident("scope") { &mut options.scope }
+                else if meta.path.is_ident("name") { &mut options.name }
+                else if meta.path.is_ident("kind") { &mut options.kind }
+                else { return Err(meta.error("unknown JavaScript declaration option")); };
+            if slot.is_some() { return Err(meta.error("duplicate JavaScript declaration option")); }
+            let value = meta.value()?.parse::<LitStr>()?.value();
+            if meta.path.is_ident("kind") {
+                if !matches!(value.as_str(), "interface" | "class" | "type") {
+                    return Err(meta.error("kind must be interface, class, or type"));
+                }
+            } else {
+                let parts = value.split('.').collect::<Vec<_>>();
+                if (!meta.path.is_ident("scope") && parts.len() != 1)
+                    || parts.iter().any(|part| syn::parse_str::<syn::Ident>(part).is_err()) {
+                    return Err(meta.error("expected a declaration identifier or dotted scope"));
+                }
+            }
+            *slot = Some(value);
+            Ok(())
+        }).expect("invalid JavaScript declaration metadata");
+    }
+    options
+}
+
+/// Reads the explicit mutability of a field without changing its Rust value type.
+fn field_is_readonly(field: &syn::Field) -> bool {
+    let mut readonly = false;
+    for attr in field.attrs.iter().filter(|attr| attr.path().is_ident("js")) {
+        attr.parse_nested_meta(|meta| {
+            if !meta.path.is_ident("readonly") { return Err(meta.error("unknown JavaScript field option")); }
+            if readonly { return Err(meta.error("duplicate readonly option")); }
+            readonly = true;
+            Ok(())
+        }).expect("invalid JavaScript field metadata");
+    }
+    readonly
 }
 
 enum MethodRef<'a> {
@@ -1427,6 +1622,12 @@ fn is_flattened_intersection(item: &ItemStruct) -> bool {
 /// Infers one TypeScript declaration path directly from the Rust module and identifier.
 fn infer_declaration(item: ItemRef<'_>, ts_file: &str) -> Option<(Vec<String>, String)> {
     let rust_name = item.rust_name();
+    let options = declaration_options(item.attrs());
+    if options.scope.is_some() || options.name.is_some() || options.kind.is_some() {
+        let mut path = options.scope.iter().flat_map(|scope| scope.split('.').map(str::to_owned)).collect::<Vec<_>>();
+        path.push(options.name.unwrap_or_else(|| rust_name.strip_suffix("Methods").unwrap_or(&rust_name).to_string()));
+        return Some((path, options.kind.unwrap_or_else(|| default_item_kind(item).to_string())));
+    }
     if rust_name == "ToolPkgBroadcastTopicKey" {
         return None;
     }
@@ -1435,7 +1636,6 @@ fn infer_declaration(item: ItemRef<'_>, ts_file: &str) -> Option<(Vec<String>, S
         "DataUtilsGlobal" => Some(vec!["dataUtils".to_string()]),
         "CommonJsExports" => Some(vec!["exports".to_string()]),
         "NetCookiesBinding" => Some(vec!["Net".to_string(), "cookies".to_string()]),
-        "ToolPkgGlobalBinding" => Some(vec!["global".to_string(), "ToolPkg".to_string()]),
         _ => None,
     };
     if let Some(path) = variable {
@@ -1447,12 +1647,6 @@ fn infer_declaration(item: ItemRef<'_>, ts_file: &str) -> Option<(Vec<String>, S
             _ => vec![rust_name],
         };
         return Some((path, "type_map".to_string()));
-    }
-    if rust_name == "ComposeNumberExtensions" {
-        return Some((
-            vec!["global".to_string(), "Number".to_string()],
-            "interface".to_string(),
-        ));
     }
     if let ItemRef::Trait(_) = item {
         let namespace = match rust_name.as_str() {
@@ -1476,8 +1670,10 @@ fn infer_declaration(item: ItemRef<'_>, ts_file: &str) -> Option<(Vec<String>, S
             "SoftwareSettingsHost" => Some(vec!["SoftwareSettings".to_string()]),
             "UIHost" => Some(vec!["UI".to_string()]),
             "ChatHost" => Some(vec!["Chat".to_string()]),
-            "StorageHost" => Some(vec!["Storage".to_string()]),
-            "GlobalHost" => Some(vec!["global".to_string()]),
+            "StorageHost" | "StorageFacadeHost" => Some(vec!["Storage".to_string()]),
+            "StorageSqliteHost" => Some(vec!["Storage".to_string(), "sqlite".to_string()]),
+            "StorageObjectsHost" => Some(vec!["Storage".to_string(), "objects".to_string()]),
+            "StorageDataStoreHost" => Some(vec!["Storage".to_string(), "dataStore".to_string()]),
             _ => None,
         };
         if let Some(path) = namespace {
@@ -1499,15 +1695,21 @@ fn infer_declaration(item: ItemRef<'_>, ts_file: &str) -> Option<(Vec<String>, S
             vec![declaration_name.to_string()]
         }
         "ui.d.ts" => prefixed_path(declaration_name, "UI"),
+        "storage.d.ts" => {
+            let name = match declaration_name {
+                "StorageFacadeReceipt" => "StorageReceipt",
+                "StorageFacadeWhenAbsent" => "StorageWhenAbsent",
+                "StorageFacadeSqlValue" => "StorageSqlValue",
+                "StorageFacadeStatement" => "StorageStatement",
+                name => name,
+            };
+            prefixed_path(name, "Storage")
+        },
         "chat.d.ts" => prefixed_path(declaration_name, "Chat"),
         "toolpkg.d.ts" => prefixed_path(declaration_name, "ToolPkg"),
         _ => vec![declaration_name.to_string()],
     };
-    let kind = if rust_name == "UINode" {
-        "class".to_string()
-    } else {
-        default_item_kind(item).to_string()
-    };
+    let kind = default_item_kind(item).to_string();
     Some((path, kind))
 }
 
@@ -1972,6 +2174,8 @@ fn path_starts_with(path: &[String], prefix: &[String]) -> bool {
 
 /// Resolves a named declaration path relative to the current namespace.
 fn relative_ts_path(path: &[String], scope: &[String]) -> String {
+    let path = if path.first().is_some_and(|part| part == "global") { &path[1..] } else { path };
+    let scope = if scope.first().is_some_and(|part| part == "global") { &scope[1..] } else { scope };
     if path_starts_with(path, scope) && path.len() > scope.len() {
         path[scope.len()..].join(".")
     } else {

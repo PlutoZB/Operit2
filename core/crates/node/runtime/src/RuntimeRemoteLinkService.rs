@@ -889,7 +889,7 @@ impl RuntimeRemoteLinkService {
                 ),
             );
             self.persistenceSyncService()
-                .synchronizeReachablePeer(targetNodeId.clone(), 512, false)
+                .synchronizeReachablePeer(targetNodeId.clone(), 512)
                 .await?;
             operit_util::AppLogger::AppLogger::trace(
                 "CoreRouteTrace",
@@ -1241,6 +1241,6 @@ impl crate::NodeSpaceService::NodeSpaceContext for RuntimeRemoteLinkService {
         self.nodeRouter.callNode(node, request).await
     }
     async fn afterJoined(&self, peer: String) -> Result<(), String> {
-        self.persistenceSyncService().synchronizeReachablePeer(peer, 512, true).await.map(|_| ())
+        self.persistenceSyncService().synchronizeReachablePeer(peer, 512).await.map(|_| ())
     }
 }

@@ -678,14 +678,14 @@ fn retired_device_package_keeps_data_and_requires_archived_source() {
     host.writeBytes(&config, b"configuration").unwrap();
     host.writeBytes(&data, b"business-data").unwrap();
     assert!(store
-        .retireDevicePackageSource("daily_life", "daily_life.js")
+        .retirePackageSource("daily_life", "daily_life.js", "device")
         .is_err());
     assert!(store
-        .retireDevicePackageSource("daily_life", "other.js")
+        .retirePackageSource("daily_life", "other.js", "device")
         .is_err());
     host.delete(source, false).unwrap();
     store
-        .retireDevicePackageSource("daily_life", "daily_life.js")
+        .retirePackageSource("daily_life", "daily_life.js", "device")
         .unwrap();
     assert!(store.record("package", "daily_life").is_err());
     assert_eq!(host.readBytes(&config).unwrap(), b"configuration");
@@ -742,5 +742,29 @@ fn malformed_legacy_package_preferences_do_not_register_or_overwrite_data() {
         })).is_err());
         assert!(store.records("package").unwrap().is_empty());
         assert_eq!(storage.readBytes(path).unwrap(), original);
+    }
+}
+
+/// Rejects incompatible installation and scope moves before touching package data or records.
+#[test]
+fn fixed_package_installation_scope_rejects_registration_and_moves_atomically() {
+    for (scope, other) in [("device", "space"), ("space", "device")] {
+        let storage = host();
+        let store = ExtensionStore::new(storage.clone());
+        let settings = json!({
+            "members":["fixed"], "enabledNames":[], "disabledNames":[],
+            "subpackageStates":{}, "order":0, "builtin":false,
+            "installationId":"00000000000000000000000000000000", "installationScope":scope
+        });
+        assert!(store.registerInScope("package", "fixed", "fixed.toolpkg", settings.clone(), other).is_err());
+        assert!(store.records("package").unwrap().is_empty());
+        store.registerInScope("package", "fixed", "fixed.toolpkg", settings, scope).unwrap();
+        let path = format!("{}/fixed.toolpkg", ExtensionStore::root("package", scope).unwrap());
+        storage.writeBytes(&path, b"original-package").unwrap();
+        let original = store.record("package", "fixed").unwrap();
+        assert!(store.moveScope("package", "fixed", other).is_err());
+        assert_eq!(store.record("package", "fixed").unwrap(), original);
+        assert_eq!(storage.readBytes(&path).unwrap(), b"original-package");
+        assert!(!storage.exists(&format!("{}/fixed.toolpkg", ExtensionStore::root("package", other).unwrap())).unwrap());
     }
 }

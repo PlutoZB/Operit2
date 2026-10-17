@@ -310,8 +310,7 @@ pub trait ToolRuntimeSupport: Send + Sync {
     }
     fn closeDeviceTransports(&self, _owner: &str) {}
 
-    fn executeDeviceTool(&self, _request: operit_plugin_sdk::javascript::JsToolCallRequest,
-        _preflight: Option<crate::tools::DeviceTools::DeviceToolPreflight>)
+    fn executeDeviceTool(&self, _request: operit_plugin_sdk::javascript::JsToolCallRequest)
         -> operit_plugin_sdk::javascript::JsExecutionCompletion<operit_plugin_sdk::javascript::JsToolCallResult> {
         Box::pin(async { crate::tools::DeviceTools::failure("Device tool routing is not initialized") })
     }

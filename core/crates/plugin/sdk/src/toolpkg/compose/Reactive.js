@@ -12,6 +12,7 @@ var OperitComposeReactive = function () {
       sequence: 0,
       root: null,
       entry: null,
+      effects: new Map(),
       metrics: {
         rootRuns: 0,
         bindingRuns: 0,
@@ -63,6 +64,8 @@ var OperitComposeReactive = function () {
     task.counts.clear();
     var used = new Set();
     task.usedChildren = used;
+    var usedEffects = new Set();
+    task.usedEffects = usedEffects;
     try {
       var value = task.execute();
       graph.dirty.delete(task);
@@ -72,6 +75,13 @@ var OperitComposeReactive = function () {
         if (!used.has(child)) release(graph, child);
       });
       task.children = used;
+      graph.effects.forEach(/// Releases effects removed by this execution branch.
+      function (effect, key) {
+        if (effect.owner === task && !usedEffects.has(key)) {
+          effect.cleanup();
+          graph.effects.delete(key);
+        }
+      });
       if (!Object.is(value, task.value)) {
         task.value = value;
         publish(ctx, 'unit:' + task.key);
@@ -233,6 +243,10 @@ var OperitComposeReactive = function () {
     task.children.forEach(function (child) {
       release(graph, child);
     });
+    graph.effects.forEach(/// Cleans up asynchronous work owned by the released branch.
+    function (effect, key) {
+      if (effect.owner === task) { effect.cleanup(); graph.effects.delete(key); }
+    });
     subscribe(graph, task, []);
     graph.dirty.delete(task);
     graph.tasks.delete(task.key);
@@ -247,6 +261,9 @@ var OperitComposeReactive = function () {
   /// Releases all dependency subscriptions when replacing the root program.
   function dispose(ctx) {
     var graph = graphs.get(ctx);
+    graph.effects.forEach(/// Cancels subscriptions and timers owned by the discarded program.
+    function (effect) { effect.cleanup(); });
+    graph.effects.clear();
     graph.tasks.clear();
     graph.subscriptions.clear();
     graph.dirty.clear();
@@ -255,12 +272,30 @@ var OperitComposeReactive = function () {
     graph.entry = null;
   }
 
+  /// Runs a keyed lifecycle effect and ties cleanup to its exact reactive execution owner.
+  function effect(ctx, key, setup, dependencies) {
+    var graph = graphs.get(ctx);
+    if (!graph.current) throw new Error('useEffect requires an active composition');
+    var id = graph.current.key + ':effect:' + key;
+    var previous = graph.effects.get(id);
+    graph.current.usedEffects.add(id);
+    var changed = !previous || previous.dependencies.length !== dependencies.length || dependencies.some(
+    /// Compares dependency identities without serializing user objects.
+    function (value, index) { return !Object.is(value, previous.dependencies[index]); });
+    if (!changed) return;
+    if (previous) { previous.cleanup(); graph.effects.delete(id); }
+    var cleanup = setup();
+    if (typeof cleanup !== 'function') throw new TypeError('useEffect must return a cleanup function');
+    graph.effects.set(id, { owner: graph.current, dependencies: dependencies.slice(), cleanup: cleanup });
+  }
+
   /// Exposes counters for execution-level acceptance tests.
   function metrics(ctx) {
     return Object.assign({}, graphs.get(ctx).metrics);
   }
   return {
     attach: attach,
+    effect: effect,
     frame: frame,
     state: state,
     derived: derived,

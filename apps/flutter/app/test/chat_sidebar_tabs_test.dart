@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'support/compose_session_fixture.dart';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:operit2/core/application/PluginHotReload.dart';
 import 'package:operit2/core/bridge/OperitRuntimeBridge.dart';
@@ -129,6 +130,11 @@ void main() {
     tester,
   ) async {
     final bridge = _registry();
+    bridge.entries.removeWhere(
+      (entry) =>
+          entry.containerPackageName != 'owner.first' ||
+          entry.surface != 'chat_sidebar_tabs',
+    );
     final expanded = ValueNotifier(false);
     final conversations = ValueNotifier(
       DrawerConversationState(histories: [_chat('chat-a')], loading: false),
@@ -443,15 +449,23 @@ void main() {
       await tester.pumpAndSettle();
       await _openFirstTab(tester);
       final launcher = find.byType(ToolPkgUiLauncherScreen);
-      final initialHeight = tester.getSize(launcher).height;
-      final scroll = find.ancestor(
+      final pluginSliver = find
+          .descendant(of: launcher, matching: find.byType(SliverMainAxisGroup))
+          .first;
+      final initialHeight = tester
+          .renderObject<RenderSliver>(pluginSliver)
+          .geometry!
+          .scrollExtent;
+      final scroll = find.descendant(
         of: launcher,
         matching: find.byType(Scrollable),
       );
       expect(scroll, findsOneWidget);
       final scrollState = tester.state<ScrollableState>(scroll);
       expect(scrollState.position.maxScrollExtent, 0);
-      final initialFooterTop = tester.getTopLeft(find.text('Plugin footer')).dy;
+      final initialFooterTop = tester
+          .getTopLeft(find.text('Plugin footer', skipOffstage: false))
+          .dy;
       bridge.extraRows = 60;
       await tester.pumpWidget(
         _host(
@@ -462,10 +476,13 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(tester.getSize(launcher).height, greaterThan(initialHeight + 600));
+      expect(
+        tester.renderObject<RenderSliver>(pluginSliver).geometry!.scrollExtent,
+        greaterThan(initialHeight + 600),
+      );
       expect(scrollState.position.maxScrollExtent, greaterThan(600));
       expect(
-        tester.getTopLeft(find.text('Plugin footer')).dy,
+        tester.getTopLeft(find.text('Plugin footer', skipOffstage: false)).dy,
         greaterThan(initialFooterTop + 600),
       );
       await tester.drag(scroll, const Offset(0, -1200));
@@ -476,8 +493,63 @@ void main() {
         _host(bridge, clients: clients, pluginFooter: footer),
       );
       await tester.pumpAndSettle();
-      expect(tester.getSize(launcher).height, initialHeight);
+      expect(
+        tester.renderObject<RenderSliver>(pluginSliver).geometry!.scrollExtent,
+        initialHeight,
+      );
       expect(scrollState.position.maxScrollExtent, 0);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'lazy plugin rows share host chrome and scrolling submits no Compose commands',
+    (tester) async {
+      final bridge = _registry()
+        ..lazyContent = true
+        ..extraRows = 200;
+      await tester.pumpWidget(
+        _host(bridge, pluginFooter: const Text('Plugin footer')),
+      );
+      await tester.pumpAndSettle();
+      await _openFirstTab(tester);
+      final launcher = find.byType(ToolPkgUiLauncherScreen);
+      final scroll = find.descendant(
+        of: launcher,
+        matching: find.byType(Scrollable),
+      );
+      expect(scroll, findsOneWidget);
+      expect(find.text('Sidebar row 199'), findsNothing);
+      expect(
+        find.textContaining('Sidebar row').evaluate().length,
+        lessThan(40),
+      );
+      final commands = bridge.compose.commands.length;
+      final reads = bridge.catalogReads;
+      await tester.scrollUntilVisible(
+        find.text('Sidebar row 199'),
+        1000,
+        scrollable: scroll,
+        maxScrolls: 20,
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Sidebar row 199'), findsOneWidget);
+      expect(find.text('Sidebar row 0'), findsNothing);
+      expect(
+        find.textContaining('Sidebar row').evaluate().length,
+        lessThan(40),
+      );
+      expect(bridge.compose.commands.length, commands);
+      expect(bridge.catalogReads, reads);
+      expect(
+        tester.state(
+          find.ancestor(
+            of: find.text('Plugin footer', skipOffstage: false),
+            matching: find.byType(Scrollable),
+          ),
+        ),
+        same(tester.state(scroll)),
+      );
       expect(tester.takeException(), isNull);
     },
   );
@@ -485,7 +557,7 @@ void main() {
   testWidgets(
     'completed action continues delivering detached session commits',
     (tester) async {
-      final bridge = _registry();
+      final bridge = _registry()..lazyContent = true;
       await tester.pumpWidget(_host(bridge));
       await tester.pumpAndSettle();
       await _openFirstTab(tester);
@@ -559,13 +631,13 @@ void main() {
       await tester.pumpAndSettle();
       await _openFirstTab(tester);
       final launcher = find.byType(ToolPkgUiLauncherScreen);
-      final scroll = find.ancestor(
+      final scroll = find.descendant(
         of: launcher,
         matching: find.byType(Scrollable),
       );
       expect(scroll, findsOneWidget);
       final footerScroll = find.ancestor(
-        of: find.text('Plugin destination 24'),
+        of: find.text('Plugin destination 24', skipOffstage: false),
         matching: find.byType(Scrollable),
       );
       expect(footerScroll, findsOneWidget);
@@ -1390,6 +1462,7 @@ class _SidebarRegistryBridge extends OperitRuntimeBridge {
       final tree = Map<String, Object?>.from(
         (jsonDecode(_render(state)) as Map)['tree'] as Map,
       );
+      if (lazyContent) tree['type'] = 'LazyColumn';
       for (var index = 0; index < extraRows; index++) {
         (tree['children'] as List).add({
           'type': 'Text',
@@ -1416,6 +1489,7 @@ class _SidebarRegistryBridge extends OperitRuntimeBridge {
   Future<void>? nextActionRead;
   Future<void>? nextCatalogRead;
   Object? createError;
+  bool lazyContent = false;
   int extraRows = 0;
   int catalogReads = 0;
   int historyReads = 0;
@@ -1621,6 +1695,8 @@ core.ToolPkgContainerRuntime _runtime(String owner) =>
       manifestExtensions: const {},
       author: const ['Operit'],
       mainEntry: 'dist/main.js',
+      themes: const [],
+      license: null,
       sourceType: core.ToolPkgSourceType.externalValue,
       sourcePath: 'test',
       subpackages: const [],

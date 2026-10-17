@@ -54,7 +54,7 @@ test("native preview reads saved content in one page and expands named configura
     characterSetting: "你是一位可靠、温和的助手。\n认真倾听，给出清楚、具体的回答；遇到不确定的事情，坦诚说明。",
     openingStatement: "你好，今天有什么想一起聊聊的？", otherContentChat: "保持自然的交流节奏，用简洁的语言表达。",
     otherContentVoice: "", advancedCustomPrompt: "", marks: "记录每次对话中值得记住的细节。", attachedTagIds: [tag.id],
-    chatModelBindingMode: "FIXED_MODEL", chatModelId: "qwen-plus", ttsConfigId: "tts-one", memoryBindingMode: "SHARED", sharedMemoryId: store.id,
+    chatModelBindingMode: "FIXED_MODEL", chatModelId: "qwen-plus", chatProviderId: "provider-one", ttsConfigId: "tts-one", memoryBindingMode: "SHARED", sharedMemoryId: store.id,
     sharedMemoryMounts: [{ sharedMemoryId: store.id, readable: true, writable: false }],
     toolAccessConfig: { enabled: true, allowedBuiltinTools: ["fixture-builtin"], allowedPackages: [], allowedSkills: [], allowedMcpServers: [] },
   } });

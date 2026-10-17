@@ -204,6 +204,7 @@ pub(super) fn newTestJsEngineState(
 #[derive(Clone, Default)]
 struct TestPluginConfigExecutionHost {
     storage: Option<StorageTestFixture>,
+    routedPluginCalls: Arc<Mutex<Vec<Value>>>,
     gatedToolCalls: Arc<Mutex<Vec<tokio::sync::oneshot::Sender<JsToolCallResult>>>>,
     edgePortCalls: Arc<Mutex<Vec<Value>>>,
     gatedToolStarted: Arc<tokio::sync::Notify>,
@@ -237,6 +238,50 @@ impl ToolPkgTextResourceHost for StaticToolPkgTextResourceHost {
 }
 
 impl JsExecutionHost for TestPluginConfigExecutionHost {
+    /// Uses a concrete Binding identity to exercise native decorator selection.
+    fn should_route_toolpkg(&self, binding: String, _streaming: bool) -> Result<bool, String> { Ok(binding == "remote") }
+
+    /// Captures the private native envelope produced by an ordinary decorated call.
+    fn call_core_route(&self, target: String, method: String, args: Value) -> operit_plugin_sdk::javascript::JsExecutionFuture<Result<Value, String>> {
+        self.routedPluginCalls.lock().unwrap().push(serde_json::json!({"target":target, "method":method, "args":args}));
+        Box::pin(async { Ok(serde_json::json!({"chatId":"remote", "count":42})) })
+    }
+
+    /// Opens a deterministic host-owned output stream for native bridge verification.
+    fn open_core_route_watch(&self, target: String, method: String, args: Value) -> operit_plugin_sdk::javascript::JsExecutionFuture<Result<Value, String>> {
+        self.routedPluginCalls.lock().unwrap().push(serde_json::json!({"target":target, "method":method, "args":args}));
+        Box::pin(async { Ok(serde_json::json!({"subscriptionId":"native-route-watch"})) })
+    }
+
+    /// Returns one standard iterator value through the asynchronous native callback.
+    fn next_core_route_watch(&self, _id: String) -> operit_plugin_sdk::javascript::JsExecutionFuture<Result<Value, String>> {
+        Box::pin(async { Ok(serde_json::json!({"done":false,"value":"native-stream-value"})) })
+    }
+
+    /// Opens the private Push transport underneath an ordinary async iterable input.
+    fn open_toolpkg_route_push(&self, method: String, args: Value) -> operit_plugin_sdk::javascript::JsExecutionFuture<Result<Value, String>> {
+        self.routedPluginCalls.lock().unwrap().push(serde_json::json!({"reverse":method,"args":args}));
+        Box::pin(async {Ok(serde_json::json!({"subscriptionId":"native-input"}))})
+    }
+
+    /// Records one ordered value accepted by the existing native input transport.
+    fn send_toolpkg_route_push(&self, id: String, value: Value) -> operit_plugin_sdk::javascript::JsExecutionFuture<Result<Value, String>> {
+        self.routedPluginCalls.lock().unwrap().push(serde_json::json!({"input":id,"value":value}));
+        Box::pin(async {Ok(Value::Null)})
+    }
+
+    /// Records completion or cancellation of an input collector.
+    fn close_toolpkg_route_push(&self, id: String, abort: bool) -> operit_plugin_sdk::javascript::JsExecutionFuture<Result<Value, String>> {
+        self.routedPluginCalls.lock().unwrap().push(serde_json::json!({"inputClosed":id,"abort":abort}));
+        Box::pin(async {Ok(Value::Null)})
+    }
+
+    /// Records native collector release after the consumer exits its loop.
+    fn close_core_route_watch(&self, id: String) -> Result<(), String> {
+        self.routedPluginCalls.lock().unwrap().push(serde_json::json!({"closed":id}));
+        Ok(())
+    }
+
         /// Captures this fixture's shared state through the same native invocation boundary.
         fn capture_tool_invocation_host(&self) -> Arc<dyn JsExecutionHost> { Arc::new(self.clone()) }
 
@@ -4406,5 +4451,98 @@ async fn device_tools_cross_native_bridge_without_leaking_target_into_parameters
     assert_eq!(values[2]["tool_name"], "example:echo");
     assert_eq!(values[2]["parameters"]["value"], "{\"literal\":true}");
     assert_eq!(values[3]["device"]["action"], "catalog");
+    engine.destroy();
+}
+
+/// Runs actual TypeScript decorator output through the concrete native JavaScript engine.
+#[tokio::test(flavor = "current_thread")]
+async fn implemented_toolpkg_decorators_use_native_call_watch_and_cancellation() {
+    ensure_test_runtime_root();
+    let host = TestPluginConfigExecutionHost::default();
+    let calls = host.routedPluginCalls.clone();
+    let engine = newTestJsEngine(Arc::new(host));
+    let service = std::fs::read_to_string(testRepositoryRoot().join("tools/tests/fixtures/compiled/toolpkg_route.js")).unwrap();
+    let script = format!("{}\n{}", service, r#"
+        exports.run = async function() {
+            const local = await ExampleService.read('local', 2);
+            const remote = await ExampleService.read('remote', 3);
+            const values = [];
+            for await (const value of ExampleService.values('remote')) { values.push(value); break; }
+            const collector = ExampleService.values('local');
+            const first = await collector.next();
+            const pending = collector.next();
+            await Promise.resolve();
+            await collector.return();
+            const completed = await pending;
+            return { local, remote, values, first, completed };
+        };
+    "#);
+    let output = engine.execute_script_function(&script, "run", &testParams(), &BTreeMap::new(), None, true, 5, None).await.unwrap().unwrap();
+    let result: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(result["local"]["count"], 2);
+    assert_eq!(result["remote"]["count"], 42);
+    assert_eq!(result["values"], serde_json::json!(["native-stream-value"]));
+    assert_eq!(result["completed"]["done"], true);
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls[0]["method"], "ExampleService.read");
+    assert_eq!(calls[0]["args"]["arguments"], serde_json::json!(["remote", 3]));
+    assert_eq!(calls[1]["method"], "ExampleService.values");
+    assert_eq!(calls[2]["closed"], "native-route-watch");
+    engine.destroy();
+}
+
+/// Preserves ordinary async iterable syntax through native transport and actual destination execution.
+#[tokio::test(flavor = "current_thread")]
+async fn implemented_toolpkg_reverse_stream_uses_native_transport_and_actual_consumer() {
+    ensure_test_runtime_root();
+    let host=TestPluginConfigExecutionHost::default();let calls=host.routedPluginCalls.clone();
+    let engine=newTestJsEngine(Arc::new(host));
+    let fixture=std::fs::read_to_string(testRepositoryRoot().join("tools/tests/fixtures/compiled/toolpkg_route.js")).unwrap();
+    let script=format!("{}\n{}",fixture,r#"
+        exports.run=async function(){
+            async function* input(){yield 2;yield 3;}
+            await ExampleService.consume('remote',input());
+            const id=await __operitInvokeToolPkgRouteLocal({op:'pushOpen',methodName:'ExampleService.consume',bindingKey:'local',arguments:['local',null],inputIndex:1});
+            await __operitInvokeToolPkgRouteLocal({op:'pushItem',id,value:4});
+            await __operitInvokeToolPkgRouteLocal({op:'pushItem',id,value:5});
+            await __operitInvokeToolPkgRouteLocal({op:'pushClose',id});
+            return await ExampleService.read('local',0);
+        };
+    "#);
+    let output=engine.execute_script_function(&script,"run",&testParams(),&BTreeMap::new(),None,true,5,None).await.unwrap().unwrap();
+    let value:Value=serde_json::from_str(&output).unwrap();assert_eq!(value["count"],9);
+    let calls=calls.lock().unwrap();assert_eq!(calls[0]["reverse"],"ExampleService.consume");
+    assert_eq!(calls[0]["args"]["bindingKey"],"remote");assert_eq!(calls[0]["args"]["inputIndex"],1);
+    assert_eq!(calls[1]["value"],2);assert_eq!(calls[2]["value"],3);assert_eq!(calls[3]["abort"],false);
+    engine.destroy();
+}
+
+/// Gives long-lived collectors no completion deadline while retaining interruption of active JavaScript.
+#[tokio::test(flavor = "current_thread")]
+async fn collector_owned_execution_has_no_wall_deadline_and_cancels_cleanly() {
+    ensure_test_runtime_root();let engine=newTestJsEngine(Arc::new(TestPluginConfigExecutionHost::default()));
+    let mut waiting=engine.worker.execute_script_function_async(
+        "exports.wait=async function(){await new Promise(function(){});};".into(),"wait".into(),
+        testParams(),BTreeMap::new(),None,true,Duration::from_millis(50),1,None,None,false,true,
+    );
+    tokio::select! {
+        result=&mut waiting=>panic!("Collector wait acquired a wall deadline: {result:?}"),
+        _=tokio::time::sleep(Duration::from_millis(120))=>{},
+    }
+    let output=engine.worker.runtimeHost.executeHostJavaScriptRuntimeStateAsyncTask(
+        engine.worker.stateHandle,1000,Box::new(|state,_|Box::pin(async move {
+            let state=state.downcast_mut::<JsEngineState>().unwrap();
+            Ok(Box::new(state.pendingScriptExecutions.len()==1 && state.pendingScriptExecutions.values().all(|pending|pending.deadlineMillis.is_none())) as operit_host_api::HostJavaScriptRuntimeStateOutput)
+        })),
+    ).await.unwrap();assert!(*output.downcast::<bool>().unwrap());
+    drop(waiting);
+    tokio::time::timeout(Duration::from_secs(2),async {
+        while executionSessionCounts(&engine).await.0 != 0 {tokio::task::yield_now().await;}
+    }).await.expect("Collector cancellation leaked its session");
+    let spinning=engine.worker.execute_script_function_async(
+        "exports.spin=function(){while(true){}};".into(),"spin".into(),testParams(),BTreeMap::new(),None,true,
+        Duration::from_millis(20),1,None,None,false,true,
+    );
+    assert!(tokio::time::timeout(Duration::from_secs(2),spinning).await.unwrap().is_err());
     engine.destroy();
 }

@@ -1,4 +1,4 @@
-import type { ComposeDslContext, ComposeNode } from '../../../../types/compose-dsl';
+import type { ComposeDslContext, ComposeLazyItems, ComposeNode } from '../../../../types/compose-dsl';
 import type { CharacterSidebarSection, ConversationSidebarGroup, CurrentSidebar, SidebarCatalog, SidebarChatSummary } from './ui-sidebar';
 
 export interface SidebarLayoutState {
@@ -24,13 +24,15 @@ export const legacySidebarMetrics = Object.freeze({
   createHeight: 34, createRadius: 17, previewLimit: 4,
 });
 
-/** Draws native role -> conversation group -> chat hierarchy with the legacy rounded surfaces. */
-export function nativeSidebarRows(ctx: ComposeDslContext, current: CurrentSidebar, state: SidebarLayoutState,
-  actions: SidebarLayoutActions, defaultAvatar: string | null): ComposeNode[] {
+type SidebarRowBuilder = () => ComposeNode;
+
+/** Builds row factories without materializing any row node until the lazy viewport requests it. */
+function sidebarRowBuilders(ctx: ComposeDslContext, current: CurrentSidebar, state: SidebarLayoutState,
+  actions: SidebarLayoutActions, defaultAvatar: string | null): SidebarRowBuilder[] {
   const colors = ctx.MaterialTheme.colorScheme, m = legacySidebarMetrics;
   const query = state.query.trim().toLocaleLowerCase();
   const muted = colors.onSurfaceVariant.copy({ alpha: 0.80 });
-  const rows: ComposeNode[] = [];
+  const rows: SidebarRowBuilder[] = [];
   /** Encodes the exact plugin-owned drag scope without repeating its member directory. */
   function dragType(section: CharacterSidebarSection): string { return 'character-sidebar.chat:' + section.id; }
   /** Creates a fixed-size spacer for the sidebar hierarchy. */
@@ -96,14 +98,15 @@ export function nativeSidebarRows(ctx: ComposeDslContext, current: CurrentSideba
         }, surface))])));
   }
 
-  function chats(values: SidebarChatSummary[], id: string, section: CharacterSidebarSection, groupId: string | null, matchAll = false): ComposeNode[] {
+  /** Renders the preview subset and counts hidden chats directly from its size. */
+  function chats(values: SidebarChatSummary[], id: string, section: CharacterSidebarSection, groupId: string | null, matchAll = false): SidebarRowBuilder[] {
     const matches = query === '' || matchAll ? values : values.filter(chat => chat.title.toLocaleLowerCase().includes(query));
     const expanded = state.expandedGroups.includes('preview:' + id);
     const preview = query !== '' || expanded ? matches : matches.filter((chat, index) => index < m.previewLimit || chat.pinned
       || current.chatSidebar.currentChatId === chat.id || current.chatSidebar.activeStreamingChatIds.includes(chat.id));
-    const result = preview.map(chat => chatRow(chat, section, groupId));
-    const hidden = matches.filter(chat => !preview.includes(chat)).length;
-    if (query === '' && (hidden > 0 || expanded && matches.length > m.previewLimit)) result.push(ctx.UI.Row({
+    const result: SidebarRowBuilder[] = preview.map(chat => () => chatRow(chat, section, groupId));
+    const hidden = matches.length - preview.length;
+    if (query === '' && (hidden > 0 || expanded && matches.length > m.previewLimit)) result.push(() => ctx.UI.Row({
       key: 'sidebar-preview-' + id, fillMaxWidth: true, paddingStart: m.chatStart, paddingEnd: m.chatEnd, paddingTop: 2,
       height: 34, verticalAlignment: 'center', spacing: 8,
       onClick: () => actions.toggleGroup('preview:' + id),
@@ -121,7 +124,7 @@ export function nativeSidebarRows(ctx: ComposeDslContext, current: CurrentSideba
         background: colors.surfaceContainerLow.copy({ alpha: 0.72 }), backgroundShape: { type: 'circle' } },
       ctx.UI.Icon({ name: section.kind === 'group' ? 'Groups' : 'AccountTree', size: 14, tint: colors.onSurfaceVariant }));
     return ctx.UI.Column({ key: 'sidebar-section-' + section.id, fillMaxWidth: true,
-      paddingStart: m.categoryStart, paddingEnd: m.categoryEnd, paddingTop: 10, paddingBottom: 5 },
+      paddingStart: m.categoryStart, paddingEnd: m.categoryEnd, paddingTop: 5, paddingBottom: 5 },
       ctx.UI.DragTarget({ key: 'sidebar-category-drop-' + section.id, acceptedTypes: [dragType(section)],
         onDrop: (id) => actions.drop(String(id), section.id, null) },
       ctx.UI.Row({ fillMaxWidth: true, verticalAlignment: 'center', height: 24, onClick: () => actions.toggleSection(section.id),
@@ -137,7 +140,7 @@ export function nativeSidebarRows(ctx: ComposeDslContext, current: CurrentSideba
   function groupRow(group: ConversationSidebarGroup, section: CharacterSidebarSection, ungrouped = false): ComposeNode {
     const expanded = !state.collapsed.includes('group:' + group.id);
     const groupBody = ctx.UI.Row({ fillMaxWidth: true, verticalAlignment: 'center', paddingStart: 12, paddingEnd: 8,
-      paddingTop: 6, paddingBottom: 6, ...({background: colors.surfaceContainerLow.copy({ alpha: 0.72 }), backgroundShape: {cornerRadius: m.groupRadius}, modifier: ctx.Modifier.border(1, colors.outlineVariant.copy({alpha: 0.24}), {cornerRadius: m.groupRadius})}), onClick: () => actions.toggleSection('group:' + group.id) }, [
+      paddingTop: 2, paddingBottom: 2, ...({background: colors.surfaceContainerLow.copy({ alpha: 0.72 }), backgroundShape: {cornerRadius: m.groupRadius}, modifier: ctx.Modifier.border(1, colors.outlineVariant.copy({alpha: 0.24}), {cornerRadius: m.groupRadius})}), onClick: () => actions.toggleSection('group:' + group.id) }, [
       ctx.UI.Icon({ name: 'FolderOutlined', size: 16, tint: colors.onSurfaceVariant.copy({ alpha: 0.76 }) }), gap(7),
       ctx.UI.Text({ text: group.name, weight: 1, style: 'labelLarge', fontWeight: '700', maxLines: 1, overflow: 'ellipsis', color: colors.onSurface.copy({ alpha: 1 }) }),
       ...(group.pinned ? [gap(4), ctx.UI.Icon({ name: 'PushPinRounded', size: 12, tint: colors.onSurfaceVariant.copy({ alpha: 0.65 }) })] : []),
@@ -145,7 +148,7 @@ export function nativeSidebarRows(ctx: ComposeDslContext, current: CurrentSideba
       ctx.UI.Icon({ name: expanded ? 'KeyboardArrowUp' : 'KeyboardArrowDown', size: 20, tint: colors.onSurfaceVariant.copy({ alpha: 0.62 }) }),
     ]);
     return ctx.UI.Column({ key: 'sidebar-group-' + group.id, fillMaxWidth: true, paddingStart: m.groupStart,
-      paddingEnd: m.groupEnd, paddingTop: 4, paddingBottom: expanded ? 2 : 0 },
+      paddingEnd: m.groupEnd, paddingTop: 3, paddingBottom: 3 },
       ctx.UI.DragTarget({ key: 'sidebar-group-drop-' + group.id, acceptedTypes: [dragType(section)],
         hoverBorderColor: colors.primary.copy({ alpha: 0.55 }), shape: { cornerRadius: m.groupRadius },
         onDrop: (id) => actions.drop(String(id), section.id, ungrouped ? null : group.id) },
@@ -162,18 +165,30 @@ export function nativeSidebarRows(ctx: ComposeDslContext, current: CurrentSideba
     const categoryMatches = query === '' || section.title.toLocaleLowerCase().includes(query);
     const visibleGroups = groups.filter(group => categoryMatches || group.name.toLocaleLowerCase().includes(query) || group.chats.some(chat => chat.title.toLocaleLowerCase().includes(query)));
     if (!categoryMatches && visibleGroups.length === 0 && !ungrouped.some(chat => chat.title.toLocaleLowerCase().includes(query))) continue;
-    rows.push(category(section));
+    rows.push(() => category(section));
     if (state.collapsed.includes(section.id)) continue;
     for (const group of visibleGroups) {
-      rows.push(groupRow(group, section));
+      rows.push(() => groupRow(group, section));
       if (!state.collapsed.includes('group:' + group.id)) rows.push(...chats(group.chats, group.id, section, group.id, categoryMatches || group.name.toLocaleLowerCase().includes(query)));
     }
     if (ungrouped.length > 0 && (categoryMatches || '未分组'.includes(query) || ungrouped.some(chat => chat.title.toLocaleLowerCase().includes(query)))) {
       const id = 'ungrouped:' + section.id;
-      rows.push(groupRow({ id, name: '未分组', pinned: ungrouped.every(chat => chat.pinned), displayOrder: 0, chats: ungrouped }, section, true));
+      rows.push(() => groupRow({ id, name: '未分组', pinned: ungrouped.every(chat => chat.pinned), displayOrder: 0, chats: ungrouped }, section, true));
       if (!state.collapsed.includes('group:' + id)) rows.push(...chats(ungrouped, id, section, null, categoryMatches || '未分组'.includes(query)));
     }
   }
-  if (rows.length === 0) rows.push(ctx.UI.Text({ text: query === '' ? '暂无会话' : '没有匹配的会话', color: muted, fontSize: 12, paddingHorizontal: 20, paddingVertical: 12 }));
+  if (rows.length === 0) rows.push(() => ctx.UI.Text({ text: query === '' ? '暂无会话' : '没有匹配的会话', height: m.chatHeight, color: muted, fontSize: 12, paddingHorizontal: 20 }));
   return rows;
+}
+
+/** Produces only the initial conversation rows; later rows are requested by the host viewport. */
+export function nativeSidebarLazyItems(ctx: ComposeDslContext, current: CurrentSidebar, state: SidebarLayoutState,
+  actions: SidebarLayoutActions, defaultAvatar: string | null): ComposeLazyItems {
+  const builders = sidebarRowBuilders(ctx, current, state, actions, defaultAvatar);
+  return ctx.lazyItems({
+    key: 'sidebar-conversation-rows',
+    itemCount: builders.length,
+    itemExtent: legacySidebarMetrics.chatHeight,
+    initialItemCount: 24,
+  }, index => builders[index]());
 }

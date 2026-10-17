@@ -1,3 +1,55 @@
+/** Collects one exact record with atomic initial state and collector-owned cancellation. */
+function __operitStorageWatchRecord(openRequest, collection, key, options) {
+    var signal=options.signal;
+    var after=null, opening=null, closing=null, stopped=false, pending=false;
+    /** Opens one watcher-owned handle without changing the parent handle lifetime. */
+    function open() {
+        if (opening === null) opening=__operitStorageRequest(openRequest);
+        return opening;
+    }
+    /** Cancels a pending wait by closing exactly this watcher's handle. */
+    function close() {
+        stopped=true;
+        if (signal) signal.removeEventListener("abort", abort);
+        if (opening === null) return Promise.resolve();
+        if (closing === null) closing=opening.then(/** Closes the retained watch handle. */ function(value) {
+            return __operitStorageRequest({op:"close",handle:value.handle});
+        });
+        return closing;
+    }
+    /** Cancels the retained wait when the standard signal is aborted. */
+    function abort() { close().catch(/** Reports cancellation failures on the owning call. */ function(error) { console.error(error); }); }
+    if (signal) {
+        if (signal.aborted) stopped=true;
+        else signal.addEventListener("abort", abort);
+    }
+    return {
+        /** Returns this stream as its own asynchronous iterator. */
+        [Symbol.asyncIterator]() {return this;},
+        /** Reads the current record and waits for its next version without polling. */
+        async next() {
+            if (stopped) return {done:true,value:undefined};
+            if (pending) throw new Error("Storage watch already has a pending read");
+            pending=true;
+            try {
+                var owned=await open();
+                if (stopped) return {done:true,value:undefined};
+                var entry=await __operitInvokeHostAsync(__operitNativeWaitPluginStorageRecord,[owned.handle,collection,key,after]);
+                if (stopped) return {done:true,value:undefined};
+                after={version:entry === null ? null : entry.version};
+                return {done:false,value:entry};
+            } catch(error) {
+                if (stopped) return {done:true,value:undefined};
+                await close();throw error;
+            } finally {pending=false;}
+        },
+        /** Stops an outstanding wait without closing the parent database. */
+        async return() {await close();return {done:true,value:undefined};},
+        /** Releases the watch and preserves the consumer's failure. */
+        async throw(error) {await close();throw error;},
+    };
+}
+
 /** Sends typed storage data through the same scoped host Promise transport as other SDK calls. */
 function __operitStorageRequest(request) {
     return Tools.Storage.request(request).then(function(result) {
@@ -8,7 +60,7 @@ function __operitStorageRequest(request) {
             case 'execute': case 'transaction': return result.results;
             case 'define_table': return { changed: result.changed };
             case 'get': return result.entry;
-            case 'list': case 'changes': return result.entries;
+            case 'list': return result.entries;
             case 'commit': return { version: result.version };
             default: throw new Error('Unknown Storage tool result operation');
         }
@@ -79,21 +131,22 @@ function __operitStorageStatement(sql, params) {
 async function __operitStorageOpen(kind, options) {
     if (!options || typeof options.path !== "string" || options.path.trim() === "") throw new Error("Storage path is required");
     for (const key of Object.keys(options)) {
-        if (key !== "path") throw new Error("Unknown storage open option: " + key);
+        if (key !== "path" && key !== "merge") throw new Error("Unknown storage open option: " + key);
     }
-    var result = await __operitStorageRequest({op:"open",path:options.path,kind:kind});
+    var openRequest = {op:"open",path:options.path,kind:kind};
+    if (Object.prototype.hasOwnProperty.call(options, "merge")) openRequest.merge = options.merge;
+    var openResult = await __operitStorageRequest(openRequest);
     var closed = false;
     /** Rejects operations after explicit disposal and retains no second durable state. */
     function request(op, data) {
         if (closed) return Promise.reject(new Error("Storage handle is closed"));
-        return __operitStorageRequest(Object.assign({op:op,handle:result.handle},data));
+        return __operitStorageRequest(Object.assign({op:op,handle:openResult.handle},data));
     }
     var base = {
-        path:result.path,
+        path:openResult.path,
         /** Disposes this engine-owned handle without deleting persisted data. */
         async close() { if (closed) return; await request("close",{}); closed=true; },
-        /** Reads bounded transaction deltas using an opaque decimal cursor. */
-        changes(after="0", limit=100) { return request("changes",{after:after,limit:limit}); },
+
     };
     if (kind === "sqlite") {
         return Object.assign(base, {
@@ -112,16 +165,18 @@ async function __operitStorageOpen(kind, options) {
             /** Executes one write and its change journal inside one Rust transaction. */
             async execute(sql, params=[]) { return (await request("execute",{statement:__operitStorageStatement(sql,params)}))[0]; },
             /** Commits a complete statement batch without holding a transaction across JS awaits. */
-            transaction(statements) {
+            transaction(statements, options = {}) {
                 if (!Array.isArray(statements)) throw new Error("SQL transaction requires statements");
-                return request("transaction",{statements:statements.map(/** Encodes one member of an atomic statement batch with its write-count precondition. */ function(statement) {
+                var data = {statements:statements.map(/** Encodes one member of an atomic statement batch with its write-count precondition. */ function(statement) {
                     var encoded = __operitStorageStatement(statement.sql,statement.params === undefined ? [] : statement.params);
                     if (statement.expectedAffectedRows !== undefined) {
                         if (!Number.isSafeInteger(statement.expectedAffectedRows) || statement.expectedAffectedRows < 0) throw new Error("expectedAffectedRows must be a nonnegative safe integer");
                         encoded.expectedAffectedRows = statement.expectedAffectedRows;
                     }
                     return encoded;
-                })});
+                })};
+                if (options.whenAbsent !== undefined) data.whenAbsent = options.whenAbsent;
+                return request("transaction",data);
             },
             /** Declares a typed synchronized table and installs primary-key dirty tracking. */
             defineTable(table) { return request("define_table",{table:table}); },
@@ -188,6 +243,11 @@ async function __operitStorageOpen(kind, options) {
             put(key,value,options) {return request("commit",{mutations:[mutation(name,key,value,false,options)]});},
             /** Removes one exact record with an optional version check. */
             remove(key,options) {return request("commit",{mutations:[mutation(name,key,null,true,options)]});},
+            /** Emits only this exact record, including initial absence and subsequent deletion. */
+            watch(key,options={}) {
+                if (closed) throw new Error("Storage handle is closed");
+                return __operitStorageWatchRecord(openRequest,name,key,options);
+            },
             /** Reads a mutable record proxy with explicit atomic persistence. */
             edit(key) {return edit(name,key);},
         };

@@ -351,9 +351,14 @@ class _ChatSidebarTabHostState extends State<ChatSidebarTabHost> {
     }
     final matches = tabs.where((tab) => tab.id == selectedId);
     if (matches.length != 1) {
-      return _error(
-        StateError(
-          'Selected plugin sidebar tab is not enabled or registered: $selectedId',
+      return _pluginScroll(
+        selectedId,
+        SliverToBoxAdapter(
+          child: _error(
+            StateError(
+              'Selected plugin sidebar tab is not enabled or registered: $selectedId',
+            ),
+          ),
         ),
       );
     }
@@ -362,7 +367,7 @@ class _ChatSidebarTabHostState extends State<ChatSidebarTabHost> {
     return _embedded(tab, generation);
   }
 
-  /// Embeds the plugin tree with its natural content height.
+  /// Keeps plugin execution intact while the sidebar composes its sliver content.
   Widget _embedded(_SidebarTab tab, int generation) {
     final prepared = ChatSidebarPreparationScope.maybeOf(
       context,
@@ -375,6 +380,8 @@ class _ChatSidebarTabHostState extends State<ChatSidebarTabHost> {
       embeddedScreenPath: tab.route.screen,
       showLauncherChrome: false,
       showLoadingIndicator: false,
+      contentBuilder: (context, content) =>
+          _pluginScroll(tab.id, content.sliver),
       initialModuleSpec: tab.route.moduleSpec,
       initialState: <String, Object?>{
         'chatSidebarPrepared': ?prepared,
@@ -498,34 +505,54 @@ class _ChatSidebarTabHostState extends State<ChatSidebarTabHost> {
         child: workspaceWithTabs(context, tabs),
       );
     }
-    final children = <Widget>[
-      if (widget.headerBuilder != null)
-        widget.headerBuilder!(context, tabs)
-      else
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          child: Align(alignment: Alignment.centerRight, child: tabs),
+    if (workspaceSelected) {
+      return Material(
+        type: MaterialType.transparency,
+        child: Column(
+          children: [
+            _header(tabs),
+            if (_actionError != null) _error(_actionError!),
+            Expanded(child: _content(_tabs, selectedId)),
+          ],
         ),
-      if (_actionError != null) _error(_actionError!),
-      if (workspaceSelected)
-        Expanded(child: widget.workspaceBuilder(context))
-      else if (_catalogError != null)
-        _error(_catalogError!)
-      else if (!_catalogLoading)
-        _content(_tabs, selectedId),
-      if (!workspaceSelected && widget.pluginFooter != null)
-        widget.pluginFooter!,
-    ];
+      );
+    }
     return Material(
       type: MaterialType.transparency,
-      child: workspaceSelected
-          ? Column(children: children)
-          : SingleChildScrollView(
-              key: ValueKey('sidebar-scroll:$selectedId'),
-              child: Column(mainAxisSize: MainAxisSize.min, children: children),
-            ),
+      child: _catalogError != null
+          ? _pluginScroll(
+              selectedId,
+              SliverToBoxAdapter(child: _error(_catalogError!)),
+            )
+          : _catalogLoading
+          ? _pluginScroll(
+              selectedId,
+              const SliverToBoxAdapter(child: SizedBox.shrink()),
+            )
+          : _content(_tabs, selectedId),
     );
   }
+
+  /// Builds the same title and tab controls for each owning viewport.
+  Widget _header(Widget tabs) => widget.headerBuilder != null
+      ? widget.headerBuilder!(context, tabs)
+      : Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Align(alignment: Alignment.centerRight, child: tabs),
+        );
+
+  /// Composes host chrome and plugin rows in one viewport with item-level laziness.
+  Widget _pluginScroll(String selectedId, Widget content) => CustomScrollView(
+    key: ValueKey('sidebar-scroll:$selectedId'),
+    slivers: [
+      SliverToBoxAdapter(child: _header(_tabSwitch())),
+      if (_actionError != null)
+        SliverToBoxAdapter(child: _error(_actionError!)),
+      content,
+      if (widget.pluginFooter != null)
+        SliverToBoxAdapter(child: widget.pluginFooter!),
+    ],
+  );
 
   /// Keeps visited surfaces mounted, so switching tabs does not destroy workers,
   /// pending catalog reads, scroll positions, or local group expansion state.

@@ -185,6 +185,7 @@ function createCharacterDraft() {
     marks: "",
     chatModelBindingMode: "FOLLOW_GLOBAL",
     chatModelId: null,
+    chatProviderId: null,
     ttsConfigId: null,
     themeConfigId: null,
     memoryBindingMode: "CHARACTER",
@@ -298,7 +299,7 @@ function assertToolAccess(value) {
 function assertCard(value) {
   assertObject(value, "\u89D2\u8272\u5361");
   for (const field2 of ["id", "name", "description", "characterSetting", "openingStatement", "otherContentChat", "otherContentVoice", "advancedCustomPrompt", "marks", "chatModelBindingMode", "memoryBindingMode"]) assertString(value[field2], field2);
-  for (const field2 of ["avatarUri", "chatModelId", "ttsConfigId", "themeConfigId", "sharedMemoryId"]) assertNullableString(value[field2], field2);
+  for (const field2 of ["avatarUri", "chatProviderId", "chatModelId", "ttsConfigId", "themeConfigId", "sharedMemoryId"]) assertNullableString(value[field2], field2);
   if (value.themeConfigId !== null) requireId(value.themeConfigId, "\u89D2\u8272\u4E3B\u9898\u914D\u7F6E");
   assertStrings(value.attachedTagIds, "\u89D2\u8272\u6807\u7B7E");
   assertBoolean(value.isDefault, "\u9ED8\u8BA4\u89D2\u8272\u6807\u8BC6");
@@ -785,6 +786,7 @@ var characterFields = {
   marks: optional(text),
   chatModelBindingMode: optional(enumeration("FOLLOW_GLOBAL", "FIXED_MODEL")),
   chatModelId: optional(nullable(text)),
+  chatProviderId: optional(nullable(text)),
   ttsConfigId: optional(nullable(text)),
   themeConfigId: optional(nullable(text)),
   memoryBindingMode: optional(enumeration("CHARACTER", "SHARED")),
@@ -995,9 +997,10 @@ function chatParticipant(card, request, directory, service) {
         break;
       case "FIXED_MODEL": {
         nonblank(card.chatModelId, "profile.fixedModelId");
+        nonblank(card.chatProviderId, "Fixed model provider must be explicitly selected");
         const candidates = directory.models.filter(
-          /** Resolves the legacy record's deliberately provider-free model selection exactly. */
-          (model) => model.modelId === card.chatModelId
+          /** Resolves the exact provider-scoped model selected by the user. */
+          (model) => model.providerId === card.chatProviderId && model.modelId === card.chatModelId
         );
         if (candidates.length !== 1) throw new Error(
           candidates.length === 0 ? "Fixed model unavailable: " + card.chatModelId : "Fixed model ambiguous: " + card.chatModelId
@@ -1124,6 +1127,7 @@ function resolveChatExecution(request, service) {
 var extractionTemplate = '\u4F60\u8981\u4ECE\u5BF9\u8BDD\u4E2D\u6784\u5EFA\u957F\u671F\u8BB0\u5FC6\u56FE\u8C31\u3002\r\n\r\n$duplicatesPromptPart\r\n$existingMemoriesPrompt\r\n$existingFoldersPrompt\r\n\r\n\u3010\u5199\u5165\u524D\u5148\u8FC7\u7B5B\u3011\r\n- \u53EA\u8BB0\u5F55"\u7528\u6237\u7279\u5F02\u4E14\u53EF\u590D\u7528"\u7684\u4FE1\u606F\uFF1A\u7A33\u5B9A\u504F\u597D\u3001\u7EA6\u675F\u3001\u5DF2\u786E\u8BA4\u51B3\u7B56\u3001\u53CD\u590D\u9519\u8BEF\u3001\u9879\u76EE\u4E8B\u5B9E\u3001\u957F\u671F\u4E16\u754C\u89C2\u4E2D\u7684\u7A33\u5B9A\u8BBE\u5B9A\u3002\r\n- \u4E0D\u8BB0\u5F55\u5E38\u8BC6/\u516C\u5F00\u5B9A\u4E49\uFF08\u5982"TS\u662F\u4EC0\u4E48""Node\u662F\u4EC0\u4E48""\u78C1\u504F\u89D2\u662F\u4EC0\u4E48"\uFF09\u3002\r\n- \u4E0D\u8BB0\u5F55\u672A\u6765\u63A8\u6D4B\u9879\uFF1A\u4E0B\u4E00\u6B65\u5EFA\u8BAE\u3001TODO\u3001\u6682\u5B9A\u8BA1\u5212\u3002\r\n- \u82E5\u6CA1\u6709\u957F\u671F\u4EF7\u503C\u4FE1\u53F7\uFF0C\u76F4\u63A5\u8FD4\u56DE `{}`\u3002\r\n\r\n\u3010\u62BD\u53D6\u7B56\u7565\u3011\r\n- \u63D0\u4F9B\u7684\u5DF2\u6709\u8BB0\u5FC6\u53EA\u662F\u68C0\u7D22\u7EBF\u7D22\uFF0C\u4E0D\u662F\u4E8B\u5B9E\u8BC1\u636E\uFF1B\u53EA\u6709\u5BF9\u8BDD\u660E\u786E\u8BC1\u660E\u4E3B\u4F53\u548C\u4E8B\u5B9E\u76F8\u540C\u65F6\u624D\u53EF `update`\u3001`merge` \u6216\u8FDE\u8FB9\uFF0C\u5426\u5219\u5FFD\u7565\u8BE5\u5019\u9009\u3002\r\n- \u4F18\u5148 `update` / `merge`\uFF0C\u5176\u6B21\u624D\u662F `new`\u3002\r\n- `new` \u4EC5\u5728\u786E\u5B9E\u65B0\u589E\u6982\u5FF5\u65F6\u4F7F\u7528\uFF08\u6700\u591A 5 \u6761\uFF09\u3002\r\n- \u957F\u671F\u5C0F\u8BF4/\u4E16\u754C\u89C2\u573A\u666F\u4E2D\uFF0C\u53CD\u590D\u51FA\u73B0\u4E14\u5F71\u54CD\u8FDE\u7EED\u6027\u7684\u89D2\u8272\u3001\u5730\u70B9\u3001\u7EC4\u7EC7\u3001\u89C4\u5219\u3001\u65F6\u95F4\u7EBF\u53EF\u4EE5\u5165\u5E93\u3002\r\n- \u82E5\u6838\u5FC3\u662F"\u66F4\u65B0\u65E7\u6982\u5FF5"\uFF0C`main` \u5FC5\u987B\u4E3A `null`\uFF0C\u53EA\u7528 `update`\u3002\r\n- \u5982\u679C\u53EA\u662F\u5BF9\u5DF2\u6709\u8BB0\u5FC6\u7684\u6539\u5199\uFF08\u540C\u4E3B\u4F53 + \u540C\u52A8\u4F5C + \u540C\u7ED3\u679C\uFF09\uFF0C\u6309\u91CD\u590D\u5904\u7406\uFF1A\u4F18\u5148 `update`/`merge`\uFF0C\u4E0D\u8981\u518D `new`\u3002\r\n- \u5982\u679C `main` \u4E0E\u5DF2\u6709\u8BB0\u5FC6\u5728\u8BED\u4E49\u4E0A\u662F\u540C\u4E00\u4E8B\u4EF6\uFF0C`main` \u8BBE\u4E3A `null`\uFF0C\u6539\u7528 `update` \u6216 `merge`\u3002\r\n- \u5982\u679C\u5F53\u524D\u8F6E\u7684\u5927\u90E8\u5206\u4E8B\u5B9E\u5DF2\u88AB\u5DF2\u6709\u8BB0\u5FC6\u8986\u76D6\uFF0C\u4E0D\u8981\u518D\u521B\u5EFA\u5E73\u884C `new`\uFF0C\u4F18\u5148\u7ED9\u51FA\u4E00\u6B21 `update` \u6216\u4E00\u6B21 `merge`\u3002\r\n- \u5728\u6709\u660E\u786E\u91CD\u590D\u8BC1\u636E\u65F6\u7EE7\u7EED `new` \u89C6\u4E3A\u4E0D\u5408\u683C\u8F93\u51FA\u3002\r\n- \u63D0\u4F9B\u7ED9\u4F60\u7684\u5DF2\u6709\u8BB0\u5FC6\u6837\u672C\u662F\u53EF\u64CD\u4F5C\u5BF9\u8C61\uFF1A\u5373\u4F7F\u672C\u8F6E\u6CA1\u6709 `new`\uFF0C\u4E5F\u53EF\u4EE5\u76F4\u63A5\u5BF9\u8FD9\u4E9B\u5DF2\u6709\u8BB0\u5FC6\u505A `update`\u3001`merge`\u3001`links`\u3002\r\n\r\n\u3010\u8BED\u6C14\u7B56\u7565\u3011\r\n- \u8BED\u6C14\u53EF\u6839\u636E\u573A\u666F\u53D8\u5316\uFF08\u6280\u672F\u3001\u65E5\u5E38\u804A\u5929\u3001\u5C0F\u8BF4\u521B\u4F5C\uFF09\uFF0C\u4F46\u53EA\u80FD\u6539\u53D8\u8868\u8FBE\u65B9\u5F0F\uFF0C\u4E0D\u80FD\u6539\u53D8\u5165\u5E93\u6807\u51C6\u3002\r\n- \u7ED3\u6784\u548C\u4E8B\u5B9E\u5FC5\u987B\u7A33\u5B9A\uFF1A\u8BED\u6C14\u53D8\u5316\u4E0D\u7B49\u4E8E\u653E\u5BBD\u7B5B\u9009\u3002\r\n- \u4E0D\u80FD\u56E0\u4E3A\u8BED\u6C14\u81EA\u7136\u5316\u5C31\u8BB0\u5F55\u5E38\u8BC6\u6216\u672A\u6765\u8BA1\u5212\u3002\r\n- \u6807\u9898\u4FDD\u6301\u7B80\u6D01\u5E76\u805A\u7126\u4E8B\u4EF6\uFF0C\u5185\u5BB9\u5728\u53EF\u8BFB\u7684\u524D\u63D0\u4E0B\u8D34\u5408\u573A\u666F\u8BED\u6C14\u3002\r\n\r\n\u3010\u6807\u9898\u4E0E\u5185\u5BB9\u5199\u6CD5\u3011\r\n- `main` \u6807\u9898\u4F18\u5148\u5199\u4E8B\u4EF6\uFF0C\u4E0D\u5199\u5B9A\u4E49\u3002\r\n- \u63A8\u8350\u6807\u9898\u6A21\u677F\uFF1A\r\n  - \u4E8B\u4EF6\uFF1A`[\u9886\u57DF] \u4E8B\u4EF6\uFF1A\u52A8\u4F5C + \u7ED3\u679C`\r\n  - \u4E16\u754C\u89C2\u5B9E\u4F53\uFF1A`\u5B9E\u4F53\uFF1A\u540D\u79F0\uFF08\u8EAB\u4EFD/\u7C7B\u578B\uFF09`\r\n- \u4E0D\u63A8\u8350\u6807\u9898\uFF1A`X\u662F\u4EC0\u4E48`\u3001`X\u7684\u5B9A\u4E49`\u3001\u767E\u79D1\u5F0F\u6CDB\u6807\u9898\u3002\r\n- \u5185\u5BB9\u53EA\u5199"\u5DF2\u53D1\u751F\u4E8B\u5B9E + \u5F53\u524D\u5DF2\u786E\u8BA4\u72B6\u6001"\u3002\r\n- \u5185\u5BB9\u7981\u6B62\u5199\u672A\u6765\u52A8\u4F5C\u3001TODO\u3001\u63A8\u6D4B\u6027\u8BA1\u5212\u3002\r\n$memoryExtractionCustomRulesInstruction\r\n\r\n\u3010\u8FDE\u63A5\u5173\u7CFB\u89C4\u5219\u3011\r\n- \u53EA\u6709\u5F53\u5BF9\u8BDD\u91CC\u6709\u660E\u786E\u8BC1\u636E\u65F6\u624D\u5EFA\u8FB9\u3002\r\n- \u63A8\u8350\u5173\u7CFB\u7C7B\u578B\uFF1A\r\n  - \u4E8B\u4EF6\u6D41\u7A0B\uFF1A`FOLLOWS`\u3001`CORRECTS`\u3001`UPDATES`\r\n  - \u53C2\u4E0E\u4E0E\u4E0A\u4E0B\u6587\uFF1A`INVOLVES`\u3001`HAPPENS_AT`\r\n  - \u4E16\u754C\u89C2\u7ED3\u6784\uFF1A`PART_OF`\u3001`ALLIED_WITH`\u3001`OPPOSES`\r\n- \u4E0D\u80FD\u4EC5\u51ED"\u540C\u6BB5\u63D0\u5230\u8FC7"\u5C31\u8FDE\u8FB9\u3002\r\n- \u62FF\u4E0D\u51C6\u5C31\u4E0D\u8FDE\u3002\r\n- \u5EFA\u8FB9\u8303\u56F4\u4E0D\u5E94\u53EA\u9650\u4E8E\u672C\u8F6E\u65B0\u8F93\u51FA\uFF1B\u5982\u679C"\u5DF2\u6709\u6837\u672C\u8BB0\u5FC6"\u4E0E\u672C\u8F6E\u4E8B\u4EF6/\u5B9E\u4F53\u5173\u7CFB\u660E\u786E\uFF0C\u4E5F\u5E94\u4E3B\u52A8\u5EFA\u8FB9\u3002\r\n- \u8F93\u51FA\u524D\u8BF7\u5728\u5168\u91CF\u5BF9\u8C61\u4E0A\u505A\u4E24\u4E24\u5173\u7CFB\u68C0\u67E5\uFF1A`main`\u3001`new`\u3001`update` \u76EE\u6807\u3001\u4EE5\u53CA\u63D0\u4F9B\u7684\u5DF2\u6709\u8BB0\u5FC6\uFF1B\u51E1\u6709\u660E\u786E\u8BC1\u636E\u90FD\u5E94\u5EFA\u8FB9\u3002\r\n\r\n\u3010\u793A\u4F8B\uFF08\u5FC5\u987B\u9075\u5FAA\uFF09\u3011\r\n- \u4EC5\u5728\u95EE\u7B54\u5E38\u8BC6\uFF08\u5982"\u78C1\u504F\u89D2\u662F\u4EC0\u4E48"\uFF09\u4E14\u65E0\u7528\u6237\u7279\u5F02\u4FE1\u53F7\uFF1A\u8FD4\u56DE `{}`\u3002\r\n- \u4EC5\u89E3\u91CA TS/Node \u7B49\u516C\u5F00\u5B9A\u4E49\uFF1A\u8FD4\u56DE `{}`\u3002\r\n- \u95F2\u804A\u4F46\u6709\u5B9E\u9645\u4EA4\u6D41\u5185\u5BB9\uFF1A\u538B\u7F29\u6210\u4E00\u6761\u4E8B\u4EF6\u578B `main` \u8BB0\u5F55\uFF0C\u4E0D\u62C6\u6280\u672F\u7EC6\u8282\u3002\r\n- \u53EA\u6709\u7A7A\u6CDB\u5BD2\u6684\uFF08\u5982\u4EC5"\u4F60\u597D/\u5728\u5417"\uFF09\uFF1A\u8FD4\u56DE `{}`\u3002\r\n- \u672C\u8F6E\u51FA\u73B0"\u7528\u6237\u72AF\u9519\u5E76\u88AB\u7EA0\u6B63"\uFF1A\u4F5C\u4E3A\u4E8B\u4EF6\u5199\u5165 `main`\u3002\r\n- \u957F\u671F\u5C0F\u8BF4/\u4E16\u754C\u89C2\u8BA8\u8BBA\uFF1A\u53CD\u590D\u51FA\u73B0\u4E14\u5F71\u54CD\u8FDE\u7EED\u6027\u7684\u89D2\u8272\u3001\u5730\u540D\u3001\u7EC4\u7EC7\u3001\u89C4\u5219\u3001\u65F6\u95F4\u7EBF\u5E94\u5165\u5E93\uFF0C\u6309\u9700\u4F7F\u7528 `new`/`links`\u3002\r\n- \u4EC5\u89E3\u91CA\u533B\u7597\u5B9A\u4E49\uFF08\u5982"\u6D41\u611F\u662F\u4EC0\u4E48"\uFF09\uFF1A\u8FD4\u56DE `{}`\u3002\r\n- \u4EC5\u89E3\u91CA\u91D1\u878D\u5B9A\u4E49\uFF08\u5982"ETF\u662F\u4EC0\u4E48"\uFF09\uFF1A\u8FD4\u56DE `{}`\u3002\r\n- \u9879\u76EE\u672C\u8F6E\u6709\u660E\u786E\u8FDB\u5C55\uFF08\u4FEE\u590D\u5B8C\u6210/\u6458\u8981\u5B8C\u6210/\u4EFB\u52A1\u7EC8\u6B62\uFF09\uFF1A\u5199\u4E00\u6761\u4E8B\u4EF6\u578B `main`\u3002\r\n- \u53CD\u590D\u89E3\u91CA\u4F46\u6CA1\u6709\u65B0\u8FDB\u5C55/\u65B0\u51B3\u7B56\uFF1A\u8FD4\u56DE `{}`\u3002\r\n- \u4E16\u754C\u89C2\u8BBE\u5B9A\u53D1\u751F\u53D8\u5316\uFF08\u5173\u7CFB/\u5F52\u5C5E\u53D8\u66F4\uFF09\uFF1A\u4F18\u5148 `update`\uFF0C\u5E76\u5728\u8BC1\u636E\u660E\u786E\u65F6\u8FDE `UPDATES` / `PART_OF`\u3002\r\n- \u672C\u8F6E\u53EA\u662F\u91CD\u8FF0\u5DF2\u5B58\u5728\u4E8B\u4EF6\uFF1A\u4F18\u5148 `update`/`merge`\uFF0C\u4E0D\u8981 `new`\u3002\r\n- \u4E8B\u4EF6\u91CC\u660E\u786E\u51FA\u73B0\u53C2\u4E0E\u8005/\u5DE5\u5177\u5305\u4E14\u5173\u7CFB\u6E05\u6670\uFF1A\u8865\u5145 `INVOLVES` \u94FE\u63A5\u3002\r\n- \u672C\u8F6E\u786E\u8BA4\u4E86"\u5DF2\u6709\u6837\u672C\u8BB0\u5FC6"\u548C\u5176\u4ED6\u8BB0\u5FC6\u7684\u660E\u786E\u5173\u7CFB\uFF1A\u5373\u4F7F\u6CA1\u6709 `new`\uFF0C\u4E5F\u5E94\u5728 `links` \u4E2D\u4F53\u73B0\u3002\r\n\r\n\u3010\u8F93\u51FA\u683C\u5F0F\uFF08\u4E25\u683CJSON\uFF09\u3011\r\n- \u9664\u8FD4\u56DE `{}` \u5916\uFF0C\u5FC5\u987B\u5305\u542B `main`\u3001`new`\u3001`update`\u3001`merge`\u3001`links`$profileOptionalKey\uFF1B\u6570\u7EC4\u4E2D\u7684\u6BCF\u4E00\u9879\u5FC5\u987B\u662F\u5177\u540D\u5BF9\u8C61\uFF0C\u7981\u6B62\u4F4D\u7F6E\u6570\u7EC4\u3002\r\n- `main`\uFF1A`null` \u6216 `{"title":"...","content":"...","tags":["..."],"folder_path":"..."}`\u3002\r\n- `new`\uFF1A`[{"title":"...","content":"...","tags":["..."],"folder_path":"...","alias_for":null}, ...]`\u3002\r\n- `update`\uFF1A`[{"title":"...","content":"\u65B0\u5B8C\u6574\u5185\u5BB9","reason":"...","credibility":null,"importance":null}, ...]`\u3002\r\n- `merge`\uFF1A`[{"source_titles":["A","B"],"title":"...","content":"...","tags":["..."],"folder_path":"...","reason":"..."}, ...]`\u3002\r\n- `links`\uFF1A`[{"source":"...","target":"...","type":"\u5927\u5199\u4E0B\u5212\u7EBF\u5173\u7CFB","description":"...","weight":0.0}, ...]`\u3002\r\n- \u53EF\u4FE1\u5EA6\u3001\u91CD\u8981\u6027\u3001\u6743\u91CD\u5FC5\u987B\u662F 0.0 \u5230 1.0 \u7684 JSON \u6570\u5B57\uFF1B\u53EF\u4FE1\u5EA6\u3001\u91CD\u8981\u6027\u548C `alias_for` \u53EF\u7528 JSON `null`\u3002\r\n$profileMarkdownSchemaLine\r\n\r\n$profileUpdateInstruction\r\n\r\n\u53EA\u8FD4\u56DE\u5408\u6CD5 JSON \u5BF9\u8C61\uFF0C\u4E0D\u8981\u8F93\u51FA\u5176\u4ED6\u5185\u5BB9\u3002\r\n';
 
 // src/storage/schema.json
+var version = 2;
 var collections = {
   cards: {
     kind: "object",
@@ -1171,6 +1175,11 @@ var collections = {
       chatModelId: {
         kind: "text",
         nullable: true
+      },
+      chatProviderId: {
+        kind: "text",
+        nullable: true,
+        nullEncoding: "column"
       },
       ttsConfigId: {
         kind: "text",
@@ -1791,6 +1800,14 @@ var collections = {
       }
     }
   },
+  schema_migrations: {
+    kind: "object",
+    fields: {
+      version: {
+        kind: "integer"
+      }
+    }
+  },
   chat_bindings: {
     kind: "object",
     fields: {
@@ -2010,6 +2027,7 @@ var collections = {
 };
 
 // src/storage/relational.ts
+var characterSchemaVersion = version;
 var schemas = collections;
 function quote(name) {
   if (!/^[A-Za-z_][A-Za-z_0-9]*$/.test(name))
@@ -2018,6 +2036,14 @@ function quote(name) {
 }
 function field(path) {
   return path === "" ? "_value" : path;
+}
+function usesPresenceColumn(node) {
+  if (node.nullEncoding === "column") {
+    if (!node.nullable || node.optional || node.kind === "object" || node.kind === "array" || node.kind === "map")
+      throw new Error("Column null encoding requires a required nullable scalar");
+    return false;
+  }
+  return node.optional === true || node.nullable === true;
 }
 function layout(name, node, child = false) {
   const columns = [
@@ -2033,7 +2059,7 @@ function layout(name, node, child = false) {
     );
   const children = [];
   function visit(schema, path, absent) {
-    if (schema.optional || schema.nullable)
+    if (usesPresenceColumn(schema))
       columns.push({
         name: field(path) + "__state",
         affinity: "integer",
@@ -2065,6 +2091,146 @@ function layout(name, node, child = false) {
 var layouts = Object.fromEntries(
   Object.entries(schemas).map(([name, node]) => [name, layout(name, node)])
 );
+var spaceMergeDescriptor = {
+  version: 3,
+  maxEntities: 6,
+  maxReferences: 48,
+  entities: [
+    {
+      collection: "cards",
+      identityColumn: "id",
+      nameColumn: "name",
+      ignoredColumns: ["_revision", "id", "createdAt", "updatedAt"],
+      keyEncoding: "length_prefixed_root",
+      matchMode: "content",
+      keyReferences: [],
+      childCollections: tables(layouts["cards"]).slice(1).map((child) => child.name),
+      references: [
+        { collection: "cards", column: "chatProviderId", target: { kind: "preference", path: "runtime/config/preferences/model_configs.preferences.json" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "cards", column: "ttsConfigId", target: { kind: "preference", path: "runtime/config/preferences/tts_configs.preferences.json" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "cards", column: "themeConfigId", target: { kind: "preference", path: "runtime/config/preferences/user_preferences.preferences.json" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "cards", column: "sharedMemoryId", target: { kind: "collection", collection: "stores" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "cards_attachedTagIds", column: "_value", target: { kind: "collection", collection: "tags" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "cards_sharedMemoryMounts", column: "sharedMemoryId", target: { kind: "collection", collection: "stores" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" }
+      ]
+    },
+    {
+      collection: "groups",
+      identityColumn: "id",
+      nameColumn: "name",
+      ignoredColumns: ["_revision", "id", "createdAt", "updatedAt"],
+      keyEncoding: "length_prefixed_root",
+      matchMode: "content",
+      keyReferences: [],
+      childCollections: tables(layouts["groups"]).slice(1).map((child) => child.name),
+      references: [
+        { collection: "groups", column: "themeConfigId", target: { kind: "preference", path: "runtime/config/preferences/user_preferences.preferences.json" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "groups_members", column: "characterCardId", target: { kind: "collection", collection: "cards" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" }
+      ]
+    },
+    {
+      collection: "tags",
+      identityColumn: "id",
+      nameColumn: "name",
+      ignoredColumns: ["_revision", "id", "createdAt", "updatedAt"],
+      keyEncoding: "length_prefixed_root",
+      matchMode: "content",
+      keyReferences: [],
+      childCollections: [],
+      references: []
+    },
+    {
+      collection: "stores",
+      identityColumn: "id",
+      nameColumn: "name",
+      ignoredColumns: ["_revision", "id", "createdAt", "updatedAt"],
+      keyEncoding: "length_prefixed_root",
+      matchMode: "content",
+      keyReferences: [],
+      childCollections: [],
+      references: []
+    },
+    {
+      collection: "owners",
+      identityColumn: "ownerKey",
+      nameColumn: null,
+      ignoredColumns: ["_revision"],
+      keyEncoding: "slash_root",
+      matchMode: "identity",
+      keyReferences: [
+        { collection: "cards", prefix: "character:" },
+        { collection: "stores", prefix: "shared:" }
+      ],
+      childCollections: ["memories", "links", "chunks", "candidates", "embeddings"],
+      references: [
+        { collection: "owners", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "owners", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "owners", column: "userDocumentPath", target: { kind: "collection", collection: "owners" }, keyPrefix: "owners/", keySuffix: "/USER.md", valueEncoding: "uri_component" },
+        { collection: "memories", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "memories", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "links", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "links", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "chunks", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "chunks", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "candidates", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "candidates", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "embeddings", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "embeddings", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" }
+      ]
+    },
+    {
+      collection: "meta",
+      identityColumn: "_key",
+      nameColumn: null,
+      ignoredColumns: ["_revision"],
+      keyEncoding: "length_prefixed_root",
+      matchMode: "identity",
+      keyReferences: [],
+      childCollections: [],
+      references: [
+        { collection: "meta", column: "active__CharacterCard__id", target: { kind: "collection", collection: "cards" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "meta", column: "active__CharacterGroup__id", target: { kind: "collection", collection: "groups" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" }
+      ]
+    }
+  ]
+};
+function schemaVersion(entry) {
+  if (entry === null) return 1;
+  if (entry.value === null || Array.isArray(entry.value) || typeof entry.value !== "object")
+    throw new Error("Invalid character schema migration record");
+  const version2 = entry.value.version;
+  if (typeof version2 !== "number" || !Number.isInteger(version2) || version2 < 1)
+    throw new Error("Invalid character schema migration version");
+  return version2;
+}
+function migrateCharacterSchema(database2, readModels) {
+  return __async(this, null, function* () {
+    yield database2.migrateSchema("character", characterSchemaVersion, (version2) => __async(null, null, function* () {
+      switch (version2) {
+        case 1: {
+          const models = yield readModels();
+          const mutations = [];
+          for (const entry of yield database2.read("cards")) {
+            const card = entry.value;
+            if (card.chatModelBindingMode !== "FIXED_MODEL" || card.chatModelId === null || card.chatProviderId !== null) continue;
+            const candidates = models.filter((model) => model.modelId === card.chatModelId);
+            if (candidates.length !== 1) continue;
+            mutations.push({
+              op: "put",
+              collection: "cards",
+              key: entry.key,
+              expectedVersion: entry.version,
+              value: { ...card, chatProviderId: candidates[0].providerId }
+            });
+          }
+          return mutations;
+        }
+        default:
+          throw new Error("Missing character schema migration: " + version2 + " -> " + (version2 + 1));
+      }
+    }));
+  });
+}
 function tables(root) {
   return [root, ...root.children.flatMap(tables)];
 }
@@ -2091,7 +2257,7 @@ function encode(collection, key, value, revision) {
     const row = { _key: identity3, _revision: revision, ...extra };
     function visit(node, path, item, absent = false) {
       const column = field(path);
-      if (node.optional || node.nullable)
+      if (usesPresenceColumn(node))
         row[column + "__state"] = item === void 0 ? 0 : item === null ? 1 : 2;
       if (item === void 0 && !node.optional && !absent)
         throw new Error(collection + "/" + key + " missing " + path);
@@ -2186,7 +2352,8 @@ function decodeLayout(root, row, rows = /* @__PURE__ */ new Map()) {
   function record2(current, stored) {
     function visit(node, path) {
       const column = field(path);
-      if (node.optional || node.nullable) {
+      if (node.nullEncoding === "column" && stored[column] === null) return null;
+      if (usesPresenceColumn(node)) {
         const state = Number(stored[column + "__state"]);
         if (state === 0 && node.optional) return void 0;
         if (state === 1 && node.nullable) return null;
@@ -2292,6 +2459,30 @@ var RelationalDatabase = class _RelationalDatabase {
       () => Math.floor(Math.random() * 4294967296).toString(16).padStart(8, "0")
     ).join("");
   }
+  /** Commits one versioned schema step together with its durable migration marker. */
+  migrateSchema(key, targetVersion, step) {
+    return __async(this, null, function* () {
+      let marker = yield this.get("schema_migrations", key);
+      let version2 = schemaVersion(marker);
+      if (version2 > targetVersion) throw new Error("Stored schema is newer than this runtime");
+      while (version2 < targetVersion) {
+        const mutations = yield step(version2);
+        const nextVersion = version2 + 1;
+        yield this.commit([
+          ...mutations,
+          {
+            op: "put",
+            collection: "schema_migrations",
+            key,
+            expectedVersion: marker?.version ?? null,
+            value: { version: nextVersion }
+          }
+        ]);
+        marker = yield this.get("schema_migrations", key);
+        version2 = schemaVersion(marker);
+      }
+    });
+  }
   /** Opens the sole runtime database and declares its exact typed schema. */
   static open() {
     return __async(this, null, function* () {
@@ -2299,7 +2490,8 @@ var RelationalDatabase = class _RelationalDatabase {
       if (typeof directory !== "string" || directory.trim() === "")
         throw new Error("Plugin data directory is unavailable");
       const sql = yield Tools.Storage.sqlite.open({
-        path: directory + "/characters-relational.sqlite"
+        path: directory + "/characters-relational.sqlite",
+        merge: spaceMergeDescriptor
       });
       for (const root of Object.values(layouts))
         for (const table of tables(root)) yield sql.defineTable(table.table);
@@ -2349,9 +2541,9 @@ var RelationalDatabase = class _RelationalDatabase {
     });
   }
   /** Writes guarded roots and their relations atomically through the host journal. */
-  commit(mutations) {
+  commit(mutations, whenAbsent) {
     return __async(this, null, function* () {
-      const version = this.executionId + ":" + ++this.sequence;
+      const version2 = this.executionId + ":" + ++this.sequence;
       const statements = [];
       for (const mutation of mutations) {
         const root = layouts[mutation.collection];
@@ -2367,7 +2559,7 @@ var RelationalDatabase = class _RelationalDatabase {
             expectedAffectedRows: 1
           });
         } else {
-          const encoded = encode(root.name, key, mutation.value, version);
+          const encoded = encode(root.name, key, mutation.value, version2);
           const row = encoded.get(root.name)[0];
           statements.push(rootWrite(root.name, row, expectedVersion));
           if (expectedVersion !== null)
@@ -2385,8 +2577,8 @@ var RelationalDatabase = class _RelationalDatabase {
           "Relational operation exceeds the host transaction statement limit"
         );
       }
-      yield this.sql.transaction(statements);
-      return { version };
+      const result2 = yield this.sql.transaction(statements, whenAbsent === void 0 ? void 0 : { whenAbsent });
+      return result2.length === 0 ? null : { version: version2 };
     });
   }
 };
@@ -3452,115 +3644,98 @@ function processCandidates(ownerKey, candidates, owner2) {
   });
 }
 var MemoryJobRunner = class {
-  /** Receives the same sole repository owner used by UI, commands and public APIs. */
   constructor(owner2) {
     this.owner = owner2;
-    this.busy = false;
-    this.waiters = [];
+    this.running = null;
   }
-  /** Serializes genuine interval invocations without launching overlapping extraction batches. */
-  acquire() {
-    return __async(this, null, function* () {
-      if (!this.busy) {
-        this.busy = true;
-        return;
-      }
-      yield new Promise(
-        /** Parks only this invocation until the previous interval work completes. */
-        (resolve) => this.waiters.push(resolve)
-      );
-    });
-  }
-  /** Releases one waiting interval while retaining the same runtime owner. */
-  release() {
-    const next = this.waiters.shift();
-    if (next === void 0) this.busy = false;
-    else next();
-  }
-  /** Advances actual rebuild windows and due pending candidates through existing interval hooks. */
+  /** Shares the active pass and its failure instead of queuing obsolete timer notifications. */
   tick() {
+    if (this.running === null) {
+      this.running = this.runTick().finally(() => {
+        this.running = null;
+      });
+    }
+    return this.running;
+  }
+  /** Advances persisted rebuild windows and due candidates once. */
+  runTick() {
     return __async(this, null, function* () {
-      yield this.acquire();
-      try {
-        const keys = yield this.owner.run(
-          /** Enumerates only genuine initialized memory spaces. */
-          (repository) => repository.listMemoryOwnerKeys()
-        ), report = { owners: keys.length, rebuildWindows: 0, candidateBatches: 0 };
-        for (const ownerKey of keys) {
-          const taskId = yield this.owner.run(
-            /** Reads a persisted runnable rebuild identity without fabricating a job. */
-            (repository) => __async(this, null, function* () {
-              const space = yield repository.readMemorySpace(ownerKey);
-              return space.rebuildTask !== null && (space.rebuildProgress.status === "preparing" || space.rebuildProgress.status === "running") ? space.rebuildTask.id : null;
-            })
-          );
-          if (taskId !== null) {
-            yield processRebuildWindow(ownerKey, taskId, this.owner);
-            report.rebuildWindows += 1;
-          }
-          const batches = yield this.owner.run(
-            /** Claims only due pending records; failed attempts are never automatically retried. */
-            (repository) => __async(this, null, function* () {
-              if (!(yield repository.readGlobalMemoryPreferences()).autoUpdateEnabled) return [];
-              const space = yield repository.readMemorySpace(ownerKey), now = Date.now();
-              if (space.settings.autoSaveIntervalMinutes === 0 || now < space.settings.nextAutoSaveRunAtMs) return [];
-              const pending = space.candidates.filter(
-                /** Selects genuinely pending records, not terminal failures. */
-                (candidate) => candidate.status === "pending"
-              );
-              const batches2 = [];
-              if (pending.length >= 5) {
-                const grouped = /* @__PURE__ */ new Map();
-                for (const candidate of pending) {
-                  const list = grouped.get(candidate.chatId);
-                  if (list === void 0) grouped.set(candidate.chatId, [candidate]);
-                  else list.push(candidate);
-                }
-                for (const records3 of grouped.values()) {
-                  const capped = records3.slice(0, 20);
-                  for (const sourceType of ["selected_user_message", "reply_finalized_auto"]) {
-                    const batch = capped.filter(
-                      /** Preserves the original selected/automatic source partition. */
-                      (candidate) => candidate.sourceType === sourceType
-                    );
-                    if (batch.length !== 0) batches2.push(batch);
-                  }
+      const keys = yield this.owner.run(
+        /** Enumerates only genuine initialized memory spaces. */
+        (repository) => repository.listMemoryOwnerKeys()
+      ), report = { owners: keys.length, rebuildWindows: 0, candidateBatches: 0 };
+      for (const ownerKey of keys) {
+        const taskId = yield this.owner.run(
+          /** Reads a persisted runnable rebuild identity without fabricating a job. */
+          (repository) => __async(this, null, function* () {
+            const space = yield repository.readMemorySpace(ownerKey);
+            return space.rebuildTask !== null && (space.rebuildProgress.status === "preparing" || space.rebuildProgress.status === "running") ? space.rebuildTask.id : null;
+          })
+        );
+        if (taskId !== null) {
+          yield processRebuildWindow(ownerKey, taskId, this.owner);
+          report.rebuildWindows += 1;
+        }
+        const batches = yield this.owner.run(
+          /** Claims only due pending records; failed attempts are never automatically retried. */
+          (repository) => __async(this, null, function* () {
+            if (!(yield repository.readGlobalMemoryPreferences()).autoUpdateEnabled) return [];
+            const space = yield repository.readMemorySpace(ownerKey), now = Date.now();
+            if (space.settings.autoSaveIntervalMinutes === 0 || now < space.settings.nextAutoSaveRunAtMs) return [];
+            const pending = space.candidates.filter(
+              /** Selects genuinely pending records, not terminal failures. */
+              (candidate) => candidate.status === "pending"
+            );
+            const batches2 = [];
+            if (pending.length >= 5) {
+              const grouped = /* @__PURE__ */ new Map();
+              for (const candidate of pending) {
+                const list = grouped.get(candidate.chatId);
+                if (list === void 0) grouped.set(candidate.chatId, [candidate]);
+                else list.push(candidate);
+              }
+              for (const records3 of grouped.values()) {
+                const capped = records3.slice(0, 20);
+                for (const sourceType of ["selected_user_message", "reply_finalized_auto"]) {
+                  const batch = capped.filter(
+                    /** Preserves the original selected/automatic source partition. */
+                    (candidate) => candidate.sourceType === sourceType
+                  );
+                  if (batch.length !== 0) batches2.push(batch);
                 }
               }
-              space.settings.nextAutoSaveRunAtMs = now + space.settings.autoSaveIntervalMinutes * 6e4;
+            }
+            space.settings.nextAutoSaveRunAtMs = now + space.settings.autoSaveIntervalMinutes * 6e4;
+            yield repository.writeMemorySpace(ownerKey, space);
+            return batches2;
+          })
+        );
+        for (const batch of batches) {
+          const claimed = yield this.owner.run(
+            /** Claims only the next actual batch so a failure leaves later sources genuinely pending. */
+            (repository) => __async(this, null, function* () {
+              if (!(yield repository.readGlobalMemoryPreferences()).autoUpdateEnabled) return false;
+              const space = yield repository.readMemorySpace(ownerKey), ids = /* @__PURE__ */ new Set();
+              for (const candidate of batch) ids.add(candidate.id);
+              let count = 0;
+              for (const candidate of space.candidates) if (ids.has(candidate.id)) {
+                if (candidate.status !== "pending") throw new Error("Candidate is no longer pending: " + candidate.id);
+                candidate.status = "processing";
+                candidate.attemptCount += 1;
+                candidate.updatedAt = Date.now();
+                count += 1;
+              }
+              if (count !== batch.length) throw new Error("A selected candidate no longer exists");
               yield repository.writeMemorySpace(ownerKey, space);
-              return batches2;
+              return true;
             })
           );
-          for (const batch of batches) {
-            const claimed = yield this.owner.run(
-              /** Claims only the next actual batch so a failure leaves later sources genuinely pending. */
-              (repository) => __async(this, null, function* () {
-                if (!(yield repository.readGlobalMemoryPreferences()).autoUpdateEnabled) return false;
-                const space = yield repository.readMemorySpace(ownerKey), ids = /* @__PURE__ */ new Set();
-                for (const candidate of batch) ids.add(candidate.id);
-                let count = 0;
-                for (const candidate of space.candidates) if (ids.has(candidate.id)) {
-                  if (candidate.status !== "pending") throw new Error("Candidate is no longer pending: " + candidate.id);
-                  candidate.status = "processing";
-                  candidate.attemptCount += 1;
-                  candidate.updatedAt = Date.now();
-                  count += 1;
-                }
-                if (count !== batch.length) throw new Error("A selected candidate no longer exists");
-                yield repository.writeMemorySpace(ownerKey, space);
-                return true;
-              })
-            );
-            if (!claimed) break;
-            yield processCandidates(ownerKey, batch, this.owner);
-            report.candidateBatches += 1;
-          }
+          if (!claimed) break;
+          yield processCandidates(ownerKey, batch, this.owner);
+          report.candidateBatches += 1;
         }
-        return report;
-      } finally {
-        this.release();
       }
+      return report;
     });
   }
 };
@@ -3943,7 +4118,7 @@ ${entry.content}`);
   if (content === "") return null;
   return stageImportedTag({ name: `\u4E16\u754C\u4E66: ${data.name}`, description: `\u4E3A\u89D2\u8272'${data.name}'\u81EA\u52A8\u751F\u6210\u7684\u4E16\u754C\u4E66\u3002`, promptContent: content, tagType: "FUNCTION" }, tags, changes2);
 }
-function convertStandardTavern(data, spec, version) {
+function convertStandardTavern(data, spec, version2) {
   const card = createCharacterDraft();
   card.name = data.name;
   if (data.tags.length !== 0) card.description = `\u6807\u7B7E\uFF1A${data.tags.slice(0, 5).join(", ")}${data.tags.length > 5 ? `\u7B49${data.tags.length}` : ""}`;
@@ -3987,7 +4162,7 @@ ${data.creator_notes}
 `;
   if (data.tags.length !== 0) marks += `\u539F\u59CB\u6807\u7B7E\uFF1A${data.tags.join(", ")}
 `;
-  if (spec.trim() !== "") marks += `\u683C\u5F0F\uFF1A${spec}${version.trim() !== "" ? ` v${version}` : ""}
+  if (spec.trim() !== "") marks += `\u683C\u5F0F\uFF1A${spec}${version2.trim() !== "" ? ` v${version2}` : ""}
 `;
   card.marks = marks.trim();
   return card;
@@ -4067,6 +4242,7 @@ function encodeCharacterExport(card, format2, tags) {
             marks: card.marks,
             chatModelBindingMode: card.chatModelBindingMode,
             chatModelId: card.chatModelId,
+            chatProviderId: card.chatProviderId,
             ttsConfigId: card.ttsConfigId,
             themeConfigId: card.themeConfigId,
             memoryBindingMode: card.memoryBindingMode,
@@ -4142,6 +4318,17 @@ function activateForChat(input, host) {
     return { characterCardName: input.characterCardName, characterGroupId: input.characterGroupId, updated: true };
   });
 }
+function resolveConfiguration(input, service) {
+  return __async(this, null, function* () {
+    const result2 = yield resolveChatConfiguration(input, service);
+    if (!("profile" in result2) || (yield service.readGlobalMemoryPreferences()).userDescriptionEnabled) return result2;
+    return {
+      ...result2,
+      profile: { ...result2.profile, userPreferencesText: "" },
+      participants: result2.participants.map((profile) => ({ ...profile, userPreferencesText: "" }))
+    };
+  });
+}
 var handlers = {
   /** Keeps full-filter searches and provider embedding persistence on the same serialized service. */
   "memory.searchWithOptions": (input, repository) => __async(null, null, function* () {
@@ -4166,23 +4353,11 @@ var handlers = {
   "memory.embeddings.rebuild": (input, repository) => rebuildMemoryEmbeddings(input.ownerKey, repository),
   /** Enqueues only actual persisted message sources and genuine bound owners. */
   "memory.candidate.enqueue": (input, repository) => enqueueCandidate(input, repository),
-  /** Resolves binding, catalogs, prompt and USER.md from one serialized repository operation. */
-  "chat.configuration.resolve": (input, repository) => __async(null, null, function* () {
-    const result2 = yield resolveChatConfiguration(input, {
-      /** Reads the same in-flight directory without reacquiring the publisher. */
-      snapshot: () => snapshot(repository),
-      readGlobalMemoryPreferences: () => repository.readGlobalMemoryPreferences(),
-      /** Executes nested resolution reads on this exact snapshot without another service. */
-      dispatchDomain: (operation, payload) => executeDomain(operation, payload, repository)
-    });
-    if ("profile" in result2 && !(yield repository.readGlobalMemoryPreferences()).userDescriptionEnabled) {
-      return {
-        ...result2,
-        profile: { ...result2.profile, userPreferencesText: "" },
-        participants: result2.participants.map((profile) => ({ ...profile, userPreferencesText: "" }))
-      };
-    }
-    return result2;
+  /** Resolves chat configuration using this operation's existing repository snapshot. */
+  "chat.configuration.resolve": (input, repository) => resolveConfiguration(input, {
+    snapshot: () => snapshot(repository),
+    readGlobalMemoryPreferences: () => repository.readGlobalMemoryPreferences(),
+    dispatchDomain: (operation, payload) => executeDomain(operation, payload, repository)
   }),
   /** Requires the chat's persisted selection rather than global active state. */
   "chat.configuration.binding.read": (input, repository) => repository.readChatBinding(input.chatId),
@@ -4848,6 +5023,8 @@ function createCharacterCardsService(owner2, configurations = independentConfigu
     if (request.action === "listThemeChoices")
       return readThemeChoices(configurations);
     switch (request.action) {
+      case "snapshot":
+        return owner2.readConfigurationSnapshot();
       case "listMemoryChats":
         return listMemoryChats(request.ownerKey, owner2);
       case "readGlobalMemoryPreferences":
@@ -4880,20 +5057,50 @@ function createCharacterCardsService(owner2, configurations = independentConfigu
       )
     );
   }
-  return {
+  const service = {
     /** Runs the private job scheduler without constructing another store or business service. */
     runMemoryJobs: () => jobs.tick(),
     /** Reads only the metadata flags needed by prompt composition. */
     readGlobalMemoryPreferences: () => owner2.readGlobalMemoryPreferences(),
     /** Preserves action-specific results through the shared service dispatcher. */
     dispatch: dispatchRequest,
-    /** Reads one consistent domain snapshot through the same operation queue. */
-    snapshot: () => owner2.run(snapshot),
-    /** Preserves the same repository queue and integrity checks as full snapshots. */
+    /** Reads configuration records without loading memory data. */
+    snapshot: () => owner2.readConfigurationSnapshot(),
+    /** Reads role presentation without entering the editing queue. */
     sidebarDirectory: () => owner2.readSidebarDirectory(),
-    /** Keeps every real selection alias and sidebar binding on the same awaited application sequence. */
+    /** Routes reads directly and keeps mutations in the editing transaction. */
     dispatchDomain(operation, input) {
       switch (operation) {
+        case "snapshot":
+          return owner2.readConfigurationSnapshot();
+        case "chat.configuration.resolve":
+          return resolveConfiguration(parseDomainPayload("chat.configuration.resolve", input), service);
+        case "character.combine": {
+          const { id: id2, promptFunctionType = "CHAT", additionalTagIds = [] } = parseDomainPayload("character.combine", input);
+          return combinePrompts(id2, additionalTagIds, promptFunctionType, owner2).then((prompt) => ({ id: id2, promptFunctionType, additionalTagIds, prompt }));
+        }
+        case "memory.resolveOwner": {
+          const { characterId } = parseDomainPayload("memory.resolveOwner", input);
+          return resolveMemoryOwner(characterId, owner2).then(parseOwner);
+        }
+        case "tag.list":
+          return owner2.listTags();
+        case "memory.shared.list":
+          return owner2.listStores();
+        case "activePrompt.get":
+          return owner2.readActive();
+        case "character.list":
+          return owner2.listCharacters();
+        case "group.list":
+          return owner2.listGroups();
+        case "character.get": {
+          const { id: id2 } = parseDomainPayload("character.get", input);
+          return owner2.getCharacter(id2);
+        }
+        case "group.get": {
+          const { id: id2 } = parseDomainPayload("group.get", input);
+          return owner2.getGroup(id2);
+        }
         case "memory.chat.list":
           return listMemoryChats(
             parseDomainPayload("memory.chat.list", input).ownerKey,
@@ -4943,6 +5150,7 @@ function createCharacterCardsService(owner2, configurations = independentConfigu
       );
     }
   };
+  return service;
 }
 function records(value, check, label) {
   if (!Array.isArray(value)) throw new Error(`${label} \u8FD4\u56DE\u683C\u5F0F\u4E0D\u6B63\u786E`);
@@ -5135,8 +5343,10 @@ function normalizedCharacter(card) {
     throw new Error("\u804A\u5929\u6A21\u578B\u7ED1\u5B9A\u6A21\u5F0F\u65E0\u6548");
   if (card.memoryBindingMode !== "CHARACTER" && card.memoryBindingMode !== "SHARED")
     throw new Error("\u8BB0\u5FC6\u7ED1\u5B9A\u6A21\u5F0F\u65E0\u6548");
-  if (card.chatModelBindingMode === "FIXED_MODEL")
+  if (card.chatModelBindingMode === "FIXED_MODEL") {
+    requireId(card.chatProviderId, "\u56FA\u5B9A\u804A\u5929\u6A21\u578B\u63D0\u4F9B\u5546");
     requireId(card.chatModelId, "\u56FA\u5B9A\u804A\u5929\u6A21\u578B");
+  }
   if (card.memoryBindingMode === "SHARED")
     requireId(card.sharedMemoryId, "\u5171\u4EAB\u8BB0\u5FC6\u5E93");
   if (card.ttsConfigId !== null) requireId(card.ttsConfigId, "TTS \u914D\u7F6E");
@@ -6292,7 +6502,7 @@ var RepositorySession = class {
       const name = requireName(card.name, "character name");
       uniqueName(this.state.cards, name, "");
       if (card.isDefault) throw new Error("Only the installed product default can be a default character");
-      const now = Date.now(), saved = { ...copy(card), id: "character-" + this.allocate(), name, createdAt: now, updatedAt: now };
+      const now = Date.now(), saved = { ...copy(card), id: uuid(), name, createdAt: now, updatedAt: now };
       this.state.cards.push(saved);
       this.addSpace("character:" + saved.id);
       return copy(saved);
@@ -6382,7 +6592,7 @@ var RepositorySession = class {
       assertGroup(group);
       const name = requireName(group.name, "group name");
       uniqueName(this.state.groups, name, "");
-      const now = Date.now(), saved = { ...copy(group), id: "group-" + this.allocate(), name, createdAt: now, updatedAt: now };
+      const now = Date.now(), saved = { ...copy(group), id: uuid(), name, createdAt: now, updatedAt: now };
       this.state.groups.push(saved);
       return copy(saved);
     });
@@ -6424,7 +6634,7 @@ var RepositorySession = class {
       assertTagValues(values);
       const name = requireName(values.name, "tag name");
       uniqueName(this.state.tags, name, "");
-      const now = Date.now(), saved = { ...copy(values), name, id: "tag-" + this.allocate(), createdAt: now, updatedAt: now };
+      const now = Date.now(), saved = { ...copy(values), name, id: uuid(), createdAt: now, updatedAt: now };
       this.state.tags.push(saved);
       return copy(saved);
     });
@@ -6474,7 +6684,7 @@ var RepositorySession = class {
       name = requireName(name, "library name");
       uniqueName(this.state.stores, name, "");
       const now = Date.now();
-      const store = { id: "shared-" + this.allocate(), name, createdAt: now, updatedAt: now };
+      const store = { id: uuid(), name, createdAt: now, updatedAt: now };
       this.state.stores.push(store);
       this.addSpace("shared:" + store.id);
       return copy(store);
@@ -7041,25 +7251,41 @@ var DatabaseCharacterRepository = class _DatabaseCharacterRepository {
         directory,
         directories
       );
-      const metadata = yield database2.get("meta", "state");
-      if (metadata === null) {
-        const rows = yield repository.readRecords();
-        if (rows.length !== 0)
-          throw new Error("Character database has records without metadata");
+      const existingMetadata = yield database2.get("meta", "state");
+      if (existingMetadata === null) {
         const state = createInitialState(Date.now());
         assertCharacterState(state);
-        const documents = state.owners.map((owner2) => ({
-          ownerKey: owner2.ownerKey,
-          path: directory + "/" + owner2.userDocumentPath,
-          content: "",
-          newDocument: true
-        }));
-        yield repository.publish(state, [], documents, [], null, {});
+        const initialized = yield database2.commit([
+          { op: "put", collection: "schema_migrations", key: "character", expectedVersion: null, value: { version: characterSchemaVersion } },
+          ...records2(state).map((row) => ({ op: "put", ...row, expectedVersion: null })),
+          {
+            op: "put",
+            collection: "meta",
+            key: "state",
+            expectedVersion: null,
+            value: {
+              version: state.version,
+              nextId: state.nextId,
+              active: "Model" in state.active ? null : storedValue(state.active),
+              memoryPreferences: storedValue(state.memoryPreferences)
+            }
+          }
+        ], { collection: "meta", key: "state" });
+        if (initialized !== null) {
+          for (const owner2 of state.owners) {
+            const path = directory + "/" + owner2.userDocumentPath;
+            completed(yield Tools.Files.mkdir(path.slice(0, path.lastIndexOf("/")), true));
+            completed(yield Tools.Files.write(path, "", false));
+          }
+        }
       } else {
-        assertCharacterState(
-          stateFromRecords(metadata.value, yield repository.readRecords())
-        );
+        yield migrateCharacterSchema(database2, () => __async(null, null, function* () {
+          return directories === null ? [] : directories.listModels();
+        }));
       }
+      const metadata = yield database2.get("meta", "state");
+      if (metadata === null) throw new Error("Character initialization did not publish metadata");
+      assertCharacterState(stateFromRecords(metadata.value, yield repository.readRecords()));
       return repository;
     });
   }
@@ -7137,50 +7363,137 @@ var DatabaseCharacterRepository = class _DatabaseCharacterRepository {
       }
     });
   }
-  /** Reads only complete role presentation records under the shared operation queue. */
-  readSidebarDirectory() {
+  requirePublicationReady() {
+    if (this.publicationFailure !== null) throw this.publicationFailure.error;
+  }
+  /** Retries only overlapping commits; readers never reserve the editing queue. */
+  readConsistent(read) {
     return __async(this, null, function* () {
-      yield this.acquire();
-      try {
-        if (this.publicationFailure !== null) throw this.publicationFailure.error;
-        const metadata = yield this.database.get("meta", "state");
-        if (metadata === null)
-          throw new Error("Character database metadata disappeared");
-        assertObject(metadata.value, "character metadata");
-        if (metadata.value.migrationStatus === "writing")
-          throw new Error("Character migration has not completed");
-        const result2 = yield Promise.allSettled([
-          this.database.read("cards"),
-          this.database.read("groups")
-        ]);
-        const cards = [], groups = [];
-        for (const read of result2)
-          if (read.status === "rejected") throw read.reason;
-        if (result2[0].status === "fulfilled") {
-          for (const row of result2[0].value) {
-            assertCard(row.value);
-            cards.push(row.value);
-          }
+      for (let attempt = 0; attempt < 3; attempt++) {
+        this.requirePublicationReady();
+        const before = yield this.database.get("meta", "state");
+        if (before === null) throw new Error("Character database metadata disappeared");
+        assertObject(before.value, "character metadata");
+        if (before.value.migrationStatus === "writing") throw new Error("Character migration has not completed");
+        let result2;
+        let failure2 = null;
+        try {
+          result2 = yield read();
+        } catch (error) {
+          failure2 = { error };
         }
-        if (result2[1].status === "fulfilled") {
-          for (const row of result2[1].value) {
-            assertGroup(row.value);
-            groups.push(row.value);
-          }
-        }
-        const ids = new Set(cards.map((card) => card.id));
-        for (const group of groups)
-          for (const member2 of group.members) {
-            if (!ids.has(member2.characterCardId))
-              throw new Error("Missing group member: " + member2.characterCardId);
-          }
-        const checked = yield this.database.get("meta", "state");
-        if (checked === null || checked.version !== metadata.version)
-          throw new Error("Character directory changed during the read");
-        return { cards, groups };
-      } finally {
-        this.release();
+        const after = yield this.database.get("meta", "state");
+        this.requirePublicationReady();
+        if (after === null) throw new Error("Character database metadata disappeared");
+        if (before.version !== after.version) continue;
+        if (failure2 !== null) throw failure2.error;
+        return result2;
       }
+      throw new Error("Character records kept changing during the read; retry the operation");
+    });
+  }
+  /** Reads role presentation independently of memory editing and background jobs. */
+  readSidebarDirectory() {
+    return this.readConsistent(() => __async(this, null, function* () {
+      const [cards, groups] = yield Promise.all([this.readCharacters(), this.readGroups()]);
+      const ids = new Set(cards.map((card) => card.id));
+      for (const group of groups)
+        for (const member2 of group.members)
+          if (!ids.has(member2.characterCardId)) throw new Error("Missing group member: " + member2.characterCardId);
+      return { cards, groups };
+    }));
+  }
+  readActive() {
+    this.requirePublicationReady();
+    return this.readMetadata().then((metadata) => metadata.active);
+  }
+  /** Reads configuration records only; memory content and vectors remain in their own queries. */
+  readConfigurationSnapshot() {
+    if (this.directories === null) throw new Error("External directory readers are unavailable");
+    const directories = this.directories;
+    return this.readConsistent(() => __async(this, null, function* () {
+      const [cards, groups, stores, tags, models, ttsConfigs, toolCatalog, metadata] = yield Promise.all([
+        this.readCharacters(),
+        this.readGroups(),
+        this.database.read("stores").then((rows) => rows.map((row) => row.value)),
+        this.readTags(),
+        Promise.resolve().then(() => directories.listModels()),
+        Promise.resolve().then(() => directories.listTtsConfigs()),
+        Promise.resolve().then(() => directories.readToolCatalog()),
+        this.readMetadata()
+      ]);
+      return { cards, groups, stores, tags, models, ttsConfigs, toolCatalog, ...metadata };
+    }));
+  }
+  listCharacters() {
+    return this.readConsistent(() => this.readCharacters());
+  }
+  listGroups() {
+    return this.readConsistent(() => this.readGroups());
+  }
+  listStores() {
+    return this.readConsistent(() => __async(this, null, function* () {
+      return (yield this.database.read("stores")).map((row) => row.value);
+    }));
+  }
+  listTags() {
+    return this.readConsistent(() => this.readTags());
+  }
+  readCharacters() {
+    return __async(this, null, function* () {
+      return (yield this.database.read("cards")).map((row) => {
+        assertCard(row.value);
+        return row.value;
+      });
+    });
+  }
+  readGroups() {
+    return __async(this, null, function* () {
+      return (yield this.database.read("groups")).map((row) => {
+        assertGroup(row.value);
+        return row.value;
+      });
+    });
+  }
+  readTags() {
+    return __async(this, null, function* () {
+      return (yield this.database.read("tags")).map((row) => {
+        assertTag(row.value);
+        return row.value;
+      });
+    });
+  }
+  getCharacter(id2) {
+    requireId(id2, "\u89D2\u8272\u5361\u6807\u8BC6");
+    return this.readConsistent(() => __async(this, null, function* () {
+      const row = yield this.database.get("cards", id2);
+      if (row === null) throw new Error("Character not found: " + id2);
+      assertCard(row.value);
+      return row.value;
+    }));
+  }
+  getGroup(id2) {
+    requireId(id2, "\u7FA4\u7EC4\u6807\u8BC6");
+    return this.readConsistent(() => __async(this, null, function* () {
+      const row = yield this.database.get("groups", id2);
+      if (row === null) throw new Error("Group not found: " + id2);
+      assertGroup(row.value);
+      return row.value;
+    }));
+  }
+  readMetadata() {
+    return __async(this, null, function* () {
+      const row = yield this.database.get("meta", "state");
+      if (row === null) throw new Error("Character database metadata disappeared");
+      assertObject(row.value, "character metadata");
+      if (row.value.migrationStatus === "writing") throw new Error("Character migration has not completed");
+      assertObject(row.value.memoryPreferences, "global memory preferences");
+      assertBoolean(row.value.memoryPreferences.userDescriptionEnabled, "user description enabled");
+      assertBoolean(row.value.memoryPreferences.autoUpdateEnabled, "memory auto update enabled");
+      return {
+        active: row.value.active ?? { Model: { id: "chat" } },
+        memoryPreferences: row.value.memoryPreferences
+      };
     });
   }
   /** Reads memory settings without loading bodies, vectors or job relations. */
@@ -7199,29 +7512,10 @@ var DatabaseCharacterRepository = class _DatabaseCharacterRepository {
       return config;
     });
   }
-  /** Reads global behavior flags directly from metadata without loading any owner records. */
   readGlobalMemoryPreferences() {
     return __async(this, null, function* () {
-      yield this.acquire();
-      try {
-        if (this.publicationFailure !== null) throw this.publicationFailure.error;
-        const entry = yield this.database.get("meta", "state");
-        if (entry === null)
-          throw new Error("Character database metadata disappeared");
-        assertObject(entry.value, "character metadata");
-        if (entry.value.migrationStatus === "writing")
-          throw new Error("Character migration has not completed");
-        const flags = entry.value.memoryPreferences;
-        assertObject(flags, "global memory preferences");
-        assertBoolean(flags.userDescriptionEnabled, "user description enabled");
-        assertBoolean(flags.autoUpdateEnabled, "memory auto update enabled");
-        return {
-          userDescriptionEnabled: flags.userDescriptionEnabled,
-          autoUpdateEnabled: flags.autoUpdateEnabled
-        };
-      } finally {
-        this.release();
-      }
+      this.requirePublicationReady();
+      return (yield this.readMetadata()).memoryPreferences;
     });
   }
   /** Reads the selected owner's actual USER.md document. */
@@ -7248,29 +7542,20 @@ var DatabaseCharacterRepository = class _DatabaseCharacterRepository {
       throw new Error("Invalid owner document path");
     return this.directory + "/" + row.userDocumentPath;
   }
-  /** Serializes one indexed owner query with domain mutations and checks migration readiness. */
+  /** Reads one owner directly; file IO never occupies the full-state editing queue. */
   readOwnerMetadata(ownerKey, action) {
     return __async(this, null, function* () {
       requireId(ownerKey, "memory owner");
-      yield this.acquire();
-      try {
-        if (this.publicationFailure !== null) throw this.publicationFailure.error;
-        const rows = yield this.database.sql.query(
-          `SELECT o.* FROM "owners" o JOIN "meta" state ON state."_key" = 'state'
-        WHERE o."_key" = ? AND (state."migrationStatus__state" = 0 OR state."migrationStatus" = 'complete')
-        AND (EXISTS (SELECT 1 FROM "cards" c WHERE 'character:' || c."id" = o."ownerKey")
-          OR EXISTS (SELECT 1 FROM "stores" s WHERE 'shared:' || s."id" = o."ownerKey"))`,
-          [ownerKey]
-        );
-        if (rows.length !== 1 || rows[0].ownerKey !== ownerKey) {
-          throw new Error(
-            "Memory owner is missing or its migration is incomplete: " + ownerKey
-          );
-        }
-        return yield action(rows[0]);
-      } finally {
-        this.release();
-      }
+      if (this.publicationFailure !== null) throw this.publicationFailure.error;
+      const rows = yield this.database.sql.query(
+        `SELECT o.* FROM "owners" o JOIN "meta" state ON state."_key" = 'state'
+      WHERE o."_key" = ? AND (state."migrationStatus__state" = 0 OR state."migrationStatus" = 'complete')
+      AND (EXISTS (SELECT 1 FROM "cards" c WHERE 'character:' || c."id" = o."ownerKey")
+        OR EXISTS (SELECT 1 FROM "stores" s WHERE 'shared:' || s."id" = o."ownerKey"))`,
+        [ownerKey]
+      );
+      if (rows.length !== 1) throw new Error("Memory owner is missing or its migration is incomplete: " + ownerKey);
+      return action(rows[0]);
     });
   }
   /** Serializes domain sessions within this execution while exact host versions guard other executions. */
@@ -7800,6 +8085,7 @@ function characterField(field2, raw) {
       value = raw;
       break;
     case "avatarUri":
+    case "chatProviderId":
     case "chatModelId":
     case "ttsConfigId":
     case "sharedMemoryId":
@@ -9597,8 +9883,14 @@ function readActiveSelection() {
 }
 function requireSelection(selection) {
   return __async(this, null, function* () {
-    const [cards, groups] = yield Promise.all([dispatchDomain2("character.list", {}), dispatchDomain2("group.list", {})]);
-    requireChatSelection(selection, cards, groups);
+    const selected = parseChatSelection(selection);
+    if (selected.kind === "card") {
+      yield dispatchDomain2("character.get", { id: selected.id });
+    } else if (selected.kind === "group") {
+      const group = yield dispatchDomain2("group.get", { id: selected.id });
+      if (group.members.length === 0) throw new Error("A bound chat group must have actual participants: " + group.id);
+      yield Promise.all(group.members.map((member2) => dispatchDomain2("character.get", { id: member2.characterCardId })));
+    }
   });
 }
 function beforeChatCreate(event) {

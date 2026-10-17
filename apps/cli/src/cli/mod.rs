@@ -1797,6 +1797,7 @@ pub(crate) fn print_root_usage() {
     println!("operit2                       Start the interactive TUI");
     println!("operit2 tui [options]         Start the TUI ('operit2 tui --help' for options)");
     println!("operit2 cli <command> [args]  Run a CLI command");
+    println!("operit2 rescue <command>      Export, inspect, import, or resume data rescue");
     println!("operit2 install [--source <path>]");
     println!("operit2 uninstall");
     println!();

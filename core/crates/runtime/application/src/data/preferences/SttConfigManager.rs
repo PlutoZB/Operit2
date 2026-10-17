@@ -1,4 +1,7 @@
 #![allow(non_snake_case)]
+use operit_store::PreferenceMerge::{
+    PreferenceMergeCatalog, PreferenceMergeReference, PreferenceMergeStore,
+};
 
 use operit_host_api::TimeUtils::currentTimeMillis;
 use operit_local_models::LocalEngineManifest::LocalPlatformTarget;
@@ -22,12 +25,50 @@ pub struct SttConfigManager {
 }
 
 impl SttConfigManager {
+    /// Opens this owner's versioned store through the supplied runtime storage host.
+    pub(crate) fn preferenceStore(
+        storage: std::sync::Arc<dyn operit_host_api::RuntimeStorageHost>,
+        path: impl Into<String>,
+    ) -> PreferencesDataStore {
+        PreferencesDataStore::newEncryptedWithStorage(storage, path)
+            .withSchema(Self::PREFERENCES_VERSION, Self::migratePreferences)
+    }
+
+    /// Declares this owner's entity identity, name and content metadata for Core merging.
+    pub(crate) fn spaceMergeCatalog() -> PreferenceMergeCatalog {
+        PreferenceMergeCatalog {
+            store: PreferenceMergeStore {
+                path: operit_util::RuntimeStorageLayout::STT_CONFIGS_PREFERENCES_PATH,
+                encrypted: true,
+            },
+            keyPrefix: "stt_config_",
+            keySuffix: "_json",
+            identityField: "id",
+            nameField: "name",
+            ignoredFields: &["createdAt", "updatedAt"],
+            retiredKeys: &["stt_config_list"],
+        }
+    }
+
+    /// Declares the current selection as a scalar reference into this owner's catalog.
+    pub(crate) fn spaceMergeReference() -> PreferenceMergeReference {
+        let catalog = Self::spaceMergeCatalog();
+        PreferenceMergeReference {
+            store: catalog.store,
+            key: "current_stt_config_id",
+            path: &[],
+            target: catalog.store.path,
+        }
+    }
+
     const PREFERENCES_VERSION: u32 = 2;
     /// Creates an STT configuration manager backed by explicit runtime paths.
     pub fn new(paths: RuntimeStorePaths) -> Self {
         Self {
-            dataStore: PreferencesDataStore::newEncrypted(paths.stt_configs_preferences_path())
-                .withSchema(Self::PREFERENCES_VERSION, Self::migratePreferences),
+            dataStore: Self::preferenceStore(
+                operit_store::RuntimeStorageHost::defaultRuntimeStorageHost(),
+                operit_store::RuntimeStorageHost::runtimeStoragePath(&paths.stt_configs_preferences_path()),
+            ),
             paths,
         }
     }

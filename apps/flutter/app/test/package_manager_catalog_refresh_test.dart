@@ -468,6 +468,8 @@ core_proxy.ToolPkgContainerRuntime _pluginRuntime() {
     manifestExtensions: <String, Object?>{},
     author: <String>['Operit'],
     mainEntry: 'dist/main.js',
+    themes: <core_proxy.ToolPkgManifestTheme>[],
+    license: null,
     sourceType: core_proxy.ToolPkgSourceType.externalValue,
     sourcePath: 'test',
     subpackages: <core_proxy.ToolPkgSubpackageRuntime>[],

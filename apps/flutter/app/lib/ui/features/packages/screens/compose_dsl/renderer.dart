@@ -9,17 +9,29 @@ Widget buildComposeDslLayoutForTest({
   required ComposeDslWebViewHostContext hostContext,
   required MarkdownContentSplitter splitMarkdownContent,
   required Future<Object?> Function(String actionId, String text) onTextInput,
+  ToolPkgUiContentBuilder contentBuilder = _buildToolPkgUiBody,
+  bool onLoadHandledByHost = false,
 }) {
   final parsed = _ComposeDslNode.parse(node);
   if (parsed == null) {
     throw const FormatException('A valid Compose DSL test node is required');
   }
-  return _ComposeDslRenderer(
+  final renderer = _ComposeDslRenderer(
     node: parsed,
     onAction: hostContext.dispatchAction,
     onTextInput: onTextInput,
     webViewHostContext: hostContext,
     splitMarkdownContent: splitMarkdownContent,
+    onLoadHandledByHost: onLoadHandledByHost,
+  );
+  return Builder(
+    builder: (context) => contentBuilder(
+      context,
+      ToolPkgUiContent._(
+        body: renderer,
+        sliver: _ComposeDslSliverContent(renderer: renderer),
+      ),
+    ),
   );
 }
 

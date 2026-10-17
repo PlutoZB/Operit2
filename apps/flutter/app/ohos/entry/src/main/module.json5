@@ -13,6 +13,17 @@
     "pages": "$profile:main_pages",
     "abilities": [
       {
+        "name": "DataRescueAbility",
+        "srcEntry": "./ets/entryability/DataRescueAbility.ets",
+        "description": "$string:DataRescue_label",
+        "icon": "$media:icon",
+        "label": "$string:DataRescue_label",
+        "startWindowIcon": "$media:icon",
+        "startWindowBackground": "$color:start_window_background",
+        "exported": true,
+        "skills": [{ "entities": ["entity.system.home"], "actions": ["action.system.home", "app.operit.DATA_RESCUE"] }]
+      },
+      {
         "name": "EntryAbility",
         "srcEntry": "./ets/entryability/EntryAbility.ets",
         "description": "$string:EntryAbility_desc",

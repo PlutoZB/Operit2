@@ -904,9 +904,10 @@ fn builtinRoles() -> BTreeMap<String, NetworkControlRole> {
                 NETWORK_DEVICES_VIEW_CAPABILITY,
                 "network.relay",
                 "runtime.execute",
+                "storage.provide",
             ],
         ),
-        builtinRole("relay", "Relay", [NETWORK_DEVICES_VIEW_CAPABILITY, "network.relay"]),
+        builtinRole("relay", "Relay", [NETWORK_DEVICES_VIEW_CAPABILITY, "network.relay", "storage.provide"]),
         builtinRole("edge", "Edge", [NETWORK_DEVICES_VIEW_CAPABILITY, "runtime.execute"]),
     ]
     .into_iter()

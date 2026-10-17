@@ -239,6 +239,7 @@ impl CoreApplication {
             let _ = bridge.stop();
         }
         let _ = self.accessServices.stopSpaceSync();
+        self.localClient.shutdownToolPkgExecutionEngines();
         operit_link::clearCoreRouteRuntime();
     }
 }
@@ -250,6 +251,7 @@ impl Drop for CoreApplication {
             let _ = bridge.stop();
         }
         let _ = self.accessServices.stopSpaceSync();
+        self.localClient.shutdownToolPkgExecutionEngines();
     }
 }
 

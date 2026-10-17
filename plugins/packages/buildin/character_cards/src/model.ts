@@ -16,7 +16,7 @@ export interface Card {
   advancedCustomPrompt: string;
   marks: string;
   chatModelBindingMode: string;
-  chatModelId: string | null;
+  chatModelId: string | null; chatProviderId: string | null;
   ttsConfigId: string | null;
   themeConfigId: string | null;
   memoryBindingMode: string;

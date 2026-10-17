@@ -66,7 +66,7 @@ test("the SDK Compose wrapper renders every serialized character route with its 
     main: { state: {}, type: "Box", text: "正在加载角色卡…" },
     memory: { state: {}, type: "Box", text: "正在加载记忆…" },
     "memory-attachment": { state: { presentation: { requestId: "attachment-route-test", input: { mode: "memory-attachment", ownerKey: null, folderPath: null } } }, type: "Box", text: "正在加载角色卡…" },
-    "chat-sidebar": { state: { input: { view: "characters" }, chatSidebar: { chats: [], currentChatId: null, activeStreamingChatIds: [] } }, type: "Column", key: "native-character-sidebar" },
+    "chat-sidebar": { state: { input: { view: "characters" }, chatSidebar: { chats: [], currentChatId: null, activeStreamingChatIds: [] } }, type: "LazyColumn", key: "native-character-sidebar" },
     "chat-input-menu": { state: { chatId: null, input: {} }, type: "Box", key: "current-character-loading" },
     "chat-input-memory": { state: { chatId: null, input: {} }, type: "Box", key: "memory-menu-loading" },
     "memory-status": { state: { presentation: { requestId: "status-route-test", input: { description: "Actual queue status" } } }, type: "AlertDialog", key: "memory-status" },

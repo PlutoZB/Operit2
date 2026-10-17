@@ -339,6 +339,14 @@ impl ExtensionStore {
         sourceName: &str,
         settings: Value,
     ) -> Result<(), String> {
+        self.registerInScope(kind, id, sourceName, settings, "device")
+    }
+
+    /// Registers an installation in its explicitly selected ownership scope.
+    pub fn registerInScope(
+        &self, kind: &str, id: &str, sourceName: &str, settings: Value, scope: &str,
+    ) -> Result<(), String> {
+        validateScope(scope)?;
         let records = self.records(kind)?;
         let matching = records
             .iter()
@@ -347,13 +355,14 @@ impl ExtensionStore {
         if matching.len() > 1 {
             return Err(format!("Extension ownership conflict: {kind}:{id}"));
         }
-        if matching.len() == 1 {
+        if let Some(record) = matching.first() {
+            if record.scope != scope { return Err(format!("Extension scope conflicts with installation: {kind}:{id}")); }
             return Ok(());
         }
         let record = ExtensionRecord {
             kind: kind.to_string(),
             id: id.to_string(),
-            scope: "device".to_string(),
+            scope: scope.to_string(),
             sourceName: sourceName.to_string(),
             settings: self.initialSettings(kind, id, settings)?,
             files: BTreeMap::new(),
@@ -361,17 +370,18 @@ impl ExtensionStore {
         self.write(&record)
     }
 
-    /// Retires an archived device package source without deleting its configuration or data.
-    pub fn retireDevicePackageSource(&self, id: &str, sourceName: &str) -> Result<(), String> {
+    /// Retires an archived package source in its exact scope without deleting its data.
+    pub fn retirePackageSource(&self, id: &str, sourceName: &str, scope: &str) -> Result<(), String> {
+        validateScope(scope)?;
         let record = self.record("package", id)?;
-        if record.scope != "device" || record.sourceName != sourceName {
+        if record.scope != scope || record.sourceName != sourceName {
             return Err(format!("Package retirement ownership mismatch: {id}/{sourceName}"));
         }
-        let source = format!("{}/{}", Self::root("package", "device")?, sourceName);
+        let source = format!("{}/{}", Self::root("package", scope)?, sourceName);
         if self.storage.exists(&source).map_err(|error| error.to_string())? {
             return Err(format!("Package source must be archived before retirement: {sourceName}"));
         }
-        self.storage.delete(&recordPath("package", id, "device")?, false)
+        self.storage.delete(&recordPath("package", id, scope)?, false)
             .map_err(|error| error.to_string())?;
         notifyCatalogChanged();
         Ok(())
@@ -417,13 +427,11 @@ impl ExtensionStore {
             source
         } else {
             let mut source = self.record(kind, id)?;
+            if source.scope == scope { return Ok(()); }
             if source.settings.get("builtin").and_then(Value::as_bool) == Some(true) {
                 return Err(
                     "Built-in application resources do not have an installation scope".into(),
                 );
-            }
-            if source.scope == scope {
-                return Ok(());
             }
             let mut target = source.clone();
             target.scope = scope.to_string();
@@ -590,6 +598,13 @@ impl ExtensionStore {
         }
         match record.kind.as_str() {
             "package" => {
+                if let Some(required) = record.settings.get("installationScope") {
+                    let required = required.as_str().ok_or("Invalid package installation scope")?;
+                    validateScope(required)?;
+                    if record.scope != required {
+                        return Err(format!("Package {} only supports {} installation scope", record.id, required));
+                    }
+                }
                 for field in ["members", "enabledNames", "disabledNames"] {
                     let _: Vec<String> = serde_json::from_value(record.settings[field].clone())
                         .map_err(|e| format!("Invalid package {field}: {e}"))?;

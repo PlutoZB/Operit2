@@ -221,6 +221,7 @@ var characterFields = {
   marks: optional(text),
   chatModelBindingMode: optional(enumeration("FOLLOW_GLOBAL", "FIXED_MODEL")),
   chatModelId: optional(nullable(text)),
+  chatProviderId: optional(nullable(text)),
   ttsConfigId: optional(nullable(text)),
   themeConfigId: optional(nullable(text)),
   memoryBindingMode: optional(enumeration("CHARACTER", "SHARED")),
@@ -562,6 +563,11 @@ var collections = {
       chatModelId: {
         kind: "text",
         nullable: true
+      },
+      chatProviderId: {
+        kind: "text",
+        nullable: true,
+        nullEncoding: "column"
       },
       ttsConfigId: {
         kind: "text",
@@ -1182,6 +1188,14 @@ var collections = {
       }
     }
   },
+  schema_migrations: {
+    kind: "object",
+    fields: {
+      version: {
+        kind: "integer"
+      }
+    }
+  },
   chat_bindings: {
     kind: "object",
     fields: {
@@ -1410,6 +1424,14 @@ function quote(name) {
 function field(path) {
   return path === "" ? "_value" : path;
 }
+function usesPresenceColumn(node) {
+  if (node.nullEncoding === "column") {
+    if (!node.nullable || node.optional || node.kind === "object" || node.kind === "array" || node.kind === "map")
+      throw new Error("Column null encoding requires a required nullable scalar");
+    return false;
+  }
+  return node.optional === true || node.nullable === true;
+}
 function layout(name, node, child = false) {
   const columns = [
     { name: "_key", affinity: "text", nullable: false },
@@ -1424,7 +1446,7 @@ function layout(name, node, child = false) {
     );
   const children = [];
   function visit(schema, path, absent) {
-    if (schema.optional || schema.nullable)
+    if (usesPresenceColumn(schema))
       columns.push({
         name: field(path) + "__state",
         affinity: "integer",
@@ -1456,6 +1478,118 @@ function layout(name, node, child = false) {
 var layouts = Object.fromEntries(
   Object.entries(schemas).map(([name, node]) => [name, layout(name, node)])
 );
+var spaceMergeDescriptor = {
+  version: 3,
+  maxEntities: 6,
+  maxReferences: 48,
+  entities: [
+    {
+      collection: "cards",
+      identityColumn: "id",
+      nameColumn: "name",
+      ignoredColumns: ["_revision", "id", "createdAt", "updatedAt"],
+      keyEncoding: "length_prefixed_root",
+      matchMode: "content",
+      keyReferences: [],
+      childCollections: tables(layouts["cards"]).slice(1).map((child) => child.name),
+      references: [
+        { collection: "cards", column: "chatProviderId", target: { kind: "preference", path: "runtime/config/preferences/model_configs.preferences.json" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "cards", column: "ttsConfigId", target: { kind: "preference", path: "runtime/config/preferences/tts_configs.preferences.json" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "cards", column: "themeConfigId", target: { kind: "preference", path: "runtime/config/preferences/user_preferences.preferences.json" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "cards", column: "sharedMemoryId", target: { kind: "collection", collection: "stores" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "cards_attachedTagIds", column: "_value", target: { kind: "collection", collection: "tags" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "cards_sharedMemoryMounts", column: "sharedMemoryId", target: { kind: "collection", collection: "stores" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" }
+      ]
+    },
+    {
+      collection: "groups",
+      identityColumn: "id",
+      nameColumn: "name",
+      ignoredColumns: ["_revision", "id", "createdAt", "updatedAt"],
+      keyEncoding: "length_prefixed_root",
+      matchMode: "content",
+      keyReferences: [],
+      childCollections: tables(layouts["groups"]).slice(1).map((child) => child.name),
+      references: [
+        { collection: "groups", column: "themeConfigId", target: { kind: "preference", path: "runtime/config/preferences/user_preferences.preferences.json" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "groups_members", column: "characterCardId", target: { kind: "collection", collection: "cards" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" }
+      ]
+    },
+    {
+      collection: "tags",
+      identityColumn: "id",
+      nameColumn: "name",
+      ignoredColumns: ["_revision", "id", "createdAt", "updatedAt"],
+      keyEncoding: "length_prefixed_root",
+      matchMode: "content",
+      keyReferences: [],
+      childCollections: [],
+      references: []
+    },
+    {
+      collection: "stores",
+      identityColumn: "id",
+      nameColumn: "name",
+      ignoredColumns: ["_revision", "id", "createdAt", "updatedAt"],
+      keyEncoding: "length_prefixed_root",
+      matchMode: "content",
+      keyReferences: [],
+      childCollections: [],
+      references: []
+    },
+    {
+      collection: "owners",
+      identityColumn: "ownerKey",
+      nameColumn: null,
+      ignoredColumns: ["_revision"],
+      keyEncoding: "slash_root",
+      matchMode: "identity",
+      keyReferences: [
+        { collection: "cards", prefix: "character:" },
+        { collection: "stores", prefix: "shared:" }
+      ],
+      childCollections: ["memories", "links", "chunks", "candidates", "embeddings"],
+      references: [
+        { collection: "owners", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "owners", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "owners", column: "userDocumentPath", target: { kind: "collection", collection: "owners" }, keyPrefix: "owners/", keySuffix: "/USER.md", valueEncoding: "uri_component" },
+        { collection: "memories", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "memories", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "links", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "links", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "chunks", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "chunks", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "candidates", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "candidates", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "embeddings", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "embeddings", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" }
+      ]
+    },
+    {
+      collection: "meta",
+      identityColumn: "_key",
+      nameColumn: null,
+      ignoredColumns: ["_revision"],
+      keyEncoding: "length_prefixed_root",
+      matchMode: "identity",
+      keyReferences: [],
+      childCollections: [],
+      references: [
+        { collection: "meta", column: "active__CharacterCard__id", target: { kind: "collection", collection: "cards" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "meta", column: "active__CharacterGroup__id", target: { kind: "collection", collection: "groups" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" }
+      ]
+    }
+  ]
+};
+function schemaVersion(entry) {
+  if (entry === null) return 1;
+  if (entry.value === null || Array.isArray(entry.value) || typeof entry.value !== "object")
+    throw new Error("Invalid character schema migration record");
+  const version2 = entry.value.version;
+  if (typeof version2 !== "number" || !Number.isInteger(version2) || version2 < 1)
+    throw new Error("Invalid character schema migration version");
+  return version2;
+}
 function tables(root) {
   return [root, ...root.children.flatMap(tables)];
 }
@@ -1482,7 +1616,7 @@ function encode(collection, key, value, revision) {
     const row = { _key: identity2, _revision: revision, ...extra };
     function visit(node, path, item, absent = false) {
       const column = field(path);
-      if (node.optional || node.nullable)
+      if (usesPresenceColumn(node))
         row[column + "__state"] = item === void 0 ? 0 : item === null ? 1 : 2;
       if (item === void 0 && !node.optional && !absent)
         throw new Error(collection + "/" + key + " missing " + path);
@@ -1577,7 +1711,8 @@ function decodeLayout(root, row, rows = /* @__PURE__ */ new Map()) {
   function record2(current, stored) {
     function visit(node, path) {
       const column = field(path);
-      if (node.optional || node.nullable) {
+      if (node.nullEncoding === "column" && stored[column] === null) return null;
+      if (usesPresenceColumn(node)) {
         const state = Number(stored[column + "__state"]);
         if (state === 0 && node.optional) return void 0;
         if (state === 1 && node.nullable) return null;
@@ -1663,6 +1798,30 @@ var RelationalDatabase = class _RelationalDatabase {
       () => Math.floor(Math.random() * 4294967296).toString(16).padStart(8, "0")
     ).join("");
   }
+  /** Commits one versioned schema step together with its durable migration marker. */
+  migrateSchema(key, targetVersion, step) {
+    return __async(this, null, function* () {
+      let marker = yield this.get("schema_migrations", key);
+      let version2 = schemaVersion(marker);
+      if (version2 > targetVersion) throw new Error("Stored schema is newer than this runtime");
+      while (version2 < targetVersion) {
+        const mutations = yield step(version2);
+        const nextVersion = version2 + 1;
+        yield this.commit([
+          ...mutations,
+          {
+            op: "put",
+            collection: "schema_migrations",
+            key,
+            expectedVersion: marker?.version ?? null,
+            value: { version: nextVersion }
+          }
+        ]);
+        marker = yield this.get("schema_migrations", key);
+        version2 = schemaVersion(marker);
+      }
+    });
+  }
   /** Opens the sole runtime database and declares its exact typed schema. */
   static open() {
     return __async(this, null, function* () {
@@ -1670,7 +1829,8 @@ var RelationalDatabase = class _RelationalDatabase {
       if (typeof directory !== "string" || directory.trim() === "")
         throw new Error("Plugin data directory is unavailable");
       const sql = yield Tools.Storage.sqlite.open({
-        path: directory + "/characters-relational.sqlite"
+        path: directory + "/characters-relational.sqlite",
+        merge: spaceMergeDescriptor
       });
       for (const root of Object.values(layouts))
         for (const table of tables(root)) yield sql.defineTable(table.table);
@@ -1720,9 +1880,9 @@ var RelationalDatabase = class _RelationalDatabase {
     });
   }
   /** Writes guarded roots and their relations atomically through the host journal. */
-  commit(mutations) {
+  commit(mutations, whenAbsent) {
     return __async(this, null, function* () {
-      const version = this.executionId + ":" + ++this.sequence;
+      const version2 = this.executionId + ":" + ++this.sequence;
       const statements = [];
       for (const mutation of mutations) {
         const root = layouts[mutation.collection];
@@ -1738,7 +1898,7 @@ var RelationalDatabase = class _RelationalDatabase {
             expectedAffectedRows: 1
           });
         } else {
-          const encoded = encode(root.name, key, mutation.value, version);
+          const encoded = encode(root.name, key, mutation.value, version2);
           const row = encoded.get(root.name)[0];
           statements.push(rootWrite(root.name, row, expectedVersion));
           if (expectedVersion !== null)
@@ -1756,8 +1916,8 @@ var RelationalDatabase = class _RelationalDatabase {
           "Relational operation exceeds the host transaction statement limit"
         );
       }
-      yield this.sql.transaction(statements);
-      return { version };
+      const result = yield this.sql.transaction(statements, whenAbsent === void 0 ? void 0 : { whenAbsent });
+      return result.length === 0 ? null : { version: version2 };
     });
   }
 };
@@ -2041,13 +2201,13 @@ function selectorAvatar(ctx, option) {
   const props = { width: 28, height: 28, contentScale: "crop", contentDescription: option.title, modifier: ctx.Modifier.clip({ type: "circle" }) };
   switch (option.avatar.type) {
     case "uri":
-      return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:71535",[{ ...props, uri: option.avatar.uri }],(...__operitArgs)=>ctx.UI.Image(...__operitArgs));
+      return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:80086",[{ ...props, uri: option.avatar.uri }],(...__operitArgs)=>ctx.UI.Image(...__operitArgs));
     case "resource":
-      return option.avatar.path === null ? OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:71651",[{ width: 28, height: 28, contentAlignment: "center" },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:71717",[{ name: "Person", size: 22, tint: "onSurfaceVariant", contentDescription: option.title }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.Box(...__operitArgs)) : OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:71822",[{ ...props, path: option.avatar.path }],(...__operitArgs)=>ctx.UI.Image(...__operitArgs));
+      return option.avatar.path === null ? OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:80202",[{ width: 28, height: 28, contentAlignment: "center" },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:80268",[{ name: "Person", size: 22, tint: "onSurfaceVariant", contentDescription: option.title }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.Box(...__operitArgs)) : OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:80373",[{ ...props, path: option.avatar.path }],(...__operitArgs)=>ctx.UI.Image(...__operitArgs));
     case "model":
-      return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:71907",[{ width: 28, height: 28, contentAlignment: "center" },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:71973",[{ name: "SmartToy", size: 22, tint: "onSurfaceVariant", contentDescription: option.title }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.Box(...__operitArgs));
+      return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:80458",[{ width: 28, height: 28, contentAlignment: "center" },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:80524",[{ name: "SmartToy", size: 22, tint: "onSurfaceVariant", contentDescription: option.title }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.Box(...__operitArgs));
     case "group":
-      return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:72110",[{ width: 28, height: 28, contentAlignment: "center" },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:72176",[{ name: "Groups", size: 22, tint: "onSurfaceVariant", contentDescription: option.title }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.Box(...__operitArgs));
+      return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:80661",[{ width: 28, height: 28, contentAlignment: "center" },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:80727",[{ name: "Groups", size: 22, tint: "onSurfaceVariant", contentDescription: option.title }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.Box(...__operitArgs));
   }
 }
 function selectorRow(ctx, option, state, controller) {
@@ -2059,14 +2219,14 @@ function selectorRow(ctx, option, state, controller) {
   const props = { key: option.key, fillMaxWidth: true, paddingStart: 10, paddingTop: 7, paddingEnd: 8, paddingBottom: 7, verticalAlignment: "center", spacing: 8 };
   const contents = [
     selectorAvatar(ctx, option),
-    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:73100",[{ weight: 1, horizontalAlignment: "start" },[
-      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:73167",[{ text: option.title, style: "bodySmall", maxLines: 1, overflow: "ellipsis", color: titleColor, fontWeight: active ? "700" : "600" }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
-      ...option.description === "" ? [] : [OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:73357",[{ text: option.description, style: "labelSmall", maxLines: 1, overflow: "ellipsis", color: descriptionColor }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs))]
+    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:81651",[{ weight: 1, horizontalAlignment: "start" },[
+      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:81718",[{ text: option.title, style: "bodySmall", maxLines: 1, overflow: "ellipsis", color: titleColor, fontWeight: active ? "700" : "600" }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
+      ...option.description === "" ? [] : [OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:81908",[{ text: option.description, style: "labelSmall", maxLines: 1, overflow: "ellipsis", color: descriptionColor }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs))]
     ]],(...__operitArgs)=>ctx.UI.Column(...__operitArgs)),
-    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:73493",[{ width: 20, height: 20, contentAlignment: "center" },switching ? OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:73571",[],()=>[{ width: 16, height: 16, strokeWidth: 2 }],(...__operitArgs)=>ctx.UI.CircularProgressIndicator(...__operitArgs)) : OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:73649",[{ name: active ? "Check" : "CircleOutlined", size: active ? 18 : 16, tint: active ? colors.primary : colors.onSurfaceVariant.copy({ alpha: 0.45 }), contentDescription: active ? "\u5F53\u524D\u9009\u4E2D" : "\u672A\u9009\u4E2D" }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.Box(...__operitArgs))
+    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:82044",[{ width: 20, height: 20, contentAlignment: "center" },switching ? OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:82122",[],()=>[{ width: 16, height: 16, strokeWidth: 2 }],(...__operitArgs)=>ctx.UI.CircularProgressIndicator(...__operitArgs)) : OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:82200",[{ name: active ? "Check" : "CircleOutlined", size: active ? 18 : 16, tint: active ? colors.primary : colors.onSurfaceVariant.copy({ alpha: 0.45 }), contentDescription: active ? "\u5F53\u524D\u9009\u4E2D" : "\u672A\u9009\u4E2D" }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.Box(...__operitArgs))
   ];
-  if (!enabled) return OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:73920",[props,contents],()=>[props,contents],(...__operitArgs)=>ctx.UI.Row(...__operitArgs));
-  return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:73958",[{
+  if (!enabled) return OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:82471",[props,contents],()=>[props,contents],(...__operitArgs)=>ctx.UI.Row(...__operitArgs));
+  return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:82509",[{
     ...props,
     /** Returns the real commit result to the existing generic Compose action channel without a synthetic receiver. */
     onClick: () => __async(null, null, function* () {
@@ -2077,35 +2237,35 @@ function selectorRow(ctx, option, state, controller) {
 function selectorView(ctx, input, state, controller) {
   const title = input.kind === "card" ? "\u5207\u6362\u89D2\u8272\u5361" : input.kind === "group" ? "\u5207\u6362\u7FA4\u7EC4" : "\u5207\u6362\u89D2\u8272\u5361\u6216\u7FA4\u7EC4";
   const colors = ctx.MaterialTheme.colorScheme;
-  const header = OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:74554",[{ fillMaxWidth: true, paddingStart: 16, paddingTop: 8, paddingEnd: 8, paddingBottom: 4, verticalAlignment: "center" },[
-    OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:74690",[title],()=>[{ text: title, style: "titleSmall", fontWeight: "700", weight: 1 }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
-    ...state.data === null ? [] : [OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:74806",[{ text: state.data.options.length + " \u4E2A", style: "labelSmall", color: colors.onSurfaceVariant }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)), OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:74921",[],()=>[{ width: 2 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs))],
-    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:74955",[{
+  const header = OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:83105",[{ fillMaxWidth: true, paddingStart: 16, paddingTop: 8, paddingEnd: 8, paddingBottom: 4, verticalAlignment: "center" },[
+    OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:83241",[title],()=>[{ text: title, style: "titleSmall", fontWeight: "700", weight: 1 }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
+    ...state.data === null ? [] : [OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:83357",[{ text: state.data.options.length + " \u4E2A", style: "labelSmall", color: colors.onSurfaceVariant }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)), OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:83472",[],()=>[{ width: 2 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs))],
+    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:83506",[{
       key: "selector-close",
       enabled: state.switchingKey === null && !state.finished,
       width: 32,
       height: 32,
       /** Emits the explicit cancellation discriminator, not a route pop that bypasses the plugin session. */
       onClick: () => selectorResultJson(controller.cancel())
-    },OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:75280",[],()=>[{ name: "Close", size: 18, contentDescription: "\u5173\u95ED" }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.IconButton(...__operitArgs))
+    },OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:83831",[],()=>[{ name: "Close", size: 18, contentDescription: "\u5173\u95ED" }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.IconButton(...__operitArgs))
   ]],(...__operitArgs)=>ctx.UI.Row(...__operitArgs));
   let body;
-  if (state.loading) body = OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:75404",[{ weight: 1, fillMaxWidth: true, contentAlignment: "center" },OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:75478",[],()=>[{ width: 20, height: 20, strokeWidth: 2 }],(...__operitArgs)=>ctx.UI.CircularProgressIndicator(...__operitArgs))],(...__operitArgs)=>ctx.UI.Box(...__operitArgs));
-  else if (state.data === null) body = OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:75595",[{ key: "selector-load-error", text: state.error, color: colors.error, paddingHorizontal: 16, paddingVertical: 18, weight: 1 }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs));
-  else if (state.data.options.length === 0) body = OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:75786",[{ text: input.kind === "group" ? "\u6682\u65E0\u7FA4\u7EC4" : "\u6682\u65E0\u89D2\u8272\u5361", style: "bodySmall", color: colors.onSurfaceVariant, paddingStart: 16, paddingTop: 18, paddingEnd: 16, paddingBottom: 20, weight: 1 }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs));
+  if (state.loading) body = OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:83955",[{ weight: 1, fillMaxWidth: true, contentAlignment: "center" },OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:84029",[],()=>[{ width: 20, height: 20, strokeWidth: 2 }],(...__operitArgs)=>ctx.UI.CircularProgressIndicator(...__operitArgs))],(...__operitArgs)=>ctx.UI.Box(...__operitArgs));
+  else if (state.data === null) body = OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:84146",[{ key: "selector-load-error", text: state.error, color: colors.error, paddingHorizontal: 16, paddingVertical: 18, weight: 1 }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs));
+  else if (state.data.options.length === 0) body = OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:84337",[{ text: input.kind === "group" ? "\u6682\u65E0\u7FA4\u7EC4" : "\u6682\u65E0\u89D2\u8272\u5361", style: "bodySmall", color: colors.onSurfaceVariant, paddingStart: 16, paddingTop: 18, paddingEnd: 16, paddingBottom: 20, weight: 1 }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs));
   else {
     const options = state.data.options;
     const items = ctx.lazyItems(
-      { key: "selector-records", itemCount: options.length, itemExtent: 56, initialItemCount: 12 },
+      { key: "selector-records", itemCount: options.length, itemExtent: 56, initialItemCount: 24 },
       /** Builds one keyed row only when it enters the materialized viewport window. */
-      (index) => OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:76316",[{ key: "selector-item:" + options[index].key, fillMaxWidth: true },[
+      (index) => OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:84867",[{ key: "selector-item:" + options[index].key, fillMaxWidth: true },[
         selectorRow(ctx, options[index], state, controller),
-        ...index + 1 === options.length ? [] : [OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:76509",[{ thickness: 1, color: colors.outlineVariant.copy({ alpha: 0.45 }) }],(...__operitArgs)=>ctx.UI.HorizontalDivider(...__operitArgs))]
+        ...index + 1 === options.length ? [] : [OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:85060",[{ thickness: 1, color: colors.outlineVariant.copy({ alpha: 0.45 }) }],(...__operitArgs)=>ctx.UI.HorizontalDivider(...__operitArgs))]
       ]],(...__operitArgs)=>ctx.UI.Column(...__operitArgs))
     );
-    body = OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:76632",[{ key: "selector-records", weight: 1, fillMaxWidth: true, paddingStart: 8, paddingTop: 4, paddingEnd: 8, paddingBottom: 8, ...items }],(...__operitArgs)=>ctx.UI.LazyColumn(...__operitArgs));
+    body = OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:85183",[{ key: "selector-records", weight: 1, fillMaxWidth: true, paddingStart: 8, paddingTop: 4, paddingEnd: 8, paddingBottom: 8, ...items }],(...__operitArgs)=>ctx.UI.LazyColumn(...__operitArgs));
   }
-  return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:76799",[{
+  return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:85350",[{
     key: "character-selection",
     containerColor: "surfaceContainerHigh",
     shape: { cornerRadius: 28 },
@@ -2115,11 +2275,11 @@ function selectorView(ctx, input, state, controller) {
     onLoad: () => controller.load(),
     /** Returns explicit V1 cancellation for host dismissal rather than changing a global active selection. */
     onDismissRequest: () => selectorResultJson(controller.cancel())
-  },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:77450",[{ fillMaxWidth: true, height: 420, modifier: ctx.Modifier.widthIn({ maxWidth: 360 }).heightIn({ minHeight: 420, maxHeight: 420 }) },[
+  },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:86001",[{ fillMaxWidth: true, height: 420, modifier: ctx.Modifier.widthIn({ maxWidth: 360 }).heightIn({ minHeight: 420, maxHeight: 420 }) },[
     header,
-    OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:77615",[],()=>[{ thickness: 1 }],(...__operitArgs)=>ctx.UI.HorizontalDivider(...__operitArgs)),
+    OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:86166",[],()=>[{ thickness: 1 }],(...__operitArgs)=>ctx.UI.HorizontalDivider(...__operitArgs)),
     body,
-    ...state.error === "" || state.data === null ? [] : [OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:77726",[{ key: "selector-commit-error", text: state.error, color: colors.error, style: "bodySmall", paddingHorizontal: 16, paddingVertical: 8 }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs))]
+    ...state.error === "" || state.data === null ? [] : [OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/selection/index.ui.js:86277",[{ key: "selector-commit-error", text: state.error, color: colors.error, style: "bodySmall", paddingHorizontal: 16, paddingVertical: 8 }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs))]
   ]],(...__operitArgs)=>ctx.UI.Column(...__operitArgs))],(...__operitArgs)=>ctx.UI.Dialog(...__operitArgs));
 }
 function renderSelectionScreen(ctx) {

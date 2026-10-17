@@ -22,7 +22,8 @@ use operit_model::ModelParameter::ParameterValueType;
 use operit_model::PromptTurn::{PromptTurn, PromptTurnKind};
 use operit_model::ToolPrompt::ToolPrompt;
 use operit_util::stream::RevisableTextStream::{
-    with_event_channel, RevisableTextStreamLike, TextStreamEventCarrier,
+    with_event_channel_and_failure, RevisableTextStream, RevisableTextStreamLike,
+    TerminalFailureState, TextStreamEventCarrier,
 };
 use operit_util::stream::Stream::{FnStream, Stream};
 use operit_util::AppLogger::AppLogger;
@@ -766,6 +767,7 @@ impl AIService for DeepseekProvider {
         }
     }
 
+    /// Sends a DeepSeek request while preserving parent-stream failures.
     async fn send_message(
         &mut self,
         request: SendMessageRequest,
@@ -794,6 +796,8 @@ impl AIService for DeepseekProvider {
                 ),
             );
             let event_channel = result.event_channel().clone();
+            let terminalFailure = TerminalFailureState::new();
+            let producerTerminalFailure = terminalFailure.clone();
             let mut provider = self.clone();
             let activeParentGeneration = provider.setActiveParent(parent.clone());
             if provider.isCancelled() {
@@ -812,8 +816,12 @@ impl AIService for DeepseekProvider {
                 let mut provider = ownedProvider
                     .take()
                     .expect("Deepseek parent stream must only be collected once");
+                let producerTerminalFailure = producerTerminalFailure.clone();
                 Box::pin(async move {
                     result.collect(emit).await;
+                    if let Some(error) = result.terminal_failure() {
+                        producerTerminalFailure.set(error);
+                    }
                     AppLogger::i(
                         PROVIDER_TRANSPORT_LOG_TAG,
                         &format!(
@@ -832,7 +840,11 @@ impl AIService for DeepseekProvider {
                     provider.clearActiveParent(activeParentGeneration);
                 })
             });
-            return Ok(Box::new(with_event_channel(cold_stream, event_channel)));
+            return Ok(Box::new(with_event_channel_and_failure(
+                cold_stream,
+                event_channel,
+                terminalFailure,
+            )));
         }
 
         let client = reqwest::Client::new();

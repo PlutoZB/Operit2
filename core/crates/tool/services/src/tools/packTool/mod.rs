@@ -18,3 +18,6 @@ pub mod ToolPkgComposeDslSession;
 
 /// Shares retained typed records between finite widget and terminal renderers.
 pub mod ToolPkgComposeDslNodeStore;
+
+/// Executes decorated plugin functions through ordinary Core routing and stream ownership.
+pub mod ToolPkgRouteRuntime;

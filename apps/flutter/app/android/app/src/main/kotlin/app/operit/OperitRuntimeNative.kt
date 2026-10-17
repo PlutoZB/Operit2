@@ -15,6 +15,8 @@ object OperitRuntimeNative {
         host: AndroidRuntimeHost,
     ): Long
     @JvmStatic external fun createError(): String
+    /** Executes offline data rescue using only storage and secret-store Host adapters. */
+    @JvmStatic external fun dataRescue(defaultRuntimeRoot: String, request: String, host: AndroidRuntimeHost): String
     /** Reads the client bootstrap record before the native Runtime is created. */
     @JvmStatic external fun runtimeBootstrapRead(defaultRuntimeRoot: String): String
     /** Writes the client bootstrap record before the native Runtime is created. */

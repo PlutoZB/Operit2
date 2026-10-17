@@ -453,12 +453,12 @@ fn builtin_identities_expose_only_current_node_capabilities() {
     let state = store.currentState().unwrap();
     assert_eq!(state.roles.keys().map(String::as_str).collect::<Vec<_>>(),
         vec!["admin", "edge", "relay", "user"]);
-    for (identity, relay, execute) in [("relay", true, false), ("edge", false, true), ("user", true, true)] {
+    for (identity, relay, execute, storage) in [("relay", true, false, true), ("edge", false, true, false), ("user", true, true, true)] {
         store.setIdentity(NetworkControlIdentityAssignment { nodeId: "peer".into(), roleId: identity.into() }).unwrap();
         assert!(store.nodeHasCapability("peer", "network.devices.view", None).unwrap());
         assert_eq!(store.nodeHasCapability("peer", "network.relay", None).unwrap(), relay);
         assert_eq!(store.nodeHasCapability("peer", "runtime.execute", None).unwrap(), execute);
-        assert!(!store.nodeHasCapability("peer", "storage.provide", None).unwrap());
+        assert_eq!(store.nodeHasCapability("peer", "storage.provide", None).unwrap(), storage);
         assert!(!store.nodeHasCapability("peer", "network.audit.read", None).unwrap());
     }
     for identity in ["auditor", "runner", "storage"] {
@@ -1023,8 +1023,9 @@ fn preferenceOperation(origin: &str, sequence: i64, path: Value) -> SyncOperatio
     op
 }
 
+/// Keeps earlier entity versions needed to reconstruct durable identity equivalences.
 #[test]
-fn compact_preferences_discards_descendants_superseded_by_parent_replacement() {
+fn compact_preferences_preserves_identity_replay_history() {
     let parent =
         json!([{"kind": "field", "value": "models"}, {"kind": "item", "value": "old-model"}]);
     let child = json!([{"kind": "field", "value": "models"}, {"kind": "item", "value": "old-model"}, {"kind": "field", "value": "capabilitiesOverride"}]);
@@ -1036,9 +1037,10 @@ fn compact_preferences_discards_descendants_superseded_by_parent_replacement() {
         preferenceOperation("android", 4, parent),
         preferenceOperation("android", 5, child),
     ]);
-    assert_eq!(sequences(&compacted), vec![3, 4, 5]);
+    assert_eq!(sequences(&compacted), vec![1, 2, 3, 4, 5]);
 }
 
+/// Retains independent origin histories and their complete chronological replacements.
 #[test]
 fn compact_preferences_preserves_other_origins_and_edits_after_entry_replacement() {
     let child = json!([{"kind": "field", "value": "apiKey"}]);
@@ -1053,8 +1055,103 @@ fn compact_preferences_preserves_other_origins_and_edits_after_entry_replacement
             .iter()
             .map(|op| (op.originDeviceId.as_str(), op.sequence))
             .collect::<Vec<_>>(),
-        vec![("windows", 2), ("android", 3), ("android", 4)]
+        vec![
+            ("android", 1),
+            ("windows", 2),
+            ("android", 3),
+            ("android", 4)
+        ]
     );
+}
+
+/// Removes legacy preference history once a later native migration snapshot
+/// covers the same keys, keeping paged synchronization applicable to migrated peers.
+#[test]
+fn compact_preferences_drops_legacy_history_covered_by_native_migration() {
+    let path = "runtime/config/preferences/user_preferences.preferences.json";
+    let mut legacy = preferenceOperation("device-a", 1, json!([]));
+    legacy.payload = json!({
+        "storagePath": path,
+        "key": "theme_mode",
+        "value": "dark",
+        "encrypted": false,
+    });
+    let native = SyncOperation {
+        opId: "device-a:2".into(),
+        originDeviceId: "device-a".into(),
+        sequence: 2,
+        domain: "preferences".into(),
+        entityType: "user_preferences".into(),
+        entityId: "migration".into(),
+        operation: "transaction".into(),
+        semantics: SyncOperationSemantics::Transaction,
+        payload: json!({
+            "storagePath": path,
+            "encrypted": false,
+            "formatVersion": 2,
+            "schemaVersion": 3,
+            "migrationSnapshot": true,
+            "entries": [{"key": "theme_mode", "operation": "set", "value": "light"}],
+        }),
+        createdAt: 2,
+        schemaVersion: 3,
+    };
+
+    let compacted = compactSyncOperations(vec![legacy, native.clone()]);
+    assert_eq!(compacted, vec![native]);
+}
+
+/// Does not treat an ordinary native edit as an old migration boundary when
+/// another legacy key still needs to be covered by the later full snapshot.
+#[test]
+fn compact_preferences_waits_for_unmarked_full_migration_snapshot() {
+    let path = "runtime/config/preferences/user_preferences.preferences.json";
+    let mut legacyTheme = preferenceOperation("device-a", 1, json!([]));
+    legacyTheme.payload = json!({
+        "storagePath": path,
+        "key": "theme_mode",
+        "value": "dark",
+        "encrypted": false,
+    });
+    let mut legacyFont = preferenceOperation("device-a", 2, json!([]));
+    legacyFont.payload = json!({
+        "storagePath": path,
+        "key": "font_type",
+        "value": "system",
+        "encrypted": false,
+    });
+
+    let mut ordinaryNativeEdit = preferenceOperation("device-a", 3, json!([]));
+    ordinaryNativeEdit.payload = json!({
+        "storagePath": path,
+        "key": "theme_mode",
+        "value": "light",
+        "encrypted": false,
+        "formatVersion": 2,
+        "schemaVersion": 2,
+    });
+
+    let mut migration = preferenceOperation("device-a", 4, json!([]));
+    migration.operation = "transaction".into();
+    migration.semantics = SyncOperationSemantics::Transaction;
+    migration.payload = json!({
+        "storagePath": path,
+        "encrypted": false,
+        "formatVersion": 2,
+        "schemaVersion": 2,
+        "entries": [
+            {"key": "theme_mode", "operation": "set", "value": "light"},
+            {"key": "font_type", "operation": "set", "value": "system"},
+        ],
+    });
+
+    let compacted = compactSyncOperations(vec![
+        legacyTheme,
+        legacyFont,
+        ordinaryNativeEdit.clone(),
+        migration.clone(),
+    ]);
+    assert_eq!(compacted, vec![ordinaryNativeEdit, migration]);
 }
 
 

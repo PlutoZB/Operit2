@@ -295,7 +295,12 @@
 <body>
   <script src="runtime/vendor/msgpack.min.js"></script>
   <script>
-    globalThis.__operitRuntimeReady = import("./runtime/generated/operit_runtime_bridge.js");
+    globalThis.__operitDataRescueReady = import("./runtime/generated/operit_data_rescue.js");
+    globalThis.__operitRuntimeReady = globalThis.__operitDataRescueReady.then(async maintenance => {
+      if (maintenance.isDataRescuePage()) return;
+      await maintenance.acquireRuntimeAccess();
+      await import("./runtime/generated/operit_runtime_bridge.js");
+    });
   </script>
   <script src="flutter_bootstrap.js" async></script>
 </body>

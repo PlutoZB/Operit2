@@ -79,8 +79,13 @@ impl Fixture {
     /// Replays all exported transactions onto another actual SQLite host.
     fn replay(&self, operations: &[SyncOperation]) {
         for operation in operations {
-            PluginStorage::applyOperation(self.host.clone(), self.host.clone(), operation, false)
-                .unwrap();
+            PluginStorage::applyOperation(
+                self.host.clone(),
+                self.host.clone(),
+                operation,
+                &Default::default(),
+            )
+            .unwrap();
         }
     }
     /// Releases all database handles before removing only this test's unique temporary directory.
@@ -112,20 +117,21 @@ fn storage_ownership_selects_replication_without_open_options() {
             } else {
                 f.call(json!({"op":"commit","handle":handle,"mutations":[put("one",json!(1))]})).unwrap();
             }
-            let changes = f.call(json!({"op":"changes","handle":handle,"after":"0","limit":100})).unwrap();
-            assert!(!changes.as_array().unwrap().is_empty());
-            assert_eq!(changes[0]["transaction"]["manifest"]["sync"], scope == "space");
             let operations = f.export();
             if scope == "space" {
-                assert_eq!(operations.len(), changes.as_array().unwrap().len());
+                assert!(!operations.is_empty());
                 assert!(operations.iter().all(|operation| operation.domain == PluginStorage::PLUGIN_STORAGE_SYNC_DOMAIN));
             } else {
                 assert!(operations.is_empty());
             }
             f.call(json!({"op":"close","handle":handle})).unwrap();
             let reopened = f.open(kind);
-            let reopened_changes = f.call(json!({"op":"changes","handle":reopened,"after":"0","limit":100})).unwrap();
-            assert_eq!(reopened_changes, changes);
+            if kind == "sqlite" {
+                let rows=f.call(json!({"op":"query","handle":reopened,"statement":{"sql":"SELECT id FROM records","params":[]}})).unwrap();
+                assert_eq!(rows.as_array().unwrap().len(), 1);
+            } else {
+                assert_eq!(f.get(&reopened,"one")["value"],1);
+            }
             f.dispose();
         }
     }
@@ -222,10 +228,7 @@ fn compare_and_set_batches_are_atomic() {
     );
     assert_eq!(f.get(&handle, "a")["value"], 1);
     assert_eq!(f.get(&handle, "b")["value"], 2);
-    let pages = f
-        .call(json!({"op":"changes","handle":handle,"after":"0","limit":100}))
-        .unwrap();
-    assert_eq!(pages.as_array().unwrap().len(), 1);
+    assert!(f.export().is_empty());
     let mut create = put("a", json!(3));
     create["checkVersion"] = json!(true);
     assert!(
@@ -411,7 +414,13 @@ fn key_sync_resolves_conflicts_and_forwards_original_transactions() {
     let mut conflict = first[0].clone();
     conflict.payload["changes"][0]["value"] = json!("forged");
     assert!(
-        PluginStorage::applyOperation(b.host.clone(), b.host.clone(), &conflict, false).is_err()
+        PluginStorage::applyOperation(
+            b.host.clone(),
+            b.host.clone(),
+            &conflict,
+            &Default::default(),
+        )
+        .is_err()
     );
     assert_eq!(b.get(&bh, "key")["value"], json!({"latest":true}));
     a.dispose();
@@ -445,7 +454,13 @@ fn sqlite_sync_is_atomic_and_validates_declared_rows() {
         .unwrap()
         .push(second);
     assert!(
-        PluginStorage::applyOperation(b.host.clone(), b.host.clone(), &invalid, false).is_err()
+        PluginStorage::applyOperation(
+            b.host.clone(),
+            b.host.clone(),
+            &invalid,
+            &Default::default(),
+        )
+        .is_err()
     );
     let rows=b.call(json!({"op":"query","handle":bh,"statement":{"sql":"SELECT count,bytes FROM records","params":[]}})).unwrap();
     assert_eq!(rows.as_array().unwrap().len(), 1);
@@ -572,7 +587,13 @@ fn malformed_remote_transactions_leave_no_database_or_catalog_entry() {
     let mut invalid = a.export()[0].clone();
     invalid.payload["changes"][0]["collection"] = json!("other");
     assert!(
-        PluginStorage::applyOperation(b.host.clone(), b.host.clone(), &invalid, false).is_err()
+        PluginStorage::applyOperation(
+            b.host.clone(),
+            b.host.clone(),
+            &invalid,
+            &Default::default(),
+        )
+        .is_err()
     );
     assert!(!b.host.exists(&b.path).unwrap());
     assert!(
@@ -627,4 +648,252 @@ fn plugin_uninstall_preserves_independent_local_and_shared_databases() {
     assert_eq!(f.get(&sharedHandle, "memory")["value"], 1);
     assert_eq!(f.export().len(), 1);
     f.dispose();
+}
+
+/// Replays released row layouts into an additive schema without erasing newer columns.
+#[test]
+fn additive_schema_projects_historical_rows_and_preserves_new_fields() {
+    let source = Fixture::new("historical");
+    let source_handle = source.open("sqlite");
+    source.call(json!({"op":"define_table","handle":source_handle,"table":table()})).unwrap();
+    source.call(json!({"op":"execute","handle":source_handle,"statement":{
+        "sql":"INSERT INTO records(id,count,bytes) VALUES('same',1,NULL)","params":[]
+    }})).unwrap();
+    let target = Fixture::new("current");
+    let target_handle = target.open("sqlite");
+    let mut extended = table();
+    extended["columns"].as_array_mut().unwrap().insert(1,
+        json!({"name":"owner_uuid","affinity":"text","nullable":true}));
+    target.call(json!({"op":"define_table","handle":target_handle,"table":extended})).unwrap();
+    target.replay(&source.export());
+    let rows = target.call(json!({"op":"query","handle":target_handle,"statement":{
+        "sql":"SELECT id,count,owner_uuid FROM records", "params":[]
+    }})).unwrap();
+    assert_eq!(rows[0]["values"][1], json!({"kind":"integer","value":"1"}));
+    assert_eq!(rows[0]["values"][2], json!({"kind":"null"}));
+    target.call(json!({"op":"execute","handle":target_handle,"statement":{
+        "sql":"UPDATE records SET owner_uuid='exact-owner' WHERE id='same'","params":[]
+    }})).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    source.call(json!({"op":"execute","handle":source_handle,"statement":{
+        "sql":"UPDATE records SET count=2 WHERE id='same'","params":[]
+    }})).unwrap();
+    target.replay(&source.export());
+    let rows = target.call(json!({"op":"query","handle":target_handle,"statement":{
+        "sql":"SELECT count,owner_uuid FROM records WHERE id='same'", "params":[]
+    }})).unwrap();
+    assert_eq!(rows[0]["values"][0], json!({"kind":"integer","value":"2"}));
+    assert_eq!(rows[0]["values"][1], json!({"kind":"text","value":"exact-owner"}));
+    target.call(json!({"op":"define_table","handle":target_handle,"table":table()})).unwrap();
+    let store = SqliteStore::openWithHost(target.host.clone(), &target.path).unwrap();
+    let definition = store.queryOne("SELECT definition FROM _operit_tables WHERE name='records'", Vec::new()).unwrap().unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&definition.values[0].asString().unwrap()).unwrap(), extended);
+    drop(store);
+    source.dispose();
+    target.dispose();
+}
+
+/// Rejects incompatible and nonnullable additions before changing the installed table.
+#[test]
+fn additive_schema_rejects_unsafe_column_changes() {
+    let fixture = Fixture::new("schema");
+    let handle = fixture.open("sqlite");
+    fixture.call(json!({"op":"define_table","handle":handle,"table":table()})).unwrap();
+    let mut incompatible = table();
+    incompatible["columns"][1]["affinity"] = json!("text");
+    assert!(fixture.call(json!({"op":"define_table","handle":handle,"table":incompatible})).is_err());
+    let mut required = table();
+    required["columns"].as_array_mut().unwrap().push(json!({"name":"required_new","affinity":"text","nullable":false}));
+    assert!(fixture.call(json!({"op":"define_table","handle":handle,"table":required})).is_err());
+    fixture.dispose();
+}
+
+/// Guards an entire initialization transaction without suppressing independent row constraints.
+#[test]
+fn initialization_guard_skips_the_whole_transaction_and_journal() {
+    let fixture = Fixture::new("initialization");
+    let handle = fixture.open("sqlite");
+    fixture.call(json!({"op":"define_table","handle":handle,"table":table()})).unwrap();
+    let request = json!({"op":"transaction","handle":handle,
+        "whenAbsent":{"collection":"records","key":"state"},"statements":[
+            {"sql":"INSERT INTO records VALUES('default',1,NULL)","params":[],"expectedAffectedRows":1},
+            {"sql":"INSERT INTO records VALUES('state',1,NULL)","params":[],"expectedAffectedRows":1}
+        ]});
+    assert_eq!(fixture.call(request.clone()).unwrap().as_array().unwrap().len(),2);
+    let operations = fixture.export();
+    assert_eq!(fixture.call(request).unwrap(),json!([]));
+    assert_eq!(fixture.export().len(),operations.len());
+    assert!(fixture.call(json!({"op":"transaction","handle":handle,
+        "whenAbsent":{"collection":"records","key":"different"},"statements":[
+            {"sql":"INSERT INTO records VALUES('new',1,NULL)","params":[]},
+            {"sql":"INSERT INTO records VALUES('default',1,NULL)","params":[]}
+        ]})).is_err());
+    let rows = fixture.call(json!({"op":"query","handle":handle,"statement":{
+        "sql":"SELECT id FROM records ORDER BY id","params":[]}})).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(),2);
+    fixture.dispose();
+}
+
+/// Rewrites multiple existing references cumulatively even when no plugin operation arrives.
+#[test]
+fn preference_aliases_reconcile_existing_rows_without_rewriting_history() {
+    let fixture = Fixture::new("references");
+    let descriptor = json!({"version":3,"maxEntities":1,"maxReferences":2,"entities":[{
+        "collection":"records","identityColumn":"id","nameColumn":null,
+        "ignoredColumns":[],"keyEncoding":"length_prefixed_root","matchMode":"identity",
+        "keyReferences":[],"childCollections":[],"references":[
+            {"collection":"records","column":"provider","target":{"kind":"preference","path":"models"}},
+            {"collection":"records","column":"voice","target":{"kind":"preference","path":"voices"}}
+        ]}]});
+    let handle = fixture.call(json!({"op":"open","path":fixture.path,"kind":"sqlite","merge":descriptor})).unwrap()["handle"].as_str().unwrap().to_string();
+    let schema = json!({"name":"records","primaryKey":"id","columns":[
+        {"name":"id","affinity":"text","nullable":false},
+        {"name":"provider","affinity":"text","nullable":false},
+        {"name":"voice","affinity":"text","nullable":false}]});
+    fixture.call(json!({"op":"define_table","handle":handle,"table":schema})).unwrap();
+    fixture.call(json!({"op":"execute","handle":handle,"statement":{
+        "sql":"INSERT INTO records VALUES('same','old-provider','old-voice')","params":[]}})).unwrap();
+    let original = fixture.export().iter().map(|op|serde_json::to_value(op).unwrap()).collect::<Vec<_>>();
+    let references = std::collections::BTreeMap::from([
+        ("models\u{001f}old-provider".to_string(),"retained-provider".to_string()),
+        ("voices\u{001f}old-voice".to_string(),"retained-voice".to_string())]);
+    PluginStorage::reconcilePreferenceReferences(fixture.host.clone(),&references).unwrap();
+    PluginStorage::reconcilePreferenceReferences(fixture.host.clone(),&references).unwrap();
+    let rows = fixture.call(json!({"op":"query","handle":handle,"statement":{
+        "sql":"SELECT provider,voice FROM records WHERE id='same'","params":[]}})).unwrap();
+    assert_eq!(rows[0]["values"][0],json!({"kind":"text","value":"retained-provider"}));
+    assert_eq!(rows[0]["values"][1],json!({"kind":"text","value":"retained-voice"}));
+    assert_eq!(fixture.export().iter().map(|op|serde_json::to_value(op).unwrap()).collect::<Vec<_>>(),original);
+    fixture.dispose();
+}
+
+/// Opens matching native tables with an explicit dependent owner identity contract.
+fn open_merge_fixture(fixture: &Fixture) -> String {
+    let descriptor = json!({"version":3,"maxEntities":2,"maxReferences":2,"entities":[
+        {"collection":"items","identityColumn":"id","nameColumn":"name","ignoredColumns":[],
+         "keyEncoding":"length_prefixed_root","references":[]},
+        {"collection":"owners","identityColumn":"ownerKey","nameColumn":null,"ignoredColumns":[],
+         "keyEncoding":"slash_root","matchMode":"identity","keyReferences":[{"collection":"items","prefix":"owner:"}],
+         "references":[{"collection":"owners","column":"document","target":{"kind":"collection","collection":"owners"},
+                        "keyPrefix":"owners/","keySuffix":"/USER.md","valueEncoding":"uri_component"}]}
+    ]});
+    let handle = fixture.call(json!({"op":"open","path":fixture.path,"kind":"sqlite","merge":descriptor})).unwrap()["handle"].as_str().unwrap().to_string();
+    for (name, columns) in [("items",vec!["_key","id","name","content"]),("owners",vec!["_key","ownerKey","document"])] {
+        fixture.call(json!({"op":"define_table","handle":handle,"table":{"name":name,"primaryKey":"_key",
+            "columns":columns.into_iter().map(|name|json!({"name":name,"affinity":"text","nullable":false})).collect::<Vec<_>>()}})).unwrap();
+    }
+    handle
+}
+
+/// Commits one independent entity and its owner through the actual journaled transaction API.
+fn seed_merge_item(fixture: &Fixture, handle: &str, id: &str, name: &str, content: &str) {
+    let owner = format!("owner:{id}");
+    fixture.call(json!({"op":"transaction","handle":handle,"statements":[
+        {"sql":"INSERT INTO items VALUES(?,?,?,?)","params":([id,id,name,content].map(|value|json!({"kind":"text","value":value})))},
+        {"sql":"INSERT INTO owners VALUES(?,?,?)","params":([owner.clone(),owner,format!("owners/owner%3A{id}/USER.md")].map(|value|json!({"kind":"text","value":value})))}
+    ]})).unwrap();
+}
+
+/// Requires independent peers to retain the same UUID, owners and collision names in either direction.
+#[test]
+fn equivalent_entities_and_dependent_owners_converge_in_uuid_order() {
+    let left = Fixture::new("left"); let right = Fixture::new("right");
+    let a = open_merge_fixture(&left); let b = open_merge_fixture(&right);
+    seed_merge_item(&left,&a,"z-equal","Same","equal");
+    seed_merge_item(&right,&b,"a-equal","Same","equal");
+    seed_merge_item(&left,&a,"b-conflict","Collision","left");
+    seed_merge_item(&right,&b,"y-conflict","Collision","right");
+    let left_original = left.export(); let right_original = right.export();
+    left.replay(&right_original); right.replay(&left_original);
+    for sql in ["SELECT * FROM items ORDER BY _key","SELECT * FROM owners ORDER BY _key"] {
+        let query = |fixture: &Fixture, handle: &str| fixture.call(json!({"op":"query","handle":handle,"statement":{"sql":sql,"params":[]}})).unwrap();
+        assert_eq!(query(&left,&a),query(&right,&b));
+        assert_eq!(query(&left,&a).as_array().unwrap().len(),3);
+    }
+    left.replay(&right.export()); right.replay(&left.export());
+    let rows = left.call(json!({"op":"query","handle":a,"statement":{"sql":"SELECT _key,name FROM items ORDER BY _key","params":[]}})).unwrap();
+    assert_eq!(rows[0]["values"][0],json!({"kind":"text","value":"a-equal"}));
+    assert_eq!(rows[1]["values"][1],json!({"kind":"text","value":"Collision"}));
+    assert_eq!(rows[2]["values"][1],json!({"kind":"text","value":"Collision（1）"}));
+    left.dispose();right.dispose();
+}
+
+/// Counts storage notifications without timers or an application runtime.
+#[derive(Default)]
+struct ChangeWake(std::sync::atomic::AtomicUsize);
+impl std::task::Wake for ChangeWake {
+    /// Records each publication that wakes the pending storage future.
+    fn wake(self: Arc<Self>) { self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst); }
+    /// Records borrowed wake notifications without consuming the counter.
+    fn wake_by_ref(self: &Arc<Self>) { self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst); }
+}
+
+/// Observes initial state, exact key isolation, deletion and recreation without reading history.
+#[test]
+fn record_watch_emits_only_the_selected_record_and_tracks_absence() {
+    use std::{future::Future, task::{Context, Poll, Waker}};
+    use operit_host_api::PluginStorage::StorageRecordWatchState;
+    let f = Fixture::new("record-local");
+    let handle = f.open("objects");
+    let waker = Waker::from(Arc::new(ChangeWake::default()));
+    let mut context = Context::from_waker(&waker);
+    let mut initial = Box::pin(f.session.waitForRecord(handle.clone(), "keys".into(), "live".into(), None));
+    assert!(matches!(initial.as_mut().poll(&mut context), Poll::Ready(Ok(None))));
+    drop(initial);
+    let mut wait = Box::pin(f.session.waitForRecord(handle.clone(), "keys".into(), "live".into(), Some(StorageRecordWatchState { version: None })));
+    assert!(wait.as_mut().poll(&mut context).is_pending());
+    f.call(json!({"op":"commit","handle":handle,"mutations":[put("unrelated",json!(1)), {"collection":"other","key":"live","value":99,"deleted":false,"checkVersion":false}]})).unwrap();
+    assert!(wait.as_mut().poll(&mut context).is_pending());
+    f.call(json!({"op":"commit","handle":handle,"mutations":[put("live",Value::Null)]})).unwrap();
+    let Poll::Ready(Ok(Some(entry))) = wait.as_mut().poll(&mut context) else { panic!("Selected record was not emitted") };
+    assert_eq!(entry.value, Value::Null);
+    drop(wait);
+    let mut wait = Box::pin(f.session.waitForRecord(handle.clone(), "keys".into(), "live".into(), Some(StorageRecordWatchState { version: Some(entry.version) })));
+    assert!(wait.as_mut().poll(&mut context).is_pending());
+    let mut remove=put("live",Value::Null); remove["deleted"]=json!(true);
+    f.call(json!({"op":"commit","handle":handle,"mutations":[remove]})).unwrap();
+    assert!(matches!(wait.as_mut().poll(&mut context), Poll::Ready(Ok(None))));
+    drop(wait);
+    f.dispose();
+}
+
+/// Observes remote application while rejecting handles from other sessions and databases.
+#[test]
+fn record_watch_receives_remote_changes_and_isolates_database_handles() {
+    use std::{future::Future, task::{Context, Poll, Waker}};
+    use operit_host_api::PluginStorage::StorageRecordWatchState;
+    let source=Fixture::new("record-source"); let peer=Fixture::new("record-peer");
+    let local=source.open("objects"); let handle=peer.open("objects");
+    let waker=Waker::from(Arc::new(ChangeWake::default()));let mut context=Context::from_waker(&waker);
+    let mut foreign=Box::pin(source.session.waitForRecord(handle.clone(),"keys".into(),"remote".into(),None));
+    assert!(matches!(foreign.as_mut().poll(&mut context),Poll::Ready(Err(_))));drop(foreign);
+    let mut wait=Box::pin(peer.session.waitForRecord(handle.clone(),"keys".into(),"remote".into(),Some(StorageRecordWatchState{version:None})));
+    assert!(wait.as_mut().poll(&mut context).is_pending());
+    source.call(json!({"op":"commit","handle":local,"mutations":[put("remote",json!(true))]})).unwrap();
+    assert!(wait.as_mut().poll(&mut context).is_pending());
+    peer.replay(&source.export());
+    let Poll::Ready(Ok(Some(entry)))=wait.as_mut().poll(&mut context) else {panic!("Remote record was not emitted")};
+    assert_eq!(entry.value,json!(true));drop(wait);
+    source.dispose();peer.dispose();
+}
+
+/// Supports device-local state and releases pending subscriptions on close or cancellation.
+#[test]
+fn record_watch_supports_device_storage_and_releases_pending_waits() {
+    use std::{future::Future, task::{Context, Poll, Waker}};
+    use operit_host_api::PluginStorage::StorageRecordWatchState;
+    let f=Fixture::withScope("record-device","device");let handle=f.open("objects");
+    let counter=Arc::new(ChangeWake::default());let waker=Waker::from(counter.clone());let mut context=Context::from_waker(&waker);
+    let mut wait=Box::pin(f.session.waitForRecord(handle.clone(),"keys".into(),"local".into(),Some(StorageRecordWatchState{version:None})));
+    assert!(wait.as_mut().poll(&mut context).is_pending());
+    f.call(json!({"op":"commit","handle":handle,"mutations":[put("local",json!(1))]})).unwrap();
+    let Poll::Ready(Ok(Some(entry)))=wait.as_mut().poll(&mut context) else {panic!("Device record was not emitted")};drop(wait);
+    let mut wait=Box::pin(f.session.waitForRecord(handle.clone(),"keys".into(),"local".into(),Some(StorageRecordWatchState{version:Some(entry.version.clone())})));
+    assert!(wait.as_mut().poll(&mut context).is_pending());drop(wait);
+    let before=counter.0.load(std::sync::atomic::Ordering::SeqCst);
+    f.call(json!({"op":"commit","handle":handle,"mutations":[put("other",json!(2))]})).unwrap();
+    assert_eq!(counter.0.load(std::sync::atomic::Ordering::SeqCst),before);
+    let mut wait=Box::pin(f.session.waitForRecord(handle.clone(),"keys".into(),"local".into(),Some(StorageRecordWatchState{version:Some(entry.version)})));
+    assert!(wait.as_mut().poll(&mut context).is_pending());f.call(json!({"op":"close","handle":handle})).unwrap();
+    assert!(matches!(wait.as_mut().poll(&mut context),Poll::Ready(Err(_))));drop(wait);f.dispose();
 }

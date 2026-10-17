@@ -1,5 +1,5 @@
 import type { DomainInput, DomainOperation, DomainOutput } from "./api";
-import { executeDomain } from "./operations";
+import { executeDomain, resolveConfiguration } from "./operations";
 import { parseDomainPayload } from "./domain";
 import { findChatBinding } from "./chat-storage";
 import { parseChatSelection } from "./chat-bindings";
@@ -106,7 +106,7 @@ export interface CharacterCardsService {
   ): Promise<DomainOutput<K>>;
 }
 
-/** Binds every entry point to one real file owner and the same required independent configuration dependencies. */
+/** Shares indexed readers and editing transactions across plugin entry points. */
 export function createCharacterCardsService(
   owner: CharacterRepositoryOwner,
   configurations: IndependentConfigurationAccess = independentConfigurations,
@@ -122,6 +122,8 @@ export function createCharacterCardsService(
     if (request.action === "listThemeChoices")
       return readThemeChoices(configurations);
     switch (request.action) {
+      case "snapshot":
+        return owner.readConfigurationSnapshot();
       case "listMemoryChats":
         return listMemoryChats(request.ownerKey, owner);
       case "readGlobalMemoryPreferences":
@@ -155,23 +157,54 @@ export function createCharacterCardsService(
         ),
     );
   }
-  return {
+  const service: CharacterCardsService = {
     /** Runs the private job scheduler without constructing another store or business service. */
     runMemoryJobs: () => jobs.tick(),
     /** Reads only the metadata flags needed by prompt composition. */
     readGlobalMemoryPreferences: () => owner.readGlobalMemoryPreferences(),
     /** Preserves action-specific results through the shared service dispatcher. */
     dispatch: dispatchRequest,
-    /** Reads one consistent domain snapshot through the same operation queue. */
-    snapshot: () => owner.run(snapshot),
-    /** Preserves the same repository queue and integrity checks as full snapshots. */
+    /** Reads configuration records without loading memory data. */
+    snapshot: () => owner.readConfigurationSnapshot(),
+    /** Reads role presentation without entering the editing queue. */
     sidebarDirectory: () => owner.readSidebarDirectory(),
-    /** Keeps every real selection alias and sidebar binding on the same awaited application sequence. */
+    /** Routes reads directly and keeps mutations in the editing transaction. */
     dispatchDomain<K extends DomainOperation>(
       operation: K,
       input: DomainInput<K>,
     ): Promise<DomainOutput<K>> {
       switch (operation) {
+        case "snapshot":
+          return owner.readConfigurationSnapshot() as Promise<DomainOutput<K>>;
+        case "chat.configuration.resolve":
+          return resolveConfiguration(parseDomainPayload("chat.configuration.resolve", input), service) as Promise<DomainOutput<K>>;
+        case "character.combine": {
+          const { id, promptFunctionType = "CHAT", additionalTagIds = [] } = parseDomainPayload("character.combine", input);
+          return combinePrompts(id, additionalTagIds, promptFunctionType, owner)
+            .then(prompt => ({ id, promptFunctionType, additionalTagIds, prompt })) as Promise<DomainOutput<K>>;
+        }
+        case "memory.resolveOwner": {
+          const { characterId } = parseDomainPayload("memory.resolveOwner", input);
+          return resolveMemoryOwner(characterId, owner).then(parseOwner) as Promise<DomainOutput<K>>;
+        }
+        case "tag.list":
+          return owner.listTags() as Promise<DomainOutput<K>>;
+        case "memory.shared.list":
+          return owner.listStores() as Promise<DomainOutput<K>>;
+        case "activePrompt.get":
+          return owner.readActive() as Promise<DomainOutput<K>>;
+        case "character.list":
+          return owner.listCharacters() as Promise<DomainOutput<K>>;
+        case "group.list":
+          return owner.listGroups() as Promise<DomainOutput<K>>;
+        case "character.get": {
+          const { id } = parseDomainPayload("character.get", input);
+          return owner.getCharacter(id) as Promise<DomainOutput<K>>;
+        }
+        case "group.get": {
+          const { id } = parseDomainPayload("group.get", input);
+          return owner.getGroup(id) as Promise<DomainOutput<K>>;
+        }
         case "memory.chat.list":
           return listMemoryChats(
             parseDomainPayload("memory.chat.list", input).ownerKey,
@@ -224,6 +257,7 @@ export function createCharacterCardsService(
       );
     },
   };
+  return service;
 }
 
 /** Requires real arrays and validates every complete canonical record. */
@@ -454,8 +488,10 @@ function normalizedCharacter(card: Card): Card {
     card.memoryBindingMode !== "SHARED"
   )
     throw new Error("记忆绑定模式无效");
-  if (card.chatModelBindingMode === "FIXED_MODEL")
+  if (card.chatModelBindingMode === "FIXED_MODEL") {
+    requireId(card.chatProviderId, "固定聊天模型提供商");
     requireId(card.chatModelId, "固定聊天模型");
+  }
   if (card.memoryBindingMode === "SHARED")
     requireId(card.sharedMemoryId, "共享记忆库");
   if (card.ttsConfigId !== null) requireId(card.ttsConfigId, "TTS 配置");
@@ -703,7 +739,7 @@ async function menuMemoryOwner(
 /** Requires the selected owner to exist in the canonical character or shared store registry. */
 export async function requireOwner(
   ownerKey: string,
-  host: CharacterRepository,
+  host: Pick<CharacterRepository, "getCharacter" | "listStores">,
 ): Promise<MemoryOwner> {
   const owner = parseOwner(ownerKey);
   if (owner.kind === "CHARACTER") assertCard(await host.getCharacter(owner.id));
@@ -719,7 +755,7 @@ export async function requireOwner(
 /** Resolves the primary memory namespace from the character's complete persisted binding. */
 export async function resolveMemoryOwner(
   characterId: string,
-  host: CharacterRepository,
+  host: Pick<CharacterRepository, "getCharacter" | "listStores">,
 ): Promise<string> {
   const card = await host.getCharacter(requireId(characterId, "角色卡标识"));
   assertCard(card);
@@ -830,7 +866,7 @@ export async function combinePrompts(
   characterId: string,
   additionalTagIds: string[],
   promptFunctionType: "CHAT" | "VOICE",
-  host: CharacterRepository,
+  host: Pick<CharacterRepository, "getCharacter" | "listTags">,
 ): Promise<string> {
   const card = await host.getCharacter(requireId(characterId, "角色卡标识"));
   assertCard(card);

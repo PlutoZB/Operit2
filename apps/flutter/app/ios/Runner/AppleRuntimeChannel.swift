@@ -11,6 +11,8 @@ import Vision
 import UIKit
 
 final class AppleRuntimeChannel: NSObject, UIDocumentInteractionControllerDelegate {
+  /// Captures a maintenance launch before Dart starts normal application initialization.
+  static var dataRescueRequested = false
   private static var shared: AppleRuntimeChannel?
   private static var pendingNotificationActivations: [[String: Any]] = []
   private static var notificationActivationReceiverReady = false
@@ -113,6 +115,27 @@ final class AppleRuntimeChannel: NSObject, UIDocumentInteractionControllerDelega
       restartApplication(result: result)
     case "localRuntimeStorageDefaults":
       localRuntimeStorageDefaults(result: result)
+    case "dataRescue":
+      guard let request = call.arguments as? String else {
+        result(FlutterError(code: "INVALID_ARGS", message: "dataRescue expects JSON text", details: nil))
+        return
+      }
+      do {
+        let command = try JSONSerialization.jsonObject(with: Data(request.utf8)) as? [String: Any]
+        if command?["operation"] as? String == "launchMode" {
+          let requested = Self.dataRescueRequested || ProcessInfo.processInfo.arguments.contains("--data-rescue")
+          result("{\"ok\":true,\"value\":{\"rescue\":\(requested)}}")
+          return
+        }
+      } catch {
+        result(FlutterError(code: "INVALID_ARGS", message: error.localizedDescription, details: nil))
+        return
+      }
+      let root = defaultStorageRoots().runtime.path
+      workQueue.async {
+        let response = self.takeString(operit_flutter_bridge_data_rescue(root, request))
+        DispatchQueue.main.async { result(response) }
+      }
     case "runtimeBootstrapRead":
       runtimeBootstrapRead(result: result)
     case "runtimeBootstrapWrite":

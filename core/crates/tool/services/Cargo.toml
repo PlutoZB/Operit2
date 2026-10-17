@@ -26,6 +26,7 @@ md-5 = "0.10"
 operit-host-api = { version = "0.1.0", path = "../../foundation/host-api" }
 operit-edge-contract = { path = "../../node/edge-contract" }
 operit-link = { path = "../../foundation/link" }
+operit-rslink-runtime = { path = "../../rslink/runtime" }
 operit-model = { version = "2.0.0-preview.15", path = "../../foundation/model" }
 operit-plugin-sdk = { version = "2.0.0-preview.15", path = "../../plugin/sdk" }
 operit-route-macros = { path = "../../node/route-macros" }

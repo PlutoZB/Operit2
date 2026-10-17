@@ -29,6 +29,7 @@ async function(params) {
     }
     var payload = params.__operit_toolpkg_ipc_payload;
     var channel = params.__operit_toolpkg_ipc_channel.trim();
+    if (channel === '$route') return await globalThis.__operitInvokeToolPkgRouteLocal(payload);
     if (!channel) {
         throw new Error('ToolPkg.ipc channel is required');
     }
@@ -333,6 +334,8 @@ async fn invokeToolPkgIpcMeasured(
             "ToolPkg IPC main context key is invalid: {targetContextKey}"
         ));
     }
+    // Accepted main aliases must resolve to the single container-owned realm.
+    let targetContextKey = if isMainTarget { mainContextKey } else { targetContextKey };
     timing.mark("validationMs")?;
     let (manager, scriptPath, scriptRead, publicMethod) = RuntimePackageManager::withReadyObserved(
         toolHandler.getOrCreatePackageManager(),
@@ -377,12 +380,15 @@ async fn invokeToolPkgIpcMeasured(
         |phase| timing.mark(phase),
     )
     .await?;
-    let engine = if isMainTarget {
-        manager.getToolPkgExecutionEngine(&targetContextKey, &packageTarget)?
+    let (engine, _lease) = if isMainTarget {
+        let (engine, lease) = manager
+            .leaseToolPkgMainExecutionEngine(&packageTarget)?;
+        (engine, Some(lease))
     } else {
-        manager
+        let engine = manager
             .findToolPkgExecutionEngine(&targetContextKey, &packageTarget)
-            .ok_or_else(|| format!("ToolPkg runtime is not active: {targetContextKey}"))?
+            .ok_or_else(|| format!("ToolPkg runtime is not active: {targetContextKey}"))?;
+        (engine, None)
     };
     timing.mark("engineAcquireMs")?;
     let script = if isMainTarget {
@@ -434,6 +440,11 @@ async fn invokeToolPkgIpcMeasured(
         "__operit_inline_function_source".to_string(),
         Value::String(TOOLPKG_IPC_DISPATCH_FUNCTION_SOURCE.trim().to_string()),
     );
+    let persistent = channel == "$route"
+        && matches!(
+            request.payload.get("op").and_then(Value::as_str),
+            Some("next" | "pushItem" | "pushClose")
+        );
     params.insert(
         "__operit_toolpkg_ipc_channel".to_string(),
         Value::String(channel),
@@ -474,17 +485,12 @@ async fn invokeToolPkgIpcMeasured(
         }
     };
     timing.mark("paramsMs")?;
-    let result = engine
-        .execute_script_function_async(
-            script,
-            functionName,
-            params,
-            BTreeMap::new(),
-            None,
-            true,
-            TOOLPKG_SCRIPT_TIMEOUT_SECONDS * 1_000,
-        )
-        .await;
+    let execution = if persistent {
+        engine.execute_script_function_until_cancelled(script, functionName, params, BTreeMap::new())
+    } else {
+        engine.execute_script_function_async(script, functionName, params, BTreeMap::new(), None, true, TOOLPKG_SCRIPT_TIMEOUT_SECONDS * 1_000)
+    };
+    let result = execution.await;
     timing.mark("executeMs")?;
     let result = result.map_err(|error| error.to_string())?;
     let decoded = decode_js_execution_result_value(result.as_deref()).map_err(|error| error.to_string());

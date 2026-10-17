@@ -18,6 +18,7 @@ export default class EntryAbility extends FlutterAbility {
 
   /// Captures the notification activation that launched this application process.
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    AppStorage.setOrCreate<boolean>('operitDataRescueRequested', want.parameters?.['dataRescue'] === true || want.action === 'app.operit.DATA_RESCUE')
     super.onCreate(want, launchParam)
     this.recordNotificationActivation(want)
   }

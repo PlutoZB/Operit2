@@ -583,6 +583,7 @@ impl OperitApplication {
                 .get("builtin")
                 .and_then(serde_json::Value::as_bool)
                 == Some(true)
+                && record.settings.get("installationScope").is_none()
             {
                 "builtin".to_string()
             } else {
@@ -884,21 +885,16 @@ impl OperitApplication {
     pub fn syncApplyOperations(
         &self,
         operations: serde_json::Value,
+        complete: bool,
     ) -> Result<serde_json::Value, String> {
-        let forceApply = operations
-            .get("forceApply")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        let operationsValue = if forceApply {
-            operations
-                .get("operations")
-                .cloned()
-                .ok_or_else(|| "bootstrap sync request is missing operations".to_string())?
-        } else {
-            operations
-        };
         let mut operations: Vec<SyncOperation> =
-            serde_json::from_value(operationsValue).map_err(|error| error.to_string())?;
+            serde_json::from_value(operations).map_err(|error| error.to_string())?;
+        for operation in operations
+            .iter()
+            .filter(|operation| operation.domain == "preferences")
+        {
+            PreferencesSyncedEntry::fromOperation(operation).map_err(|error| error.to_string())?;
+        }
         if operations
             .iter()
             .any(crate::data::backup::CharacterPluginMigration::isRetiredCharacterOperation)
@@ -914,8 +910,7 @@ impl OperitApplication {
         AppLogger::trace(
             "CoreSyncTrace",
             &format!(
-                "sync_apply.start forceApply={} operations={} chatIds={}",
-                forceApply,
+                "sync_apply.start operations={} chatIds={}",
                 operations.len(),
                 synchronizedChatIds
                     .iter()
@@ -926,31 +921,19 @@ impl OperitApplication {
         );
         let store = self.runtimeSyncOperationStore()?;
         let sqlStore = SqlChatSyncStore::default().map_err(|error| error.to_string())?;
-        if forceApply && operations.is_empty() {
-            PluginStorage::prepareSpaceJoin(self.pluginSqliteHost()?).map_err(|e| e.to_string())?;
-            store
-                .markLocalOperationsUnexportable()
-                .map_err(|error| error.to_string())?;
-            sqlStore
-                .markLocalOperationsUnexportable()
-                .map_err(|error| error.to_string())?;
-            self.runtimeWorkspaceFileSyncStore()?.prepareSpaceJoin()?;
-            return Ok(serde_json::json!({ "applied": 0 }));
-        }
-        if forceApply {
-            operations.sort_by(|left, right| {
-                left.createdAt
-                    .cmp(&right.createdAt)
-                    .then(left.originDeviceId.cmp(&right.originDeviceId))
-                    .then(left.sequence.cmp(&right.sequence))
-            });
-        } else {
-            operations.sort_by(|left, right| {
-                left.originDeviceId
-                    .cmp(&right.originDeviceId)
-                    .then(left.sequence.cmp(&right.sequence))
-            });
-        }
+        operations.sort_by(|left, right| {
+            left.originDeviceId
+                .cmp(&right.originDeviceId)
+                .then(left.sequence.cmp(&right.sequence))
+        });
+        let storageHost = self.hostManager.runtimeStorageHost.clone().ok_or_else(|| {
+            "RuntimeStorageHost is not registered for persistent sync".to_string()
+        })?;
+        let mergeSchema =
+            crate::data::preferences::PreferenceSpaceMerge::schema(storageHost.clone())?;
+        let history = store
+            .preferenceHistory()
+            .map_err(|error| error.to_string())?;
         let bindingStore = self.runtimeBindingStore()?;
         let networkControlStore = self.runtimeNetworkControlStore()?;
         let mut applied = 0usize;
@@ -967,9 +950,7 @@ impl OperitApplication {
             ) {
                 observedDomainOperations.push(operation);
             } else {
-                if !forceApply
-                    && operation.sequence <= syncClock.sequenceFor(&operation.originDeviceId)
-                {
+                if operation.sequence <= syncClock.sequenceFor(&operation.originDeviceId) {
                     continue;
                 }
                 syncClock.setSequence(operation.originDeviceId.clone(), operation.sequence);
@@ -978,20 +959,14 @@ impl OperitApplication {
             applied += 1;
         }
 
-        let applyDecisions = if forceApply {
-            vec![true; persistentOperations.len()]
-        } else {
-            store
-                .shouldApplyOperations(&persistentOperations)
-                .map_err(|error| error.to_string())?
-        };
+        let applyDecisions = store
+            .shouldApplyOperations(&persistentOperations)
+            .map_err(|error| error.to_string())?;
         let mut appliedPersistentOperations = Vec::new();
         let mut preferenceOperations = Vec::new();
         let mut nonPreferenceOperations = Vec::new();
         for (operation, shouldApply) in persistentOperations.iter().zip(applyDecisions) {
             if operation.domain == "preferences" {
-                PreferencesSyncedEntry::fromOperation(operation)
-                    .map_err(|error| error.to_string())?;
                 preferenceOperations.push(operation.clone());
             } else {
                 if !shouldApply {
@@ -1010,76 +985,56 @@ impl OperitApplication {
             .collect::<Vec<_>>();
         // Do not advance the vector clock ahead of preceding preferences/files.
         self.runtimeWorkspaceFileSyncStore()?
-            .materializeOperations(&workspaceOperations, forceApply)?;
+            .materializeOperations(&workspaceOperations, false)?;
         for operation in nonPreferenceOperations {
             if !operit_store::WorkspaceFileSyncStore::WorkspaceFileSyncStore::owns(operation) {
                 self.applyNonPreferenceSyncOperation(operation)?;
             }
         }
-        if !preferenceOperations.is_empty() {
-            let storageHost = self.hostManager.runtimeStorageHost.clone().ok_or_else(|| {
-                "RuntimeStorageHost is not registered for persistent sync".to_string()
-            })?;
-            let history = store
-                .preferenceHistory()
-                .map_err(|error| error.to_string())?;
-            PreferencesDataStore::applySyncedOperationsWithStorageAndFilter(
-                storageHost,
-                &history,
-                &preferenceOperations,
-                |path, key| {
-                    !crate::data::backup::CharacterPluginMigration::isRetiredCharacterPreferenceKey(
-                        path, key,
-                    )
-                },
-            )
-            .map_err(|error| error.to_string())?;
-        }
+        let mergeReferenceMap = operit_store::PreferenceMerge::applyOperations(
+            storageHost,
+            &mergeSchema,
+            &history,
+            &preferenceOperations,
+            |path, key| {
+                !crate::data::backup::CharacterPluginMigration::isRetiredCharacterPreferenceKey(
+                    path, key,
+                )
+            },
+            complete,
+        )?;
         // These domain stores record their own clocks. A newer chat/binding
         // operation must not make an earlier failed preference delta disappear
         // from the next synchronization retry.
         let mut appliedPluginOperations = Vec::new();
         for operation in observedDomainOperations {
-            match (operation.domain.as_str(), forceApply) {
-                (PLUGIN_STORAGE_SYNC_DOMAIN, force) => PluginStorage::applyOperation(
+            match operation.domain.as_str() {
+                PLUGIN_STORAGE_SYNC_DOMAIN => PluginStorage::applyOperation(
                     self.pluginSqliteHost()?,
                     self.hostManager
                         .runtimeStorageHost
                         .clone()
                         .ok_or("RuntimeStorageHost is not registered")?,
                     &operation,
-                    force,
+                    &mergeReferenceMap,
                 )
                 .map_err(|e| e.to_string()),
-                (CHAT_SYNC_DOMAIN, true) => sqlStore
-                    .applyBootstrapOperation(&operation)
-                    .map_err(|error| error.to_string()),
-                (CHAT_SYNC_DOMAIN, false) => sqlStore
+                CHAT_SYNC_DOMAIN => sqlStore
                     .applyOperation(&operation)
                     .map_err(|error| error.to_string()),
-                (BINDING_SYNC_DOMAIN, true) => bindingStore.applyBootstrapOperation(&operation),
-                (BINDING_SYNC_DOMAIN, false) => bindingStore.applySyncedOperation(&operation),
-                (NETWORK_CONTROL_SYNC_DOMAIN, true) => {
-                    networkControlStore.applyBootstrapOperation(&operation)
-                }
-                (NETWORK_CONTROL_SYNC_DOMAIN, false) => {
-                    networkControlStore.applySyncedOperation(&operation)
-                }
+                BINDING_SYNC_DOMAIN => bindingStore.applySyncedOperation(&operation),
+                NETWORK_CONTROL_SYNC_DOMAIN => networkControlStore.applySyncedOperation(&operation),
                 _ => unreachable!("observed sync domains are classified before materialization"),
             }?;
             if operation.domain == PLUGIN_STORAGE_SYNC_DOMAIN {
                 appliedPluginOperations.push(operation);
             }
         }
-        if forceApply {
-            store
-                .recordBootstrapAppliedOperations(&appliedPersistentOperations)
-                .map_err(|error| error.to_string())?;
-        } else {
-            store
-                .recordAppliedOperations(&appliedPersistentOperations)
-                .map_err(|error| error.to_string())?;
-        }
+        PluginStorage::reconcilePreferenceReferences(self.pluginSqliteHost()?, &mergeReferenceMap)
+            .map_err(|error| error.to_string())?;
+        store
+            .recordAppliedOperations(&appliedPersistentOperations)
+            .map_err(|error| error.to_string())?;
         store
             .appendOperations(&persistentOperations)
             .map_err(|error| error.to_string())?;
@@ -1091,8 +1046,7 @@ impl OperitApplication {
         AppLogger::trace(
             "CoreSyncTrace",
             &format!(
-                "sync_apply.done forceApply={} applied={} persistent={} chatIds={}",
-                forceApply,
+                "sync_apply.done applied={} persistent={} chatIds={}",
                 applied,
                 persistentOperations.len(),
                 synchronizedChatIds

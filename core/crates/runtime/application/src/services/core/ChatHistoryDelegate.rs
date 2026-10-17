@@ -1332,9 +1332,9 @@ impl ChatHistoryDelegate {
         chatId: &str,
         configuration: ChatConfigurationDisplayResult,
     ) {
-        let mut configurations = self.chatConfigurationsFlow.value();
-        configurations.insert(chatId.to_string(), configuration);
-        self.chatConfigurationsFlow.set_value(configurations);
+        self.chatConfigurationsFlow.update(|configurations| {
+            configurations.insert(chatId.to_string(), configuration.clone());
+        });
     }
 
     /// Initializes a new draft through awaited plugin hooks before any record or configuration is published.
@@ -1554,9 +1554,9 @@ impl ChatHistoryDelegate {
     /// Opens a real history and marks its execution descriptor unresolved without inventing a configuration.
     pub fn openChatHistory(&mut self, chatId: String, syncToGlobal: bool) -> Result<(), String> {
         self.requireChatExists(&chatId)?;
-        let mut configurations = self.chatConfigurationsFlow.value();
-        configurations.remove(&chatId);
-        self.chatConfigurationsFlow.set_value(configurations);
+        self.chatConfigurationsFlow.update(|configurations| {
+            configurations.remove(&chatId);
+        });
         self.openChatRecord(chatId, syncToGlobal)
     }
 
@@ -1659,9 +1659,9 @@ impl ChatHistoryDelegate {
             self.clearCurrentChatHistoryInMemory();
         }
         if deleted {
-            let mut configurations = self.chatConfigurationsFlow.value();
-            configurations.remove(&chatId);
-            self.chatConfigurationsFlow.set_value(configurations);
+            self.chatConfigurationsFlow.update(|configurations| {
+                configurations.remove(&chatId);
+            });
             self.clearChatFlow(&chatId);
             self.finishDestructiveHistoryMutation(chatId);
         }

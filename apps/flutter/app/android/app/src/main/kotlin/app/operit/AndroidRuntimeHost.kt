@@ -6,6 +6,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import io.flutter.plugin.common.MethodChannel
+import org.json.JSONObject
 import java.io.File
 import java.util.ArrayDeque
 import java.util.Locale
@@ -87,6 +88,14 @@ class AndroidRuntimeHost(context: Context) {
             updateRuntimeStartupStatus("preparingAssets", "正在准备本地运行时资源")
             Log.i(TAG, "native runtime create start")
             try {
+                val leaseResponse = OperitRuntimeNative.dataRescue(
+                    defaultRuntimeRootPath(),
+                    "{\"operation\":\"runtimeLease\"}",
+                    this,
+                )
+                if (!JSONObject(leaseResponse).optBoolean("ok", false)) {
+                    throw IllegalStateException("Runtime storage lease was not acquired: $leaseResponse")
+                }
                 val paths = prepareAndroidRuntimePaths(storageRoots.first, storageRoots.second)
                 updateRuntimeStartupStatus("initializingCore", "正在初始化本地核心服务")
                 Log.i(

@@ -21,7 +21,7 @@ use crate::chat::enhance::ConversationService::{
 use crate::chat::enhance::MultiServiceManager::{MultiServiceManager, SharedAIServiceHandle};
 use crate::chat::hooks::PromptHookRegistry::{PromptHookContext, PromptHookRegistry};
 use crate::chat::llmprovider::AIService::{
-    response_stream_from_chunks, AiServiceError, SendMessageRequest, SharedAiResponseStream,
+    ensure_response_completed, response_stream_from_chunks, AiServiceError, SendMessageRequest, SharedAiResponseStream,
     TokenCounts,
 };
 use crate::runtime_support::{
@@ -49,7 +49,7 @@ use operit_tools::ConversationMarkupManager::{
     ConversationMarkupManager, ToolResult, ENHANCED_PURE_THINKING_ONLY_WARNING,
 };
 use operit_tools::ToolExecutionManager::{
-    AITool as RuntimeAITool, RouteChangeIntent, ToolExecutionManager,
+    AITool as RuntimeAITool, RouteChangeIntent, ToolExecutionBatch, ToolExecutionManager,
     ToolExposureMode as RuntimeToolExposureMode, ToolInvocation, ToolRuntimeContext,
 };
 use operit_util::stream::RevisableTextStream::{ResponseStreamItem, RevisableTextStream};
@@ -1817,6 +1817,15 @@ impl EnhancedAIService {
             return Ok(());
         }
 
+        if let Err(error) = ensure_response_completed(provider_stream.as_ref()) {
+            self.invalidateExecutionContext(&mut execContext, "sendMessage.providerStream.error".to_string());
+            if !isSubTask {
+                self.stopAiService(participantName.clone(), avatarUri.clone());
+            }
+            self.unregisterExecutionContext(&execContext);
+            return Err(error);
+        }
+
         lifecycle.push(SendMessageLifecycleStage::PersistTokenUsage);
         let (inputTokens, cachedInputTokens, outputTokens) = {
             let service = serviceForFunction.lock().await;
@@ -2019,7 +2028,7 @@ impl EnhancedAIService {
         chatProviderIdOverride: Option<String>,
         chatModelIdOverride: Option<String>,
         stream: bool,
-        toolResultMessageOverride: Option<String>,
+        toolResultMessage: String,
         disableWarning: bool,
         callbacks: Option<Arc<dyn SendMessageCallbacks + Send + Sync>>,
         runtime: &mut SendMessageRuntime,
@@ -2029,25 +2038,11 @@ impl EnhancedAIService {
             .map(|result| result.toolName.clone())
             .collect::<Vec<_>>()
             .join(", ");
-        let hasToolResultMessageOverride = toolResultMessageOverride.is_some();
-        let rawToolResultMessage = toolResultMessageOverride
-            .unwrap_or_else(|| ConversationMarkupManager::buildBoundedToolResultMessage(&results));
-        let rawToolResultMessageLen = rawToolResultMessage.len();
-        let toolResultMessage = rawToolResultMessage;
         let toolResultMessageLen = toolResultMessage.len();
-
         if toolResultMessage.trim().is_empty() {
-            AppLogger::w(
-                TAG,
-                &format!(
-                    "chat.tool_result.empty executionId={} round={} resultCount={} override={}",
-                    context.executionId,
-                    context.roundManager.roundIndex,
-                    results.len(),
-                    hasToolResultMessageOverride
-                ),
-            );
-            return Ok(());
+            return Err(AiServiceError::RequestFailed(
+                "Tool continuation requires a nonblank finalized result message".to_string(),
+            ));
         }
 
         let displayToolNames = if toolNames.trim().is_empty() {
@@ -2059,14 +2054,13 @@ impl EnhancedAIService {
         AppLogger::d(
             TAG,
             &format!(
-                "chat.tool_result.start executionId={} round={} resultCount={} successCount={} tools=[{}] messageChars={} override={} historyTurns={}",
+                "chat.tool_result.start executionId={} round={} resultCount={} successCount={} tools=[{}] messageBytes={} historyTurns={}",
                 context.executionId,
                 context.roundManager.roundIndex,
                 results.len(),
                 successCount,
                 displayToolNames,
-                rawToolResultMessageLen,
-                hasToolResultMessageOverride,
+                toolResultMessageLen,
                 context.conversationHistory.len()
             ),
         );
@@ -2106,7 +2100,7 @@ impl EnhancedAIService {
         AppLogger::d(
             TAG,
             &format!(
-                "chat.tool_result.history_ready executionId={} round={} historyTurns={} messageChars={}",
+                "chat.tool_result.history_ready executionId={} round={} historyTurns={} messageBytes={}",
                 context.executionId,
                 context.roundManager.roundIndex,
                 currentChatHistory.len(),
@@ -2295,6 +2289,7 @@ impl EnhancedAIService {
         if !self.isExecutionContextActive(context) {
             return Ok(());
         }
+        ensure_response_completed(response.as_ref())?;
         AppLogger::d(
             TAG,
             &format!(
@@ -2425,15 +2420,6 @@ impl EnhancedAIService {
         }
 
         let content = context.streamBuffer.trim().to_string();
-        let rawContentJson = serde_json::to_string(&context.streamBuffer)
-            .expect("completed model response must serialize as JSON string");
-        AppLogger::d(
-            TAG,
-            &format!(
-                "chat.response.raw executionId={} round={} content={}",
-                context.executionId, context.roundManager.roundIndex, rawContentJson
-            ),
-        );
         AppLogger::d(
             TAG,
             &format!(
@@ -2496,13 +2482,7 @@ impl EnhancedAIService {
                 .roundManager
                 .appendContent(&format!("\n{pureThinkingWarning}"));
             collector.emit_chunk(pureThinkingWarning.clone());
-            context.conversationHistory.push(PromptTurn {
-                kind: PromptTurnKind::TOOL_RESULT,
-                content: pureThinkingWarning.clone(),
-                tool_name: None,
-                metadata: HashMap::new(),
-            });
-            return Box::pin(self.handleToolInvocation(
+            return Box::pin(self.processToolResults(
                 collector,
                 Vec::new(),
                 context,
@@ -2523,7 +2503,7 @@ impl EnhancedAIService {
                 chatProviderIdOverride.clone(),
                 chatModelIdOverride,
                 stream,
-                Some(pureThinkingWarning),
+                pureThinkingWarning,
                 disableWarning,
                 callbacks.clone(),
                 runtime,
@@ -2613,7 +2593,6 @@ impl EnhancedAIService {
                 chatProviderIdOverride,
                 chatModelIdOverride,
                 stream,
-                None,
                 disableWarning,
                 callbacks.clone(),
                 runtime,
@@ -2646,7 +2625,7 @@ impl EnhancedAIService {
     }
 
     #[allow(clippy::too_many_arguments)]
-    /// Executes one parsed assistant tool invocation.
+    /// Executes a nonempty invocation batch and continues with its finalized result message.
     pub async fn handleToolInvocation(
         &mut self,
         collector: &SharedAiResponseStream,
@@ -2669,13 +2648,18 @@ impl EnhancedAIService {
         chatProviderIdOverride: Option<String>,
         chatModelIdOverride: Option<String>,
         stream: bool,
-        toolResultOverrideMessage: Option<String>,
         disableWarning: bool,
         callbacks: Option<Arc<dyn SendMessageCallbacks + Send + Sync>>,
         runtime: &mut SendMessageRuntime,
     ) -> Result<(), AiServiceError> {
         if !self.isExecutionContextActive(context) {
             return Ok(());
+        }
+
+        if toolInvocations.is_empty() {
+            return Err(AiServiceError::RequestFailed(
+                "Tool dispatch requires at least one invocation".to_string(),
+            ));
         }
 
         let toolNames = toolInvocations
@@ -2722,7 +2706,11 @@ impl EnhancedAIService {
             ToolExposureMode::Cli => RuntimeToolExposureMode::CLI,
             ToolExposureMode::Full => RuntimeToolExposureMode::FULL,
         };
-        let (emittedToolResultMessages, allToolResults, routeChangeIntent) =
+        let ToolExecutionBatch {
+            results: allToolResults,
+            message: toolResultMessage,
+            routeChangeIntent,
+        } =
             ToolExecutionManager::executeInvocations(
                 &toolInvocations,
                 &mut self.tool_handler,
@@ -2744,20 +2732,15 @@ impl EnhancedAIService {
         if let Some(routeChangeIntent) = routeChangeIntent {
             self.shared_state().pendingRouteChange = Some(routeChangeIntent);
         }
-        let emittedChars = emittedToolResultMessages
-            .iter()
-            .map(|content| content.len())
-            .sum::<usize>();
         AppLogger::d(
             TAG,
             &format!(
-                "chat.tool_call.handle_executed executionId={} round={} toolCount={} emittedMessages={} emittedChars={} resultCount={}",
+                "chat.tool_call.handle_executed executionId={} round={} toolCount={} resultCount={} messageBytes={}",
                 context.executionId,
                 context.roundManager.roundIndex,
                 toolInvocations.len(),
-                emittedToolResultMessages.len(),
-                emittedChars,
-                allToolResults.len()
+                allToolResults.len(),
+                toolResultMessage.len()
             ),
         );
 
@@ -2765,14 +2748,10 @@ impl EnhancedAIService {
             return Ok(());
         }
 
-        for content in emittedToolResultMessages {
-            if !self.isExecutionContextActive(context) {
-                return Ok(());
-            }
-            context.streamBuffer.push_str(&content);
-            context.roundManager.appendContent(&content);
-            collector.emit_chunk(content);
-        }
+        let content = format!("\n{toolResultMessage}\n");
+        context.streamBuffer.push_str(&content);
+        context.roundManager.appendContent(&content);
+        collector.emit_chunk(content);
 
         if let Some(targetNodeId) = routeChangeTargetNodeId {
             AppLogger::i(
@@ -2785,66 +2764,34 @@ impl EnhancedAIService {
             return Ok(());
         }
 
-        if !allToolResults.is_empty() {
-            Box::pin(self.processToolResults(
-                collector,
-                allToolResults,
-                context,
-                functionType,
-                promptFunctionType,
-                enableThinking,
-                onNonFatalError,
-                onTokenLimitExceeded,
-                maxTokens,
-                tokenUsageThreshold,
-                isSubTask,
-                participantName,
-                avatarUri,
-                participantId,
-                chatId,
-                onToolInvocation,
-                notifyReplyOverride,
-                chatProviderIdOverride.clone(),
-                chatModelIdOverride,
-                stream,
-                None,
-                disableWarning,
-                callbacks.clone(),
-                runtime,
-            ))
-            .await?;
-        } else if match toolResultOverrideMessage.as_ref() {
-            Some(value) => !value.is_empty(),
-            None => false,
-        } {
-            Box::pin(self.processToolResults(
-                collector,
-                Vec::new(),
-                context,
-                functionType,
-                promptFunctionType,
-                enableThinking,
-                onNonFatalError,
-                onTokenLimitExceeded,
-                maxTokens,
-                tokenUsageThreshold,
-                isSubTask,
-                participantName,
-                avatarUri,
-                participantId,
-                chatId,
-                onToolInvocation,
-                notifyReplyOverride,
-                chatProviderIdOverride,
-                chatModelIdOverride,
-                stream,
-                toolResultOverrideMessage,
-                disableWarning,
-                callbacks,
-                runtime,
-            ))
-            .await?;
-        }
+        Box::pin(self.processToolResults(
+            collector,
+            allToolResults,
+            context,
+            functionType,
+            promptFunctionType,
+            enableThinking,
+            onNonFatalError,
+            onTokenLimitExceeded,
+            maxTokens,
+            tokenUsageThreshold,
+            isSubTask,
+            participantName,
+            avatarUri,
+            participantId,
+            chatId,
+            onToolInvocation,
+            notifyReplyOverride,
+            chatProviderIdOverride.clone(),
+            chatModelIdOverride,
+            stream,
+            toolResultMessage,
+            disableWarning,
+            callbacks.clone(),
+            runtime,
+        ))
+        .await?;
+
         Ok(())
     }
 

@@ -9,6 +9,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+operit-data-rescue = { path = "../../core/crates/persistence/rescue" }
 anyhow = "1"
 js-sys = "0.3"
 operit-host-api = { path = "../../core/crates/foundation/host-api" }

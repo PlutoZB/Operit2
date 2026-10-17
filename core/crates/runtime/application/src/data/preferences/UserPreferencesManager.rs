@@ -1,4 +1,4 @@
-use super::ThemeConfigManager::ThemeConfig;
+use super::ThemeConfigManager::{validateConfig, ThemeConfig, THEME_CONFIG_PREFIX};
 use super::ThemePreferenceSnapshot::{FieldKind, SNAPSHOT_FIELDS};
 use operit_host_api::RuntimeStorageHost;
 use operit_store::PreferencesDataStore::{
@@ -8,6 +8,7 @@ use operit_store::RuntimeStorageHost::defaultRuntimeStorageHost;
 use operit_util::LocaleUtils::LanguageCodes;
 use operit_util::OperitPaths;
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -33,10 +34,10 @@ impl UserPreferencesManager {
     /// Opens the single versioned owner of global user and appearance preferences.
     pub(crate) fn store(storage: Arc<dyn RuntimeStorageHost>) -> PreferencesDataStore {
         PreferencesDataStore::newWithStorage(storage, OperitPaths::USER_PREFERENCES_PATH)
-            .withSchema(2, Self::migratePreferences)
+            .withSchema(3, Self::migratePreferences)
     }
 
-    /// Converts declared user preference fields at version one without interpreting arbitrary strings.
+    /// Applies each versioned migration owned by the user preferences file.
     pub(crate) fn migratePreferences(
         version: u32,
         preferences: &mut Preferences,
@@ -81,6 +82,30 @@ impl UserPreferencesManager {
                 if let Some(encoded) = preferences.getTyped::<String>(&key)? {
                     let selection: Option<String> = serde_json::from_str(&encoded)?;
                     preferences.set(&key, serde_json::to_value(selection)?);
+                }
+                Ok(())
+            }
+            2 => {
+                let key = stringPreferencesKey("theme_configs");
+                if let Some(configs) = preferences.getTyped::<Vec<ThemeConfig>>(&key)? {
+                    let mut ids = BTreeSet::new();
+                    for config in configs {
+                        validateConfig(&config)?;
+                        if !ids.insert(config.id.clone()) {
+                            return Err(PreferencesDataStoreError::Message(
+                                "Duplicate theme configuration identifier during migration".into(),
+                            ));
+                        }
+                        let recordKey =
+                            stringPreferencesKey(&format!("{THEME_CONFIG_PREFIX}{}", config.id));
+                        if preferences.contains(&recordKey) {
+                            return Err(PreferencesDataStoreError::Message(
+                                "Theme migration destination already exists".into(),
+                            ));
+                        }
+                        preferences.set(&recordKey, serde_json::to_value(config)?);
+                    }
+                    preferences.remove(&key);
                 }
                 Ok(())
             }

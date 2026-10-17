@@ -1,91 +1,258 @@
-import type { StorageRequest, StorageTable, StorageSqlValue } from "./storage.generated";
-export type { StorageRequest, StorageTable, StorageSqlValue, StorageKind, StorageColumn, StorageColumnType, StorageMutation, StorageStatement } from "./storage.generated";
+// Generated from operit-plugin-sdk Rust declarations.
 
-/** Transactional plugin storage over the registered runtime Host. */
+import type { StorageMergeDescriptor, StorageRequest, StorageTable } from "./storage.generated";
+
+/**
+ * Dispatches the exact wire contract through the authenticated host.
+ */
 export namespace Storage {
-  export type Value = null | boolean | number | string | Value[] | { [key: string]: Value };
+  /**
+   * Represents a structured value stored by the object database.
+   */
+  export type Value = null | boolean | number | string | Value[] | ValueObject;
+
+  /**
+   * Stores recursive structured properties as a named object declaration.
+   */
+  export interface ValueObject {
+    [key: string]: Value;
+  }
+
+  /**
+   * Preserves native JavaScript SQLite values.
+   */
   export type SqlValue = null | string | number | bigint | Uint8Array;
-  /** Selects an owned database path; registered directory ownership determines synchronization. */
-  export interface OpenOptions { path: string; }
-  export interface VersionOptions { expectedVersion?: string | null; }
-  export interface Receipt { version: string; }
-  export interface Entry<T extends Value = Value> { value: T; version: string; }
-  export interface ListedEntry<T extends Value = Value> extends Entry<T> { key: string; }
-  export interface Change { collection: string; key: string; value: Value | StorageSqlValue[]; deleted: boolean; }
-  export interface ChangePageEntry {
-    cursor: string;
-    transaction: {
-      manifest: { path: string; owner: string; kind: "sqlite" | "objects" | "data_store"; sync: boolean; };
-      tables: StorageTable[];
-      changes: Change[];
-    };
+
+  /**
+   * Selects a plugin-owned path and its merge contract.
+   */
+  export interface OpenOptions {
+    path: string;
+    merge?: StorageMergeDescriptor;
   }
+
+  /**
+   * Selects the exact previous record version, including explicit absence.
+   */
+  export interface VersionOptions {
+    expectedVersion?: string | null;
+  }
+
+  /**
+   * Reports the committed logical version.
+   */
+  export interface Receipt {
+    version: string;
+  }
+
+  /**
+   * Carries one decoded record and its exact version.
+   */
+  export interface Entry<T = Value> {
+    value: T;
+    version: string;
+  }
+
+  /**
+   * Carries one primary-key-ordered record.
+   */
+  export interface ListedEntry<T = Value> extends Entry<T> {
+    key: string;
+  }
+
+  /**
+   * Cancels a pending storage read when the owning collector is released.
+   */
+  export interface WatchOptions {
+    signal?: AbortSignal;
+  }
+
+  /**
+   * Owns a database handle within one authenticated engine.
+   */
   export interface Handle {
-    readonly path: string;
-    /** Releases the current execution's handle without deleting durable data. */
+    path: string;
+    /**
+     * Releases the current execution handle without deleting durable data.
+     */
     close(): Promise<void>;
-    /** Pages through atomic changes after an opaque decimal cursor; limit is 1..1000. */
-    changes(after?: string, limit?: number): Promise<ChangePageEntry[]>;
   }
-  export interface Statement { sql: string; params?: SqlValue[]; expectedAffectedRows?: number; }
-  export interface SqlReceipt { affectedRows: number; lastInsertId: string; }
+
+  /**
+   * Selects one parameterized SQL write.
+   */
+  export interface Statement {
+    sql: string;
+    params?: SqlValue[];
+    expectedAffectedRows?: number;
+  }
+
+  /**
+   * Reports the result of one committed SQL statement.
+   */
+  export interface SqlReceipt {
+    affectedRows: number;
+    lastInsertId: string;
+  }
+
+  /**
+   * Selects one collection record identity.
+   */
+  export interface WhenAbsent {
+    collection: string;
+    key: string;
+  }
+
+  /**
+   * Guards a SQL batch against an existing record.
+   */
+  export interface TransactionOptions {
+    whenAbsent: WhenAbsent;
+  }
+
+  /**
+   * Owns a parameterized SQL database.
+   */
   export interface SqliteDatabase extends Handle {
-    /** Queries caller-selected columns; all SQLite integers are returned as bigint. */
+    /**
+     * Queries caller-selected columns while preserving integer precision.
+     */
     query(sql: string, params?: SqlValue[]): Promise<Record<string, SqlValue>[]>;
-    /** Commits one parameterized SQL write and its dirty-row journal atomically. */
+    /**
+     * Commits a parameterized statement and its change journal atomically.
+     */
     execute(sql: string, params?: SqlValue[]): Promise<SqlReceipt>;
-    /** Commits 1..1000 statements together and rolls back all writes on any failure. */
-    transaction(statements: Statement[]): Promise<SqlReceipt[]>;
-    /** Declares a tracked table with one nonnullable TEXT primary key. */
-    defineTable(table: StorageTable): Promise<{ changed: boolean }>;
+    /**
+     * Commits a bounded SQL transaction with an optional absence guard.
+     */
+    transaction(statements: Statement[], options?: TransactionOptions): Promise<SqlReceipt[]>;
+    /**
+     * Declares a tracked table with a nonnullable primary key.
+     */
+    defineTable(table: StorageTable): Promise<DefineTableReceipt>;
   }
-  export interface Editor<T extends Value = Value> {
-    readonly value: T;
-    /** Atomically saves this modified record with its original exact version. */
+
+  /**
+   * Reports whether a tracked table was newly defined.
+   */
+  export interface DefineTableReceipt {
+    changed: boolean;
+  }
+
+  /**
+   * Retains a mutable object with its original exact version.
+   */
+  export interface Editor<T = Value> {
+    value: T;
+    /**
+     * Atomically flushes tracked edits against the original version.
+     */
     flush(): Promise<Receipt>;
   }
-  export interface Collection<T extends Value = Value> {
-    /** Returns null for an absent key, and an entry for a stored null value. */
+
+  /**
+   * Selects a collection within the owned database.
+   */
+  export interface Collection<T = Value> {
+    marker: T;
+    /**
+     * Reads a record without conflating a stored null with an absent key.
+     */
     get(key: string): Promise<Entry<T> | null>;
-    /** Returns primary-key-ordered entries without exporting the entire collection. */
+    /**
+     * Emits the current record or absence and subsequent changes to this exact key.
+     */
+    watch(key: string, options?: WatchOptions): AsyncIterableIterator<Entry<T> | null>;
+    /**
+     * Lists primary-key-ordered records with a bounded page size.
+     */
     list(after?: string | null, limit?: number): Promise<ListedEntry<T>[]>;
-    /** Saves one structured value with an optional exact-version precondition. */
+    /**
+     * Saves one structured record with an optional version precondition.
+     */
     put(key: string, value: T, options?: VersionOptions): Promise<Receipt>;
-    /** Removes one key with an optional exact-version precondition. */
+    /**
+     * Removes one record with an optional version precondition.
+     */
     remove(key: string, options?: VersionOptions): Promise<Receipt>;
-    /** Opens an existing object for tracked edits; scalar and root array records reject. */
+    /**
+     * Opens an existing object for tracked edits.
+     */
     edit(key: string): Promise<Editor<T>>;
   }
-  export type ObjectMutation =
-    | ({ op: "put"; collection: string; key: string; value: Value } & VersionOptions)
-    | ({ op: "delete"; collection: string; key: string } & VersionOptions);
+
+  /**
+   * Describes a bounded atomic object mutation.
+   */
+  export type ObjectMutation = { op: "put"; collection: string; key: string; value: Value; expectedVersion?: string | null; } | { op: "delete"; collection: string; key: string; expectedVersion?: string | null; };
+
+  /**
+   * Owns an object database with exact-key collection subscriptions.
+   */
   export interface ObjectDatabase extends Handle {
-    /** Selects a named collection on this retained database handle. */
-    collection<T extends Value = Value>(name: string): Collection<T>;
-    /** Atomically commits changes across collections with per-record version checks. */
+    /**
+     * Selects a collection on this retained database handle.
+     */
+    collection<T>(name: string): Collection<T>;
+    /**
+     * Commits bounded mutations across collections atomically.
+     */
     commit(mutations: ObjectMutation[]): Promise<Receipt>;
   }
+
+  /**
+   * Selects atomic key writes, removals, and exact preconditions.
+   */
   export interface DataStoreBatch {
     set?: Record<string, Value>;
     remove?: string[];
     expectedVersions?: Record<string, string | null>;
   }
+
+  /**
+   * Owns one key-value database with exact-key subscriptions.
+   */
   export interface DataStore extends Handle, Collection {
-    /** Atomically applies key writes and removals with explicit per-key versions. */
+    /**
+     * Commits key writes and removals atomically.
+     */
     commit(batch: DataStoreBatch): Promise<Receipt>;
   }
+
+  /**
+   * Opens SQLite at an explicit plugin-owned path.
+   */
   export namespace sqlite {
-    /** Opens SQLite at an explicit path inside this plugin's config or data root. */
-    function open(options: OpenOptions): Promise<SqliteDatabase>;
+    /**
+     * Opens a parameterized SQLite database.
+     */
+    function open(options: Storage.OpenOptions): Promise<Storage.SqliteDatabase>;
   }
+
+  /**
+   * Opens generic object collections.
+   */
   export namespace objects {
-    /** Opens generic object collections on the same transactional storage engine. */
-    function open(options: OpenOptions): Promise<ObjectDatabase>;
+    /**
+     * Opens a transactional object database.
+     */
+    function open(options: Storage.OpenOptions): Promise<Storage.ObjectDatabase>;
   }
+
+  /**
+   * Opens a transactional key-value store.
+   */
   export namespace dataStore {
-    /** Opens an atomic key-value store at an explicit plugin-owned path. */
-    function open(options: OpenOptions): Promise<DataStore>;
+    /**
+     * Opens the named plugin-owned key-value database.
+     */
+    function open(options: Storage.OpenOptions): Promise<Storage.DataStore>;
   }
-  /** Dispatches the exact typed wire contract through a structured host callback. */
-  function request(request: StorageRequest): Promise<unknown>;
+
+  /**
+   * Dispatches one typed wire request.
+   */
+  function request(request: StorageRequest): Promise<any>;
 }
+
+export type { StorageRequest, StorageTable, StorageSqlValue, StorageMergeDescriptor, StorageKind, StorageColumn, StorageColumnType, StorageMutation, StorageStatement, StorageMergeEntity, StorageMergeReference, StorageMergeTarget, StorageMergeKeyEncoding } from "./storage.generated";

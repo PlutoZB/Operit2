@@ -55,8 +55,8 @@ impl PeerSyncMethod {
                         "Remote synchronization requires an operation array",
                     )
                 })?;
-            // Bootstrap forceApply is local-only; it cannot be represented by this DTO.
             let _operations = args.operations;
+            let _complete = args.complete;
         }
         Ok(method)
     }
@@ -66,6 +66,7 @@ impl PeerSyncMethod {
 #[serde(deny_unknown_fields)]
 struct ApplyOperations {
     operations: Vec<operit_store::SyncOperationStore::SyncOperation>,
+    complete: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,7 +109,7 @@ mod tests {
         ] {
             let request = method.request(
                 "test".into(),
-                toCoreValue(json!({"operations":[]})).unwrap(),
+                toCoreValue(json!({"operations":[],"complete":true})).unwrap(),
             );
             assert_eq!(request.target, NODE_SYNC_TARGET);
             assert_eq!(PeerSyncMethod::fromRequest(&request).unwrap(), method);
@@ -121,8 +122,12 @@ mod tests {
             CoreCallRequest::new("test", NODE_SYNC_TARGET, "startPairing", CoreValue::Null);
         assert!(PeerSyncMethod::fromRequest(&request).is_err());
         for args in [
-            json!({"operations":{"operations":[],"forceApply":true}}),
-            json!({"operations":[],"forceApply":true}),
+            json!({"operations":[]}),
+            json!({"operations":[],"complete":"yes"}),
+            json!({"operations":{"operations":[],"forceApply":true},"complete":true}),
+            json!({"operations":[],"complete":true,"forceApply":true}),
+            json!({"operations":[],"complete":true,"spaceMerge":true}),
+            json!({"operations":[],"complete":true,"firstJoin":true}),
         ] {
             let request = PeerSyncMethod::SyncApplyOperations
                 .request("test".into(), toCoreValue(args).unwrap());

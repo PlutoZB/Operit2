@@ -2,7 +2,7 @@ import type { ComposeDslContext, ComposeNode } from "../../../../types/compose-d
 import { reconcileSidebarCatalog, parseCurrentSidebar, preparedSidebar, sidebarCatalogKey, type CurrentSidebar, type SidebarCatalog, type ConversationSidebarGroup, type ConversationSidebarScope } from "./ui-sidebar";
 import { callMainDomain, encodeSelection } from "./ui-contributions";
 import { createChatInput } from "./chat-lifecycle";
-import { nativeSidebarRows } from "./ui-sidebar-native-layout";
+import { nativeSidebarLazyItems } from "./ui-sidebar-native-layout";
 import { deleteConversationGroupMembers, type SidebarDeletionProgress } from "./sidebar-group-delete";
 
 /** Native local state, with no browser controller, resource, or DOM lifecycle. */
@@ -323,14 +323,16 @@ export function renderSidebarScreen(ctx: ComposeDslContext): ComposeNode {
     onValueChange: query => update({ query }), placeholder: "搜索对话", singleLine: true,
     fillMaxWidth: true, paddingHorizontal: 12, paddingBottom: 12, ...{ shape: { cornerRadius: 14 } } }));
   if (state.error !== "") rows.push(ctx.UI.Text({ key: "sidebar-error", text: state.error, fontSize: 11, color: colors.error, paddingHorizontal: 20, paddingVertical: 6 }));
-  if (data !== null) rows.push(...nativeSidebarRows(ctx, current.current, { data, query: state.query,
+  let lazyItems: ReturnType<typeof nativeSidebarLazyItems> | null = null;
+  if (data !== null) lazyItems = nativeSidebarLazyItems(ctx, current.current, { data, query: state.query,
     collapsed: state.collapsed, expandedGroups: state.expandedGroups }, {
       activate, toggleSection, toggleGroup,
       menu, longPress, rename: renameChat, confirmSwipeDelete, drop,
-    }, state.defaultAvatar));
+    }, state.defaultAvatar);
   else if (state.loading) rows.push(ctx.UI.Box({ fillMaxWidth: true, height: 80, contentAlignment: "center" },
     ctx.UI.LoadingIndicator({ size: 24 })));
-  const content: ComposeNode[] = [ctx.UI.Column({ key: "native-sidebar-history", fillMaxWidth: true, paddingBottom: 16, spacing: 0 }, rows)];
+  const staticItemCount = rows.length;
+  const content: ComposeNode[] = lazyItems === null ? [...rows] : [...rows, ...lazyItems.content];
   if (state.dialog !== null) {
     const staged = state.dialog, body: ComposeNode[] = [ctx.UI.Text({ text: { create: "新建分组", rename: "重命名分组", delete: "删除分组及其对话", renameUngrouped: "重命名分组", deleteUngrouped: "删除分组及其对话", renameChat: "编辑对话名称", deleteChat: "删除对话", chatActions: "聊天记录" }[staged.kind], fontSize: 16, fontWeight: "600" })];
     if (staged.kind === "create" || staged.kind === "rename" || staged.kind === "renameUngrouped" || staged.kind === "renameChat") body.push(ctx.UI.TextField({ key: "sidebar-group-name", value: staged.name, label: staged.kind === "renameChat" ? "对话名称" : "分组名称", onValueChange: name => update({ dialog: { ...staged, name } }), enabled: !state.busy }));
@@ -357,5 +359,10 @@ export function renderSidebarScreen(ctx: ComposeDslContext): ComposeNode {
       ...(staged.progress === null && staged.kind !== "chatActions" ? [ctx.UI.Button({ text: "确认", enabled: !state.busy, onClick: () => run(submit) })] : [])]));
     content.push(ctx.UI.Dialog({ key: "sidebar-edit-dialog", closeOnDismissRequest: !state.busy, onDismissRequest: () => { if (!state.busy) update({ dialog: null }); } }, ctx.UI.Column({ padding: 20, spacing: 12, width: 320 }, body)));
   }
-  return ctx.UI.Column({ key: "native-character-sidebar", fillMaxWidth: true, onLoad: refresh, onInputsChanged: refreshInputs }, content);
+  if (lazyItems !== null) {
+    const viewport = { ...lazyItems.viewport, staticItemCount };
+    return ctx.UI.LazyColumn({ key: "native-character-sidebar", fillMaxWidth: true, paddingBottom: 16, spacing: 0,
+      viewport, onLoad: refresh, onInputsChanged: refreshInputs }, content);
+  }
+  return ctx.UI.LazyColumn({ key: "native-character-sidebar", fillMaxWidth: true, paddingBottom: 16, spacing: 0, onLoad: refresh, onInputsChanged: refreshInputs }, content);
 }

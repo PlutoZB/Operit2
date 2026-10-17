@@ -192,15 +192,24 @@ export interface CharacterRepository {
   restoreGroups(groups: Group[]): Promise<import("./model").BackupImportResult>;
 }
 
-/** Serializes service operations against the one plugin-owned file repository. */
+/** Separates indexed reads from full-state editing transactions. */
 export interface CharacterRepositoryOwner extends Pick<
   CharacterRepository,
   | "readGlobalMemoryPreferences"
+  | "readActive"
+  | "listCharacters"
+  | "listGroups"
+  | "getCharacter"
+  | "getGroup"
+  | "listTags"
+  | "listStores"
   | "readMemorySettings"
   | "readMemorySearchConfig"
   | "readUser"
   | "readUserPath"
 > {
+  /** Reads the configuration directory without loading memory bodies or job relations. */
+  readConfigurationSnapshot(): Promise<import("./model").Snapshot>;
   /** Reads role presentation records without loading unrelated memory relations. */
   readSidebarDirectory(): Promise<
     Pick<import("./model").Snapshot, "cards" | "groups">

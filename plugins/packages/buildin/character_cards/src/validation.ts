@@ -118,7 +118,7 @@ export function assertToolAccess(value: unknown): asserts value is ToolAccessCon
 export function assertCard(value: unknown): asserts value is Card {
   assertObject(value, "角色卡");
   for (const field of ["id", "name", "description", "characterSetting", "openingStatement", "otherContentChat", "otherContentVoice", "advancedCustomPrompt", "marks", "chatModelBindingMode", "memoryBindingMode"] as const) assertString(value[field], field);
-  for (const field of ["avatarUri", "chatModelId", "ttsConfigId", "themeConfigId", "sharedMemoryId"] as const) assertNullableString(value[field], field);
+  for (const field of ["avatarUri", "chatProviderId", "chatModelId", "ttsConfigId", "themeConfigId", "sharedMemoryId"] as const) assertNullableString(value[field], field);
   if (value.themeConfigId !== null) requireId(value.themeConfigId, "角色主题配置");
   assertStrings(value.attachedTagIds, "角色标签");
   assertBoolean(value.isDefault, "默认角色标识");

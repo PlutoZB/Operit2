@@ -68,6 +68,7 @@ function named(name) {
 
 const collections = {};
 for (const [collection, name] of Object.entries({ cards: "Card", groups: "Group", tags: "Tag", stores: "Store", conversationGroups: "ConversationGroupRecord" })) collections[collection] = named(name);
+collections.cards.fields.chatProviderId.nullEncoding = "column";
 collections.owners = named("MemorySpace");
 for (const field of ["memories", "links", "chunks", "candidates", "embeddings"]) delete collections.owners.fields[field];
 for (const [collection, name] of Object.entries({ memories: "Memory", links: "MemoryLink", chunks: "DocumentChunk", candidates: "MemoryCandidate", embeddings: "MemoryEmbedding" })) {
@@ -83,6 +84,7 @@ collections.meta = { kind: "object", fields: {
   memoryPreferences: { ...named("GlobalMemoryPreferences"), optional: true },
   migrationStatus: { kind: "text", optional: true }, migrationSource: { kind: "text", optional: true },
 } };
+collections.schema_migrations = { kind: "object", fields: { version: { kind: "integer" } } };
 collections.chat_bindings = { kind: "object", fields: { version: { kind: "integer" }, selection: { kind: "text" } } };
 collections.chat_drafts = collections.chat_bindings;
 collections.message_snapshots = { kind: "object", fields: {
@@ -90,5 +92,5 @@ collections.message_snapshots = { kind: "object", fields: {
   profile: named("ChatParticipantProfile"), participants: { kind: "array", item: named("ChatParticipantProfile") },
 } };
 const target = new URL("../src/storage/schema.json", import.meta.url);
-writeFileSync(target, JSON.stringify({ version: 1, collections }, null, 2) + "\n");
+writeFileSync(target, JSON.stringify({ version: 2, collections }, null, 2) + "\n");
 console.log("Generated relational storage schema: " + fileURLToPath(target));

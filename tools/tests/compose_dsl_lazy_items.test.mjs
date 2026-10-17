@@ -11,7 +11,7 @@ function screen(count = 500) {
   vm.runInContext(composeContextScript(), context);
   const source = `module.exports.default = function(ctx) {
     const [count, setCount] = ctx.useState('count', ${count});
-    return ctx.UI.Column({ onClick: () => setCount(3) }, [
+    return ctx.UI.Column({ onClick: (next) => setCount(next ?? 3) }, [
       ctx.UI.LazyColumn({ key: 'records', ...ctx.lazyItems({key: 'records', itemCount: count, itemExtent: 40, initialItemCount: 12},
         index => ctx.UI.Text({ key: 'item:' + index, text: 'Item ' + index, onClick: () => index })) })
     ]);
@@ -64,6 +64,25 @@ test('lazy items clamp their live window when a compiled state binding shrinks t
   assert.equal(list(shrunk).props.viewport.itemCount, 3);
   assert.equal(list(shrunk).props.viewport.firstIndex, 0);
   assert.deepEqual(Array.from(list(shrunk).children, node => node.props.text), ['Item 0', 'Item 1', 'Item 2']);
+});
+
+/** Expansion must not restore a pre-collapse offscreen window or wait for a host refill. */
+test('lazy items normalize a collapsed window before expanding again', async () => {
+  const ui = screen();
+  const end = await ui.dispatch(list(ui.first).props.viewport.onRangeChanged, { firstIndex: 490, lastIndex: 500 });
+  const shrunk = await ui.dispatch(end.tree.props.onClick, 3);
+  const expanded = await ui.dispatch(shrunk.tree.props.onClick, 500);
+  assert.equal(list(expanded).props.viewport.firstIndex, 0);
+  assert.equal(list(expanded).children.length, 12);
+  assert.equal(list(expanded).children[0].props.text, 'Item 0');
+});
+
+/** A small catalog must not permanently reduce the initial/preloaded window after growing. */
+test('lazy items fill at least the initial window after a small range grows', async () => {
+  const ui = screen(3);
+  const small = await ui.dispatch(list(ui.first).props.viewport.onRangeChanged, { firstIndex: 0, lastIndex: 3 });
+  const expanded = await ui.dispatch(small.tree.props.onClick, 500);
+  assert.equal(list(expanded).children.length, 12);
 });
 
 /** Rejects malformed public contracts instead of generating full-list substitute content. */

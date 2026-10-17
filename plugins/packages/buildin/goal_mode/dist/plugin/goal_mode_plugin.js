@@ -83,7 +83,7 @@ function sendGoalFollowup(chatId, message) {
 /** Sends the next instruction that follows one goal review decision. */
 async function applyGoalReviewDecision(chatId, review) {
     if (review.decision === "completed") {
-        await (0, goal_mode_ipc_js_1.setGoalStatusAsync)(chatId, "completed");
+        await goal_mode_ipc_js_1.GoalService.status(chatId, "completed");
         return;
     }
     if (review.decision === "incomplete") {
@@ -109,7 +109,7 @@ async function onChatMessagePersisted(event) {
     if (!response) {
         return;
     }
-    const goal = await (0, goal_mode_ipc_js_1.readGoalAsync)(payload.chatId);
+    const goal = await goal_mode_ipc_js_1.GoalService.read(payload.chatId);
     if (!goal || goal.status !== "active") {
         return;
     }
@@ -134,7 +134,7 @@ async function onChatMessagePersisted(event) {
         });
         const review = parseGoalReviewResult(result.text);
         await applyGoalReviewDecision(payload.chatId, review);
-        await (0, goal_mode_ipc_js_1.markGoalMessageReviewedAsync)(payload.chatId, payload.timestamp);
+        await goal_mode_ipc_js_1.GoalService.reviewed(payload.chatId, payload.timestamp);
     }
     finally {
         reviewedMessageTimestamps.delete(reviewKey);
@@ -173,11 +173,8 @@ async function onGoalCommand(event) {
         return viewOrResult;
     }
     const chatId = viewOrResult.chatId;
-    if (!viewOrResult.workspacePath) {
-        return { stderr: "A workspace is required for Goal Mode.", json: { ok: false, error: "workspace_required" } };
-    }
     if (args.length === 0) {
-        const goal = await (0, goal_mode_ipc_js_1.readGoalAsync)(chatId);
+        const goal = await goal_mode_ipc_js_1.GoalService.read(chatId);
         return {
             stdout: goal ? `Goal (${goal.status}): ${goal.objective}` : "No task goal is set.",
             json: { ok: true, chatId, goal },
@@ -185,18 +182,18 @@ async function onGoalCommand(event) {
     }
     const command = args[0].toLowerCase();
     if (command === "clear" && args.length === 1) {
-        await (0, goal_mode_ipc_js_1.clearGoalAsync)(chatId);
+        await goal_mode_ipc_js_1.GoalService.clear(chatId);
         return { stdout: "Task goal cleared.", json: { ok: true, action: "clear", chatId } };
     }
     if (command === "pause" && args.length === 1) {
-        const goal = await (0, goal_mode_ipc_js_1.setGoalStatusAsync)(chatId, "paused");
+        const goal = await goal_mode_ipc_js_1.GoalService.status(chatId, "paused");
         return {
             stdout: goal ? "Task goal paused." : "No task goal is set.",
             json: { ok: goal !== null, action: "pause", chatId, goal },
         };
     }
     if (command === "resume" && args.length === 1) {
-        const goal = await (0, goal_mode_ipc_js_1.setGoalStatusAsync)(chatId, "active");
+        const goal = await goal_mode_ipc_js_1.GoalService.status(chatId, "active");
         return {
             stdout: goal ? "Task goal resumed." : "No task goal is set.",
             json: { ok: goal !== null, action: "resume", chatId, goal },
@@ -212,7 +209,7 @@ async function onGoalCommand(event) {
             json: { ok: false, error: "objective_too_long" },
         };
     }
-    const goal = await (0, goal_mode_ipc_js_1.setGoalAsync)(chatId, objective);
+    const goal = await goal_mode_ipc_js_1.GoalService.set(chatId, objective);
     return {
         stdout: command === "edit" ? "Task goal updated." : "Task goal set.",
         json: { ok: true, action: command === "edit" ? "edit" : "set", chatId, goal },
@@ -231,13 +228,7 @@ async function onChatViewEvent(event) {
         await (0, goal_mode_ipc_js_1.removeTrackedChatViewAsync)(runtime, viewId);
         return;
     }
-    const workspacePath = payload.workspacePath;
     const title = payload.title;
-    if (typeof workspacePath !== "string" || workspacePath.trim() === "") {
-        await (0, goal_mode_ipc_js_1.removeTrackedChatViewAsync)(runtime, viewId);
-        await (0, goal_mode_ipc_js_1.setGoalInputSlotEnabledAsync)(chatId, false);
-        return;
-    }
     if (typeof title !== "string") {
         return;
     }
@@ -245,8 +236,6 @@ async function onChatViewEvent(event) {
         viewId,
         chatId,
         runtime,
-        workspacePath,
-        workspaceEnv: typeof payload.workspaceEnv === "string" ? payload.workspaceEnv : undefined,
         title,
         updatedAt: Date.now(),
     });
@@ -256,21 +245,17 @@ async function onInputMenuToggle(event) {
     const payload = event.eventPayload;
     const action = payload.action;
     const chatId = payload.chatId;
-    const runtime = payload.runtime === "main" || payload.runtime === "floating" ? payload.runtime : undefined;
     if ((action !== "create" && action !== "toggle") || chatId === undefined) {
         return null;
     }
-    const enabled = await (0, goal_mode_ipc_js_1.isGoalInputSlotEnabledAsync)(chatId);
+    const enabled = await goal_mode_ipc_js_1.GoalService.inputEnabled(chatId);
     if (action === "create") {
-        const workspace = await (0, goal_mode_ipc_js_1.resolveGoalWorkspaceAsync)(chatId, runtime);
         return {
             toggles: [
                 {
                     id: GOAL_INPUT_SLOT_TOGGLE_ID,
                     title: "Task goal",
-                    description: workspace
-                        ? "Use the next message as this chat's task goal."
-                        : "A workspace is required before Goal Mode can be enabled.",
+                    description: "Use the next message as this chat's task goal.",
                     icon: Icons.Assignment,
                     isChecked: enabled,
                     slot: "general",
@@ -279,11 +264,7 @@ async function onInputMenuToggle(event) {
         };
     }
     if (payload.toggleId === GOAL_INPUT_SLOT_TOGGLE_ID) {
-        if (!enabled && !(await (0, goal_mode_ipc_js_1.resolveGoalWorkspaceAsync)(chatId, runtime))) {
-            await Tools.System.toast("当前聊天未绑定工作区，不能开启目标模式。");
-            return null;
-        }
-        await (0, goal_mode_ipc_js_1.setGoalInputSlotEnabledAsync)(chatId, !enabled);
+        await goal_mode_ipc_js_1.GoalService.setInput(chatId, !enabled);
     }
     return null;
 }
@@ -293,7 +274,7 @@ async function onChatInput(event) {
     const chatId = payload.chatId;
     if ((event.eventName !== "submit_requested" && event.eventName !== "submitted") ||
         chatId === undefined ||
-        !(await (0, goal_mode_ipc_js_1.isGoalInputSlotEnabledAsync)(chatId))) {
+        !(await goal_mode_ipc_js_1.GoalService.inputEnabled(chatId))) {
         return null;
     }
     const objective = (payload.text ?? "").trim();
@@ -302,13 +283,10 @@ async function onChatInput(event) {
         if (validation) {
             return validation;
         }
-        if (!(await (0, goal_mode_ipc_js_1.resolveGoalWorkspaceAsync)(chatId))) {
-            return { action: "Block", message: "当前聊天未绑定工作区，不能设置目标。" };
-        }
     }
     if (event.eventName === "submitted") {
-        await (0, goal_mode_ipc_js_1.setGoalAsync)(chatId, objective);
-        await (0, goal_mode_ipc_js_1.setGoalInputSlotEnabledAsync)(chatId, false);
+        await goal_mode_ipc_js_1.GoalService.set(chatId, objective);
+        await goal_mode_ipc_js_1.GoalService.setInput(chatId, false);
     }
     return null;
 }
@@ -319,7 +297,7 @@ async function onPromptFinalize(event) {
     if (stage !== "before_send_to_model" || payload.chatId === undefined || payload.preparedHistory === undefined) {
         return null;
     }
-    const goal = await (0, goal_mode_ipc_js_1.readGoalAsync)(payload.chatId);
+    const goal = await goal_mode_ipc_js_1.GoalService.read(payload.chatId);
     if (!goal || goal.status !== "active") {
         return null;
     }

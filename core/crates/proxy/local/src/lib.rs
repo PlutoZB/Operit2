@@ -41,6 +41,7 @@ pub struct LocalCoreProxy {
     hostManager: HostManager,
     toolRuntimeSupport: Arc<dyn ToolRuntimeSupport>,
     deviceToolService: Arc<dyn operit_tools::tools::DeviceTools::DeviceToolService>,
+    toolPkgShutdown: Arc<dyn Fn() + Send + Sync>,
     coreStreamPool: Arc<CoreStreamPool>,
 }
 
@@ -126,17 +127,26 @@ impl LocalCoreProxy {
         let toolRuntimeSupport = application.toolHandler.runtimeSupport();
         let deviceToolService = Arc::new(application.toolHandler.clone());
         let chatRuntimeHolder = application.chatRuntimeHolder.clone();
+        let toolPkgShutdown = Arc::new(application.toolHandler.getOrCreatePackageManager()
+            .lock().expect("package manager mutex poisoned").executionEngineShutdown());
         Self {
             peerServices: Arc::new(std::sync::OnceLock::new()),
             hostManager: application.hostManager.clone(),
             toolRuntimeSupport,
             deviceToolService,
+            toolPkgShutdown,
             application: Arc::new(Mutex::new(application)),
             #[cfg(not(target_arch = "wasm32"))]
             _coreCommandRuntime: coreCommandRuntime,
             chatRuntimeHolder,
             coreStreamPool: Arc::new(CoreStreamPool::new()),
         }
+    }
+
+    /// Releases container-owned workers without taking the asynchronous application lock.
+    #[allow(non_snake_case)]
+    pub fn shutdownToolPkgExecutionEngines(&self) {
+        (self.toolPkgShutdown)();
     }
 
     /// Binds plugin CLI calls to this application's live services, including Flutter hosts.

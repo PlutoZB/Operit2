@@ -2,9 +2,6 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.default = Screen;
 const goal_mode_ipc_js_1 = require("../../shared/goal_mode_ipc.js");
-const refreshEpochs = new Map();
-const refreshPendingEpochs = new Map();
-const refreshTimers = new Map();
 /** Calculates active goal time from its persisted timing checkpoints. */
 function calculateGoalElapsedMs(goal, now) {
     const end = goal.pausedAt ?? goal.completedAt ?? now;
@@ -22,94 +19,56 @@ function formatGoalDuration(durationMs) {
 function Screen(ctx) {
     const [chatId] = ctx.useState("chatId", "");
     const [goal, setGoal] = ctx.useState("goal", null);
-    if (!refreshEpochs.has(chatId)) {
-        refreshEpochs.set(chatId, 0);
-    }
-    /** Stops the chat-scoped refresh and invalidates reads started before this stop. */
-    const stopRefreshTimer = () => {
-        const epoch = (refreshEpochs.get(chatId) ?? 0) + 1;
-        refreshEpochs.set(chatId, epoch);
-        const timer = refreshTimers.get(chatId);
-        if (timer) {
-            clearInterval(timer.intervalId);
-            refreshTimers.delete(chatId);
-        }
-        refreshPendingEpochs.delete(chatId);
-    };
-    /** Starts one shared elapsed-time refresh for the chat. */
-    const ensureRefreshTimer = () => {
-        if (refreshTimers.has(chatId)) {
-            return;
-        }
-        const epoch = refreshEpochs.get(chatId);
-        const timer = { intervalId: 0, epoch };
-        timer.intervalId = setInterval(() => {
-            if (refreshTimers.get(chatId) !== timer || refreshEpochs.get(chatId) !== epoch) {
-                return;
-            }
-            void refreshGoal(epoch);
-        }, 1000);
-        refreshTimers.set(chatId, timer);
-    };
-    /** Reads the persisted goal and refreshes the rendered elapsed time. */
-    const refreshGoal = async (expectedEpoch = refreshEpochs.get(chatId)) => {
-        if (expectedEpoch !== refreshEpochs.get(chatId)) {
-            return;
-        }
-        if (refreshPendingEpochs.get(chatId) === expectedEpoch) {
-            return;
-        }
-        refreshPendingEpochs.set(chatId, expectedEpoch);
-        try {
-            const nextGoal = await (0, goal_mode_ipc_js_1.readGoalAsync)(chatId);
-            if (expectedEpoch !== refreshEpochs.get(chatId)) {
-                return;
-            }
-            if (!nextGoal || nextGoal.status !== "active") {
-                stopRefreshTimer();
-                setGoal(nextGoal);
-                return;
-            }
-            ensureRefreshTimer();
-            setGoal(nextGoal);
-        }
-        finally {
-            if (refreshPendingEpochs.get(chatId) === expectedEpoch) {
-                refreshPendingEpochs.delete(chatId);
-            }
-        }
-    };
-    /** Refreshes the goal snapshot stored by the owning plugin runtime. */
-    const refresh = async () => {
-        await refreshGoal();
-    };
-    /** Pauses an active goal. */
-    const pause = async () => {
-        stopRefreshTimer();
-        setGoal(await (0, goal_mode_ipc_js_1.setGoalStatusAsync)(chatId, "paused"));
-    };
-    /** Resumes a paused goal. */
-    const resume = async () => {
-        stopRefreshTimer();
-        setGoal(await (0, goal_mode_ipc_js_1.setGoalStatusAsync)(chatId, "active"));
-        ensureRefreshTimer();
-    };
-    /** Removes the current goal. */
-    const clear = async () => {
-        stopRefreshTimer();
-        await (0, goal_mode_ipc_js_1.clearGoalAsync)(chatId);
+    const goalRef = ctx.useRef("currentGoal", goal);
+    goalRef.current = goal;
+    /** Owns the subscription and elapsed-time refresh for this exact chat context. */
+    ctx.useEffect("goal", () => {
         setGoal(null);
-    };
+        const iterator = goal_mode_ipc_js_1.GoalService.watch(chatId);
+        let active = true;
+        /** Consumes routed state until the composition releases this collector. */
+        const observe = async () => {
+            for await (const next of iterator) {
+                if (!active)
+                    return;
+                setGoal(next);
+            }
+        };
+        void observe().catch((error) => { if (active)
+            ctx.reportError(error); });
+        /** Releases the chat subscription and timer together. */
+        return () => {
+            active = false;
+            void iterator.return(undefined).catch((error) => { ctx.reportError(error); });
+        };
+    }, [chatId]);
+    /** Refreshes elapsed time only while the currently displayed goal is active. */
+    ctx.useEffect("goal-clock", () => {
+        if (goal?.status !== "active")
+            return () => { };
+        const timer = setInterval(() => {
+            if (goalRef.current?.status === "active")
+                setGoal({ ...goalRef.current });
+        }, 1000);
+        /** Releases this composition's elapsed-time timer. */
+        return () => { clearInterval(timer); };
+    }, [chatId, goal?.status]);
+    /** Pauses the durable goal on its Binding owner. */
+    const pause = async () => { await goal_mode_ipc_js_1.GoalService.status(chatId, "paused"); };
+    /** Resumes the durable goal on its Binding owner. */
+    const resume = async () => { await goal_mode_ipc_js_1.GoalService.status(chatId, "active"); };
+    /** Removes the durable goal on its Binding owner. */
+    const clear = async () => { await goal_mode_ipc_js_1.GoalService.clear(chatId); };
     const active = goal?.status === "active";
     // Keep the empty slot zero-height while the initial read is pending too.
     // Transient padding here resizes the transcript and nudges its bottom twice.
     if (goal === null) {
-        return ctx.UI.Column({ fillMaxWidth: true, onLoad: refresh }, []);
+        return ctx.UI.Column({ fillMaxWidth: true }, []);
     }
     const paused = goal?.status === "paused";
     const title = active ? "Task goal" : paused ? "Task goal paused" : "Task goal completed";
     const elapsed = goal ? formatGoalDuration(calculateGoalElapsedMs(goal, Date.now())) : "00:00:00";
-    return ctx.UI.Column({ fillMaxWidth: true, padding: { horizontal: 8, vertical: 2 }, onLoad: refresh }, [
+    return ctx.UI.Column({ fillMaxWidth: true, padding: { horizontal: 8, vertical: 2 } }, [
         ctx.UI.Card({
             fillMaxWidth: true,
             containerColor: ctx.MaterialTheme.colorScheme.surfaceVariant.copy({ alpha: 0.22 }),

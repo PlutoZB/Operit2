@@ -68,7 +68,6 @@ import {
     ComposeNode as ComposeNodeType,
     ComposeCanvasCommand as ComposeCanvasCommandType
 } from './compose-dsl';
-import { ToolPkg as ToolPkgType } from './toolpkg';
 import {
     OkHttp as OkHttpValue,
     OkHttpClientBuilder as OkHttpClientBuilderClass,
@@ -208,7 +207,6 @@ declare global {
     type EnvironmentVariableReadResultData = _EnvironmentVariableReadResultData;
     type EnvironmentVariableWriteResultData = _EnvironmentVariableWriteResultData;
 
-    export import ToolPkg = ToolPkgType;
 
     // Global interface definitions
     interface ToolParams {

@@ -106,7 +106,7 @@ would introduce cross-record conflict constraints. Synchronized tables use one
 nonnullable TEXT primary key and explicit column affinities. Private tables,
 introspection, filesystem SQL functions, ATTACH/PRAGMA and executable remote SQL
 are not exposed. Arbitrary raw local tables do not produce row deltas; use
-`defineTable()` for dirty tracking, including local `changes()` observation.
+`defineTable()` for dirty tracking and synchronization.
 
 ## Synchronization And Changes
 
@@ -128,10 +128,16 @@ structured record and journal payload. The JS request/reply boundary does not
 stringify/parse the request or return value, and no whole collection is serialized.
 This is not a statement that the application contains no JSON.
 
-`await db.changes('0', 100)` returns transactions with opaque decimal cursors.
-Persist the last returned cursor and request the next page. This is cursor-based
-observation, not a live push/watch stream. `close()` releases the retained handle
-without deleting its database.
+Object collections expose `collection.watch(key, { signal })`; DataStore exposes
+`store.watch(key, { signal })`. Both return ordinary async iterators of the current
+record (`{ value, version }`) or `null` for absence/deletion. Rust reads the initial
+record and waits for version changes under the authenticated handle, selected
+collection and exact key. No history cursor, transaction manifest or package-name
+filter is required. A stored null remains a record with `value: null`.
+Device-local writes and synchronized Space writes use the same interface.
+Returning the iterator or aborting its signal releases its independently owned
+read handle. `close()` releases the parent database handle without deleting data.
+The replication journal is internal to Rust and has no public JS read/watch API.
 
 Plugin installation moves preserve both persistent data roots and live database
 handles. Installation configuration files retain their existing scope move

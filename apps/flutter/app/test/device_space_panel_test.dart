@@ -17,6 +17,7 @@ const List<String> _userCapabilities = <String>[
   'network.devices.view',
   'network.relay',
   'runtime.execute',
+  'storage.provide',
 ];
 
 const List<String> _administratorCapabilities = <String>['*'];
@@ -68,7 +69,11 @@ Map<String, Object?> _topology({
         relayHops: 1,
         relayPath: <String>['relay'],
         identityName: 'Relay',
-        capabilities: <String>['network.devices.view', 'network.relay'],
+        capabilities: <String>[
+          'network.devices.view',
+          'network.relay',
+          'storage.provide',
+        ],
       ),
       _member(deviceId: 'relay', deviceName: 'relay-linux'),
     ],
@@ -76,7 +81,7 @@ Map<String, Object?> _topology({
   };
 }
 
-/// Builds one synchronized control state with the two built-in identities.
+/// Builds one synchronized control state with all four built-in identities.
 Map<String, Object?> _control({List<String> disconnectedNodeIds = const []}) {
   return <String, Object?>{
     'spaceId': 'space',
@@ -92,6 +97,20 @@ Map<String, Object?> _control({List<String> disconnectedNodeIds = const []}) {
         'roleId': 'user',
         'displayName': 'User',
         'capabilities': _userCapabilities,
+      },
+      'relay': <String, Object?>{
+        'roleId': 'relay',
+        'displayName': 'Relay',
+        'capabilities': <String>[
+          'network.devices.view',
+          'network.relay',
+          'storage.provide',
+        ],
+      },
+      'edge': <String, Object?>{
+        'roleId': 'edge',
+        'displayName': 'Edge',
+        'capabilities': <String>['network.devices.view', 'runtime.execute'],
       },
     },
     'deviceIdentityIds': <String, String>{
@@ -242,6 +261,7 @@ void main() {
     double width = 800,
     double textScale = 1,
     Brightness brightness = Brightness.light,
+    TargetPlatform platform = TargetPlatform.android,
   }) async {
     tester.view.physicalSize = Size(width, 1200);
     tester.view.devicePixelRatio = 1;
@@ -250,6 +270,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: ThemeData(
+          platform: platform,
           colorScheme: ColorScheme.fromSeed(
             seedColor: Colors.blue,
             brightness: brightness,
@@ -330,7 +351,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
     expect(find.text('当前身份: 中继节点'), findsOneWidget);
-    expect(find.text('可用权限: 查看设备与当前身份、中继网络流量'), findsOneWidget);
+    expect(find.text('可用权限: 查看设备与当前身份、中继网络流量、保存共享数据副本'), findsOneWidget);
     expect(find.text('设备 ID: tablet'), findsOneWidget);
     expect(find.textContaining('在线 · 经中继 1 跳'), findsWidgets);
     expect(find.textContaining('路径: 本机 → relay-linux'), findsWidgets);
@@ -504,7 +525,7 @@ void main() {
     expect(find.text('设置设备身份'), findsNothing);
     // Both long lists start collapsed and only advertise their size.
     expect(find.text('身份权限'), findsOneWidget);
-    expect(find.text('2 个身份'), findsOneWidget);
+    expect(find.text('4 个身份'), findsOneWidget);
     expect(find.text('新建身份'), findsOneWidget);
     expect(find.byKey(const ValueKey('space-role-admin')), findsNothing);
     expect(find.text('操作记录'), findsOneWidget);
@@ -515,6 +536,14 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
     expect(find.text('管理员'), findsNWidgets(2));
     expect(find.byType(Card), findsNothing);
+    for (final role in <String>['admin', 'user', 'relay', 'edge']) {
+      final row = find.byKey(ValueKey('space-role-$role'));
+      expect(row, findsOneWidget);
+      expect(
+        find.descendant(of: row, matching: find.byType(IconButton)),
+        findsNothing,
+      );
+    }
     expect(
       tester.getSize(find.byKey(const ValueKey('space-role-admin'))).height,
       lessThan(64),
@@ -527,6 +556,42 @@ void main() {
     await unmount(tester, bridge);
   });
 
+  for (final platform in <TargetPlatform>[
+    TargetPlatform.android,
+    TargetPlatform.windows,
+  ]) {
+    testWidgets('custom identity actions stay compact on ${platform.name}', (
+      tester,
+    ) async {
+      final bridge = DeviceSpacePanelBridge(
+        topology: _topology(
+          selfCapabilities: _administratorCapabilities,
+          selfIdentityName: 'Administrator',
+        ),
+        control: _control(),
+      );
+      final roles = bridge.control['roles']! as Map<String, Object?>;
+      roles['custom'] = <String, Object?>{
+        'roleId': 'custom',
+        'displayName': 'Custom identity',
+        'capabilities': _userCapabilities,
+      };
+      await mountNetworkPanel(tester, bridge, width: 360, platform: platform);
+      await tester.tap(find.text('身份权限'));
+      await tester.pumpAndSettle();
+      final actions = find.descendant(
+        of: find.byKey(const ValueKey('space-role-custom')),
+        matching: find.byType(IconButton),
+      );
+      expect(actions, findsNWidgets(2));
+      for (var index = 0; index < 2; index++) {
+        expect(tester.getSize(actions.at(index)), const Size(32, 32));
+      }
+      expect(tester.takeException(), isNull);
+      await unmount(tester, bridge);
+    });
+  }
+
   testWidgets('members without capabilities only see their own identity', (
     tester,
   ) async {
@@ -537,11 +602,7 @@ void main() {
     await mountNetworkPanel(tester, bridge);
     expect(find.text('本机身份'), findsOneWidget);
     expect(find.text('普通用户'), findsOneWidget);
-    for (final label in <String>[
-      '查看设备与当前身份',
-      '中继网络流量',
-      '承载 Core 执行',
-    ]) {
+    for (final label in <String>['查看设备与当前身份', '中继网络流量', '承载 Core 执行']) {
       expect(find.text(label), findsOneWidget);
     }
     expect(find.text('身份权限'), findsNothing);
@@ -670,6 +731,17 @@ void main() {
           width: 360,
           textScale: 1.5,
           brightness: brightness,
+        );
+        final refresh = find.byKey(const ValueKey('space-identity-refresh'));
+        final heading = find.text('本机身份');
+        expect(tester.getSize(refresh), const Size(32, 32));
+        expect(
+          tester.getTopLeft(refresh).dx,
+          greaterThan(tester.getTopRight(heading).dx),
+        );
+        expect(
+          (tester.getTopLeft(refresh).dy - tester.getTopLeft(heading).dy).abs(),
+          lessThan(12),
         );
         await tester.tap(find.text('身份权限'));
         await tester.pumpAndSettle();

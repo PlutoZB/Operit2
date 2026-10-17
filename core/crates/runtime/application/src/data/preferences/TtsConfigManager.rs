@@ -1,3 +1,6 @@
+use operit_store::PreferenceMerge::{
+    PreferenceMergeCatalog, PreferenceMergeReference, PreferenceMergeStore,
+};
 use operit_store::PreferencesDataStore::{
     stringPreferencesKey, Flow, Preferences, PreferencesDataStore, PreferencesDataStoreError,
 };
@@ -23,13 +26,51 @@ pub struct TtsConfigManager {
 }
 
 impl TtsConfigManager {
-    const PREFERENCES_VERSION: u32 = 2;
+    /// Opens this owner's versioned store through the supplied runtime storage host.
+    pub(crate) fn preferenceStore(
+        storage: std::sync::Arc<dyn operit_host_api::RuntimeStorageHost>,
+        path: impl Into<String>,
+    ) -> PreferencesDataStore {
+        PreferencesDataStore::newEncryptedWithStorage(storage, path)
+            .withSchema(Self::PREFERENCES_VERSION, Self::migratePreferences)
+    }
+
+    /// Declares this owner's entity identity, name and content metadata for Core merging.
+    pub(crate) fn spaceMergeCatalog() -> PreferenceMergeCatalog {
+        PreferenceMergeCatalog {
+            store: PreferenceMergeStore {
+                path: operit_util::RuntimeStorageLayout::TTS_CONFIGS_PREFERENCES_PATH,
+                encrypted: true,
+            },
+            keyPrefix: "tts_config_",
+            keySuffix: "_json",
+            identityField: "id",
+            nameField: "name",
+            ignoredFields: &["createdAt", "updatedAt"],
+            retiredKeys: &["tts_config_list"],
+        }
+    }
+
+    /// Declares the current selection as a scalar reference into this owner's catalog.
+    pub(crate) fn spaceMergeReference() -> PreferenceMergeReference {
+        let catalog = Self::spaceMergeCatalog();
+        PreferenceMergeReference {
+            store: catalog.store,
+            key: "current_tts_config_id",
+            path: &[],
+            target: catalog.store.path,
+        }
+    }
+
+    const PREFERENCES_VERSION: u32 = 3;
 
     /// Creates a text-to-speech configuration manager backed by runtime store paths.
     pub fn new(paths: RuntimeStorePaths) -> Self {
         Self {
-            dataStore: PreferencesDataStore::newEncrypted(paths.tts_configs_preferences_path())
-                .withSchema(Self::PREFERENCES_VERSION, Self::migratePreferences),
+            dataStore: Self::preferenceStore(
+                operit_store::RuntimeStorageHost::defaultRuntimeStorageHost(),
+                operit_store::RuntimeStorageHost::runtimeStoragePath(&paths.tts_configs_preferences_path()),
+            ),
             paths,
         }
     }
@@ -413,7 +454,7 @@ impl TtsConfigManager {
                 if hasCurrentConfig || !list.is_empty() {
                     return Ok(());
                 }
-                let config = defaultSystemTtsConfig(currentTimeMillis());
+                let config = defaultSystemTtsConfig(0);
                 preferences.set(
                     &Self::TTS_CONFIG_LIST(),
                     serde_json::to_string(&[DEFAULT_SYSTEM_TTS_CONFIG_ID])?,
@@ -449,6 +490,19 @@ impl TtsConfigManager {
                     preferences.set(&stringPreferencesKey(&key), record);
                 }
                 preferences.remove(&Self::TTS_CONFIG_LIST());
+                Ok(())
+            }
+            2 => {
+                let key = configJsonKey(DEFAULT_SYSTEM_TTS_CONFIG_ID);
+                if let Some(value) = preferences.get(&key) {
+                    let mut config: TtsConfig = serde_json::from_value(value.clone())?;
+                    config.createdAt = 0;
+                    config.updatedAt = 0;
+                    let normalized = serde_json::to_value(&config)?;
+                    if normalized == serde_json::to_value(defaultSystemTtsConfig(0))? {
+                        preferences.set(&key, normalized);
+                    }
+                }
                 Ok(())
             }
             from => Err(PreferencesDataStoreError::MissingMigration { from, to: from + 1 }),

@@ -1404,7 +1404,7 @@ mod core_edge {
                                 "denied",
                                 "$node.sync",
                                 method,
-                                operit_link::toCoreValue(serde_json::json!({"operations":[]}))
+                                operit_link::toCoreValue(serde_json::json!({"operations":[],"complete":true}))
                                     .unwrap(),
                             ),
                         },

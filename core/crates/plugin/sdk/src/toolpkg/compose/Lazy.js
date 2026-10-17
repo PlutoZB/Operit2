@@ -11,7 +11,11 @@ var OperitComposeLazy = function () {
         typeof itemBuilder !== 'function') throw new TypeError('Invalid Compose lazy item options');
     var stored = ctx.useRef('compose:lazy:' + key, { firstIndex: 0, lastIndex: initial });
     var first = Math.min(stored.current.firstIndex, Math.max(0, count - initial));
-    var last = Math.min(count, Math.max(first, stored.current.lastIndex));
+    var last = Math.min(count, Math.max(first, stored.current.lastIndex,
+      stored.current.itemCount !== count ? first + initial : first));
+    // Persist the rendered range, not a range from a larger pre-collapse catalog.
+    // Growing a short catalog must also refill in this commit, before Flutter asks.
+    stored.current = { firstIndex: first, lastIndex: last, itemCount: count };
     var content = [];
     for (var index = first; index < last; index += 1) content.push(itemBuilder(index));
     return {
@@ -26,7 +30,8 @@ var OperitComposeLazy = function () {
               range.firstIndex < 0 || range.lastIndex < range.firstIndex) {
             throw new TypeError('Invalid Compose lazy item range');
           }
-          var next = { firstIndex: Math.min(range.firstIndex, count), lastIndex: Math.min(range.lastIndex, count) };
+          var liveCount = stored.current.itemCount;
+          var next = { firstIndex: Math.min(range.firstIndex, liveCount), lastIndex: Math.min(range.lastIndex, liveCount), itemCount: liveCount };
           if (next.firstIndex === stored.current.firstIndex && next.lastIndex === stored.current.lastIndex) return;
           stored.current = next;
           OperitComposeReactive.invalidateRoot(ctx);

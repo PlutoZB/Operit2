@@ -1,7 +1,8 @@
-import type { Storage, StorageTable } from "../../../../../types/storage";
+import type { Storage, StorageMergeDescriptor, StorageTable } from "../../../../../types/storage";
 import * as definition from "./schema.json";
 
 interface FieldPresence {
+  nullEncoding?: "column";
   nullable?: boolean;
   optional?: boolean;
 }
@@ -21,6 +22,7 @@ type Row = Record<string, Storage.SqlValue>;
 export type RelationalMutation = (
   { op: "put"; value: Storage.Value } | { op: "delete" }
 ) & { collection: string; key: string; expectedVersion: string | null };
+export const characterSchemaVersion = definition.version;
 const schemas = definition.collections as Record<string, NodeSchema>;
 
 /** Quotes only identifiers originating in the declared plugin schema. */
@@ -32,6 +34,15 @@ function quote(name: string): string {
 /** Names a flattened field without interpreting business values. */
 function field(path: string): string {
   return path === "" ? "_value" : path;
+}
+/** Keeps released presence columns while storing explicitly declared nullable scalars directly. */
+function usesPresenceColumn(node: NodeSchema): boolean {
+  if (node.nullEncoding === "column") {
+    if (!node.nullable || node.optional || node.kind === "object" || node.kind === "array" || node.kind === "map")
+      throw new Error("Column null encoding requires a required nullable scalar");
+    return false;
+  }
+  return node.optional === true || node.nullable === true;
 }
 /** Builds typed columns and separate ordered tables for each declared collection. */
 function layout(name: string, node: NodeSchema, child = false): Layout {
@@ -49,7 +60,7 @@ function layout(name: string, node: NodeSchema, child = false): Layout {
   const children: Layout[] = [];
   /** Flattens objects and declares each nested collection as a real relation. */
   function visit(schema: NodeSchema, path: string, absent: boolean): void {
-    if (schema.optional || schema.nullable)
+    if (usesPresenceColumn(schema))
       columns.push({
         name: field(path) + "__state",
         affinity: "integer",
@@ -89,6 +100,151 @@ function layout(name: string, node: NodeSchema, child = false): Layout {
 export const layouts = Object.fromEntries(
   Object.entries(schemas).map(([name, node]) => [name, layout(name, node)]),
 );
+
+/** Declares the character-card entity and reference contract enforced by Core during space merge. */
+export const spaceMergeDescriptor: StorageMergeDescriptor = {
+  version: 3,
+  maxEntities: 6,
+  maxReferences: 48,
+  entities: [
+    {
+      collection: "cards",
+      identityColumn: "id",
+      nameColumn: "name",
+      ignoredColumns: ["_revision", "id", "createdAt", "updatedAt"],
+      keyEncoding: "length_prefixed_root",
+      matchMode: "content",
+      keyReferences: [],
+      childCollections: tables(layouts["cards"]).slice(1).map(child => child.name),
+      references: [
+        { collection: "cards", column: "chatProviderId", target: { kind: "preference", path: "runtime/config/preferences/model_configs.preferences.json" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "cards", column: "ttsConfigId", target: { kind: "preference", path: "runtime/config/preferences/tts_configs.preferences.json" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "cards", column: "themeConfigId", target: { kind: "preference", path: "runtime/config/preferences/user_preferences.preferences.json" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "cards", column: "sharedMemoryId", target: { kind: "collection", collection: "stores" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "cards_attachedTagIds", column: "_value", target: { kind: "collection", collection: "tags" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "cards_sharedMemoryMounts", column: "sharedMemoryId", target: { kind: "collection", collection: "stores" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+      ],
+    },
+    {
+      collection: "groups",
+      identityColumn: "id",
+      nameColumn: "name",
+      ignoredColumns: ["_revision", "id", "createdAt", "updatedAt"],
+      keyEncoding: "length_prefixed_root",
+      matchMode: "content",
+      keyReferences: [],
+      childCollections: tables(layouts["groups"]).slice(1).map(child => child.name),
+      references: [
+        { collection: "groups", column: "themeConfigId", target: { kind: "preference", path: "runtime/config/preferences/user_preferences.preferences.json" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "groups_members", column: "characterCardId", target: { kind: "collection", collection: "cards" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+      ],
+    },
+    {
+      collection: "tags",
+      identityColumn: "id",
+      nameColumn: "name",
+      ignoredColumns: ["_revision", "id", "createdAt", "updatedAt"],
+      keyEncoding: "length_prefixed_root",
+      matchMode: "content",
+      keyReferences: [],
+      childCollections: [],
+      references: [],
+    },
+    {
+      collection: "stores",
+      identityColumn: "id",
+      nameColumn: "name",
+      ignoredColumns: ["_revision", "id", "createdAt", "updatedAt"],
+      keyEncoding: "length_prefixed_root",
+      matchMode: "content",
+      keyReferences: [],
+      childCollections: [],
+      references: [],
+    },
+    {
+      collection: "owners",
+      identityColumn: "ownerKey",
+      nameColumn: null,
+      ignoredColumns: ["_revision"],
+      keyEncoding: "slash_root",
+      matchMode: "identity",
+      keyReferences: [
+        { collection: "cards", prefix: "character:" },
+        { collection: "stores", prefix: "shared:" },
+      ],
+      childCollections: ["memories", "links", "chunks", "candidates", "embeddings"],
+      references: [
+        { collection: "owners", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "owners", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "owners", column: "userDocumentPath", target: { kind: "collection", collection: "owners" }, keyPrefix: "owners/", keySuffix: "/USER.md", valueEncoding: "uri_component" },
+        { collection: "memories", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "memories", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "links", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "links", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "chunks", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "chunks", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "candidates", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "candidates", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "embeddings", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
+        { collection: "embeddings", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
+      ],
+    },
+    {
+      collection: "meta",
+      identityColumn: "_key",
+      nameColumn: null,
+      ignoredColumns: ["_revision"],
+      keyEncoding: "length_prefixed_root",
+      matchMode: "identity",
+      keyReferences: [],
+      childCollections: [],
+      references: [
+        { collection: "meta", column: "active__CharacterCard__id", target: { kind: "collection", collection: "cards" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+        { collection: "meta", column: "active__CharacterGroup__id", target: { kind: "collection", collection: "groups" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
+      ],
+    },
+  ],
+};
+
+/** Applies one owner migration and returns the complete guarded mutations for its transaction. */
+type SchemaMigrationStep = (version: number) => Promise<RelationalMutation[]>;
+
+/** Reads the persisted owner schema version without accepting malformed migration metadata. */
+function schemaVersion(entry: Storage.ListedEntry | null): number {
+  if (entry === null) return 1;
+  if (entry.value === null || Array.isArray(entry.value) || typeof entry.value !== "object")
+    throw new Error("Invalid character schema migration record");
+  const version = entry.value.version;
+  if (typeof version !== "number" || !Number.isInteger(version) || version < 1)
+    throw new Error("Invalid character schema migration version");
+  return version;
+}
+
+/** Runs the character owner migration table using one explicit switch per released schema version. */
+export async function migrateCharacterSchema(
+  database: RelationalDatabase,
+  readModels: () => Promise<readonly { providerId: string; modelId: string }[]>,
+): Promise<void> {
+  await database.migrateSchema("character", characterSchemaVersion, async version => {
+    switch (version) {
+      case 1: {
+        const models = await readModels();
+        const mutations: RelationalMutation[] = [];
+        for (const entry of await database.read("cards")) {
+          const card = entry.value as Record<string, Storage.Value>;
+          if (card.chatModelBindingMode !== "FIXED_MODEL" || card.chatModelId === null || card.chatProviderId !== null) continue;
+          const candidates = models.filter(model => model.modelId === card.chatModelId);
+          if (candidates.length !== 1) continue;
+          mutations.push({ op: "put", collection: "cards", key: entry.key,
+            expectedVersion: entry.version, value: { ...card, chatProviderId: candidates[0].providerId } });
+        }
+        return mutations;
+      }
+      default:
+        throw new Error("Missing character schema migration: " + version + " -> " + (version + 1));
+    }
+  });
+}
 /** Enumerates a collection's physical tables in stable schema order. */
 export function tables(root: Layout): Layout[] {
   return [root, ...root.children.flatMap(tables)];
@@ -137,7 +293,7 @@ export function encode(
       absent = false,
     ): void {
       const column = field(path);
-      if (node.optional || node.nullable)
+      if (usesPresenceColumn(node))
         row[column + "__state"] =
           item === undefined ? 0 : item === null ? 1 : 2;
       if (item === undefined && !node.optional && !absent)
@@ -261,7 +417,8 @@ function decodeLayout(
     /** Decodes the declared scalar, object or relation at an exact field path. */
     function visit(node: NodeSchema, path: string): Storage.Value | undefined {
       const column = field(path);
-      if (node.optional || node.nullable) {
+      if (node.nullEncoding === "column" && stored[column] === null) return null;
+      if (usesPresenceColumn(node)) {
         const state = Number(stored[column + "__state"]);
         if (state === 0 && node.optional) return undefined;
         if (state === 1 && node.nullable) return null;
@@ -392,6 +549,32 @@ export class RelationalDatabase {
   ).join("");
   /** Retains the generic host SQL handle. */
   private constructor(readonly sql: Storage.SqliteDatabase) {}
+  /** Commits one versioned schema step together with its durable migration marker. */
+  async migrateSchema(
+    key: string,
+    targetVersion: number,
+    step: SchemaMigrationStep,
+  ): Promise<void> {
+    let marker = await this.get("schema_migrations", key);
+    let version = schemaVersion(marker);
+    if (version > targetVersion) throw new Error("Stored schema is newer than this runtime");
+    while (version < targetVersion) {
+      const mutations = await step(version);
+      const nextVersion = version + 1;
+      await this.commit([
+        ...mutations,
+        {
+          op: "put",
+          collection: "schema_migrations",
+          key,
+          expectedVersion: marker?.version ?? null,
+          value: { version: nextVersion },
+        },
+      ]);
+      marker = await this.get("schema_migrations", key);
+      version = schemaVersion(marker);
+    }
+  }
   /** Opens the sole runtime database and declares its exact typed schema. */
   static async open(): Promise<RelationalDatabase> {
     const directory = ToolPkg.getSpaceDataDir();
@@ -399,6 +582,7 @@ export class RelationalDatabase {
       throw new Error("Plugin data directory is unavailable");
     const sql = await Tools.Storage.sqlite.open({
       path: directory + "/characters-relational.sqlite",
+      merge: spaceMergeDescriptor,
     });
     for (const root of Object.values(layouts))
       for (const table of tables(root)) await sql.defineTable(table.table);
@@ -417,7 +601,7 @@ export class RelationalDatabase {
     return new RelationalDatabase(sql);
   }
   /** Reads a collection as typed records with all child rows from the same guarded operation snapshot. */
-  async read(collection: string, key?: string): Promise<Storage.ListedEntry[]> {
+  async read<T = Storage.Value>(collection: string, key?: string): Promise<Storage.ListedEntry<T>[]> {
     const root = layouts[collection];
     if (root === undefined)
       throw new Error("Unknown relational collection: " + collection);
@@ -442,20 +626,20 @@ export class RelationalDatabase {
       return {
         key: row._key,
         version: row._revision,
-        value: decodeLayout(root, row, relations),
+        value: decodeLayout(root, row, relations) as T,
       };
     });
   }
   /** Reads one exact root identity and its declared child relations. */
-  async get(
+  async get<T = Storage.Value>(
     collection: string,
     key: string,
-  ): Promise<Storage.ListedEntry | null> {
-    const rows = await this.read(collection, key);
+  ): Promise<Storage.ListedEntry<T> | null> {
+    const rows = await this.read<T>(collection, key);
     return rows.length === 0 ? null : rows[0];
   }
   /** Writes guarded roots and their relations atomically through the host journal. */
-  async commit(mutations: RelationalMutation[]): Promise<Storage.Receipt> {
+  async commit(mutations: RelationalMutation[], whenAbsent?: {collection: string; key: string}): Promise<Storage.Receipt | null> {
     const version = this.executionId + ":" + ++this.sequence;
     const statements: Storage.Statement[] = [];
     for (const mutation of mutations) {
@@ -493,8 +677,8 @@ export class RelationalDatabase {
         "Relational operation exceeds the host transaction statement limit",
       );
     }
-    await this.sql.transaction(statements);
-    return { version };
+    const result = await this.sql.transaction(statements, whenAbsent === undefined ? undefined : { whenAbsent });
+    return result.length === 0 ? null : { version };
   }
 }
 

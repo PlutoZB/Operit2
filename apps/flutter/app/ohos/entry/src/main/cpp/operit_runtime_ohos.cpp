@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -20,6 +21,7 @@ using BridgeFreeString = void (*)(char*);
 using BridgeEmitRuntimeEvent = char* (*)(BridgeHandle, const char*);
 using BridgeRuntimeBootstrapRead = char* (*)(const char*);
 using BridgeRuntimeBootstrapWrite = char* (*)(const char*, const char*);
+using BridgeDataRescue = char* (*)(const char*, const char*);
 
 class OperitBridgeLibrary {
  public:
@@ -55,8 +57,12 @@ class OperitBridgeLibrary {
         Load<BridgeRuntimeBootstrapWrite>("operit_flutter_bridge_runtime_bootstrap_write");
 
     free_string_ = Load<BridgeFreeString>("operit_flutter_bridge_free_string");
-    if (create_with_storage_roots_ == nullptr || create_error_ == nullptr || destroy_ == nullptr ||
-          return false;
+    if (create_with_storage_roots_ == nullptr || create_error_ == nullptr ||
+        destroy_ == nullptr || free_string_ == nullptr ||
+        emit_runtime_event_ == nullptr || runtime_bootstrap_read_ == nullptr ||
+        runtime_bootstrap_write_ == nullptr) {
+      AssignError(error, "operit flutter bridge exports are incomplete");
+      return false;
     }
     return true;
   }
@@ -85,6 +91,13 @@ class OperitBridgeLibrary {
   /// Delivers one normalized OpenHarmony event through the Rust bridge.
   std::string EmitRuntimeEvent(BridgeHandle handle, const std::string& event_json) {
     return TakeString(emit_runtime_event_(handle, event_json.c_str()));
+  }
+
+  /// Calls maintenance without creating a Core handle.
+  std::string DataRescue(const std::string& root, const std::string& request) {
+    const auto call = Load<BridgeDataRescue>("operit_flutter_bridge_data_rescue");
+    if (call == nullptr) return "{\"ok\":false,\"error\":\"Data rescue ABI is unavailable\"}";
+    return TakeString(call(root.c_str(), request.c_str()));
   }
 
   /// Reads the client bootstrap record without creating a Core handle.
@@ -287,6 +300,56 @@ napi_value ConnectCoreFfi(napi_env env, napi_callback_info info) {
   return StringValue(env, g_bridge_library.ConnectCoreFfi(handle));
 }
 
+/// Owns one maintenance operation while the N-API worker pool runs blocking storage work.
+struct DataRescueWork {
+  napi_async_work work = nullptr;
+  napi_deferred deferred = nullptr;
+  std::string root;
+  std::string request;
+  std::string response;
+  std::string error;
+};
+
+/// Executes only the Rust offline ABI outside the ArkUI event loop.
+void ExecuteDataRescue(napi_env, void* data) {
+  auto* work = static_cast<DataRescueWork*>(data);
+  try { work->response = g_bridge_library.DataRescue(work->root, work->request); }
+  catch (const std::exception& error) { work->error = error.what(); }
+  catch (...) { work->error = "Unexpected native data rescue failure"; }
+}
+
+/// Settles the platform promise on the owner event loop and releases its native work item.
+void CompleteDataRescue(napi_env env, napi_status status, void* data) {
+  std::unique_ptr<DataRescueWork> work(static_cast<DataRescueWork*>(data));
+  if (status == napi_ok && work->error.empty()) {
+    napi_resolve_deferred(env, work->deferred, StringValue(env, work->response));
+  } else {
+    napi_value error = nullptr;
+    napi_create_error(env, nullptr, StringValue(env, status == napi_ok ? work->error : "Native rescue work was cancelled"), &error);
+    napi_reject_deferred(env, work->deferred, error);
+  }
+  napi_delete_async_work(env, work->work);
+}
+
+/// Dispatches blocking maintenance through the platform worker pool without starting Core.
+napi_value DataRescue(napi_env env, napi_callback_info info) {
+  if (!EnsureBridgeReady(env)) return nullptr;
+  auto args = CallbackArgs(env, info, 2);
+  if (args.size() != 2) return ThrowError(env, "dataRescue requires root and request");
+  auto work = std::make_unique<DataRescueWork>();
+  work->root = ReadString(env, args[0]);
+  work->request = ReadString(env, args[1]);
+  napi_value promise = nullptr;
+  if (napi_create_promise(env, &work->deferred, &promise) != napi_ok) return ThrowError(env, "Cannot create data rescue promise");
+  if (napi_create_async_work(env, nullptr, StringValue(env, "operit-data-rescue"), ExecuteDataRescue, CompleteDataRescue, work.get(), &work->work) != napi_ok) return ThrowError(env, "Cannot create data rescue worker");
+  if (napi_queue_async_work(env, work->work) != napi_ok) {
+    napi_delete_async_work(env, work->work);
+    return ThrowError(env, "Cannot queue data rescue worker");
+  }
+  work.release();
+  return promise;
+}
+
 /// Registers one named N-API function.
 void DefineFunction(napi_env env,
                     napi_value exports,
@@ -298,14 +361,15 @@ void DefineFunction(napi_env env,
 
 /// Initializes the OpenHarmony native runtime module.
 napi_value Init(napi_env env, napi_value exports) {
-  napi_property_descriptor descriptors[6];
+  napi_property_descriptor descriptors[7];
   DefineFunction(env, exports, "create", Create, &descriptors[0]);
   DefineFunction(env, exports, "destroy", Destroy, &descriptors[1]);
   DefineFunction(env, exports, "emitRuntimeEvent", EmitRuntimeEvent, &descriptors[2]);
   DefineFunction(env, exports, "runtimeBootstrapRead", RuntimeBootstrapRead, &descriptors[3]);
   DefineFunction(env, exports, "runtimeBootstrapWrite", RuntimeBootstrapWrite, &descriptors[4]);
   DefineFunction(env, exports, "connectCoreFfi", ConnectCoreFfi, &descriptors[5]);
-  napi_define_properties(env, exports, 6, descriptors);
+  DefineFunction(env, exports, "dataRescue", DataRescue, &descriptors[6]);
+  napi_define_properties(env, exports, 7, descriptors);
   return exports;
 }
 

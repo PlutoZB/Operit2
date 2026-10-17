@@ -162,6 +162,7 @@ var characterFields = {
   marks: optional(text),
   chatModelBindingMode: optional(enumeration("FOLLOW_GLOBAL", "FIXED_MODEL")),
   chatModelId: optional(nullable(text)),
+  chatProviderId: optional(nullable(text)),
   ttsConfigId: optional(nullable(text)),
   themeConfigId: optional(nullable(text)),
   memoryBindingMode: optional(enumeration("CHARACTER", "SHARED")),
@@ -321,7 +322,7 @@ function Screen(ctx) {
   function close() {
     return { type: "toolpkg.presentation.cancel", requestId };
   }
-  return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/memory-status/index.ui.js:16700",[{
+  return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/memory-status/index.ui.js:16744",[{
     key: "memory-status",
     title: "\u8BB0\u5FC6\u72B6\u6001",
     text: input.description,

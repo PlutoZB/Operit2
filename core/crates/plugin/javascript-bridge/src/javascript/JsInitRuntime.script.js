@@ -16,6 +16,34 @@
     expose('__operitExpose', expose);
     root.window = windowRef;
 
+    /** Implements standard cancellation consistently in every plugin runtime. */
+    class AbortSignal {
+        /** Creates an initially active cancellation signal. */
+        constructor() { this.aborted = false; this.reason = undefined; this.listeners = new Set(); }
+        /** Registers a listener for the standard abort event. */
+        addEventListener(type, listener) { if (type === 'abort') this.listeners.add(listener); }
+        /** Removes an abort listener by identity. */
+        removeEventListener(type, listener) { if (type === 'abort') this.listeners.delete(listener); }
+        /** Throws the exact abort reason after cancellation. */
+        throwIfAborted() { if (this.aborted) throw this.reason; }
+    }
+    /** Owns a standard AbortSignal independently of platform APIs. */
+    class AbortController {
+        /** Creates one signal for this controller. */
+        constructor() { this.signal = new AbortSignal(); }
+        /** Publishes cancellation once to all currently registered listeners. */
+        abort(reason) {
+            if (this.signal.aborted) return;
+            if (reason === undefined) { reason = new Error('The operation was aborted'); reason.name = 'AbortError'; }
+            this.signal.aborted = true;
+            this.signal.reason = reason;
+            var event = { type: 'abort', target: this.signal };
+            this.signal.listeners.forEach(/** Delivers the standard abort event. */ function(listener) { listener(event); });
+            this.signal.listeners.clear();
+        }
+    }
+    expose('AbortController', AbortController);
+
     function ensureCallRegistry() {
         var registry = root.__operitExecutionCallRegistry;
         if (!registry || typeof registry !== 'object') {

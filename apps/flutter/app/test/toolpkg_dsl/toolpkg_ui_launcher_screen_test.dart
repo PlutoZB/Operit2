@@ -2473,6 +2473,7 @@ Widget _screen(
   );
 }
 
+/// Builds the route fixture with all fields required by the current runtime model.
 core_proxy.ToolPkgContainerRuntime _pluginRuntime() {
   return const core_proxy.ToolPkgContainerRuntime(
     chatLifecycleHooks: [],
@@ -2492,6 +2493,8 @@ core_proxy.ToolPkgContainerRuntime _pluginRuntime() {
     manifestExtensions: <String, Object?>{},
     author: <String>['Operit'],
     mainEntry: 'dist/main.js',
+    themes: [],
+    license: null,
     sourceType: core_proxy.ToolPkgSourceType.externalValue,
     sourcePath: 'test',
     subpackages: <core_proxy.ToolPkgSubpackageRuntime>[],
@@ -2555,6 +2558,7 @@ core_proxy.ToolPkgContainerRuntime _pluginRuntime() {
   );
 }
 
+/// Builds the module-only fixture using the same current runtime schema.
 core_proxy.ToolPkgContainerRuntime _moduleOnlyPluginRuntime() {
   return const core_proxy.ToolPkgContainerRuntime(
     chatLifecycleHooks: [],
@@ -2574,6 +2578,8 @@ core_proxy.ToolPkgContainerRuntime _moduleOnlyPluginRuntime() {
     manifestExtensions: <String, Object?>{},
     author: <String>['Operit'],
     mainEntry: 'dist/main.js',
+    themes: [],
+    license: null,
     sourceType: core_proxy.ToolPkgSourceType.externalValue,
     sourcePath: 'test',
     subpackages: <core_proxy.ToolPkgSubpackageRuntime>[],

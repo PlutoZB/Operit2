@@ -3412,6 +3412,10 @@ export interface ComposeLazyViewport {
    */
   itemExtent: number;
   /**
+   * Number of eager items before the windowed items in a sliver host.
+   */
+  staticItemCount?: number;
+  /**
    * Requests the next materialized range through normal action dispatch.
    */
   onRangeChanged: (arg0: ComposeLazyRange) => void;
@@ -4318,6 +4322,10 @@ export interface ComposeDslContext {
    * Reuses a keyed computed value until its dependency list changes.
    */
   useMemo<T>(key: string, factory: () => T, deps?: unknown[]): T;
+  /**
+   * Runs composition-owned work and cleans it up on dependency change or disposal.
+   */
+  useEffect(key: string, setup: () => () => void, dependencies: any[]): void;
   /**
    * Measures text using host font metrics and the supplied layout constraints.
    */

@@ -1,3 +1,4 @@
+use operit_store::PreferenceMerge::{PreferenceMergeCatalog, PreferenceMergeStore};
 use std::path::PathBuf;
 
 use std::collections::HashSet;
@@ -80,6 +81,31 @@ pub struct ModelConfigManager {
 }
 
 impl ModelConfigManager {
+    /// Opens this owner's versioned store through the supplied runtime storage host.
+    pub(crate) fn preferenceStore(
+        storage: std::sync::Arc<dyn operit_host_api::RuntimeStorageHost>,
+        path: impl Into<String>,
+    ) -> PreferencesDataStore {
+        PreferencesDataStore::newEncryptedWithStorage(storage, path)
+            .withSchema(Self::PREFERENCES_VERSION, Self::migratePreferences)
+    }
+
+    /// Declares this owner's entity identity, name and content metadata for Core merging.
+    pub(crate) fn spaceMergeCatalog() -> PreferenceMergeCatalog {
+        PreferenceMergeCatalog {
+            store: PreferenceMergeStore {
+                path: operit_util::RuntimeStorageLayout::MODEL_CONFIGS_PREFERENCES_PATH,
+                encrypted: true,
+            },
+            keyPrefix: "provider_",
+            keySuffix: "",
+            identityField: "id",
+            nameField: "name",
+            ignoredFields: &["createdAt", "updatedAt"],
+            retiredKeys: &["provider_list"],
+        }
+    }
+
     const PREFERENCES_VERSION: u32 = 4;
     pub const DEFAULT_PROVIDER_ID: &'static str = ModelConfigDefaults::DEFAULT_PROVIDER_ID;
     pub const DEFAULT_MODEL_ID: &'static str = ModelConfigDefaults::DEFAULT_MODEL_ID;
@@ -95,8 +121,10 @@ impl ModelConfigManager {
             &root_dir,
             operit_util::RuntimeStorageLayout::MODEL_CONFIGS_PREFERENCES_PATH,
         );
-        let modelConfigDataStore = PreferencesDataStore::newEncrypted(path)
-            .withSchema(Self::PREFERENCES_VERSION, Self::migratePreferences);
+        let modelConfigDataStore = Self::preferenceStore(
+            operit_store::RuntimeStorageHost::defaultRuntimeStorageHost(),
+            operit_store::RuntimeStorageHost::runtimeStoragePath(&path),
+        );
         Self {
             runtimeRoot: root_dir,
             modelConfigDataStore,
@@ -1168,11 +1196,9 @@ impl ModelConfigManager {
         stringPreferencesKey(&format!("provider_{providerId}"))
     }
 
+    /// Allocates a provider identity independently of device clocks and names.
     fn createProviderId(&self) -> String {
-        format!(
-            "provider_{}",
-            operit_host_api::TimeUtils::currentTimeMillis()
-        )
+        uuid::Uuid::new_v4().to_string()
     }
 }
 
@@ -1410,20 +1436,21 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    /// Verifies creating a provider with an occupied name is rejected.
+    /// Verifies provider UUID allocation and rejects an occupied display name.
     #[test]
     fn create_provider_rejects_duplicate_name() {
         let root = unique_test_root("create_provider_rejects_duplicate_name");
         setup_test_runtime(root.clone());
         let manager = ModelConfigManager::new(root.clone());
 
-        manager
+        let providerId = manager
             .createProvider(
                 "Same provider name".to_string(),
                 "OPENAI".to_string(),
                 "https://api.openai.com/v1".to_string(),
             )
             .expect("first provider with this name");
+        assert!(uuid::Uuid::parse_str(&providerId).is_ok());
         let error = manager
             .createProvider(
                 "Same provider name".to_string(),

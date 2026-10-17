@@ -6,7 +6,6 @@ use operit_store::CoreSpaceStore::{CoreSpace, CoreSpaceStore};
 use operit_store::NetworkControlStore::NetworkControlStore;
 use operit_store::WorkspaceFileSyncStore::WorkspaceFileSyncStore;
 use operit_util::RuntimeStorageLayout::RUNTIME_SYNC_DIR_PATH;
-use operit_store::PreferencesDataStore::{CoreNodeStateStore, stringPreferencesKey};
 use operit_store::RuntimeFileSyncStore::{RuntimeFileSyncReference, RuntimeFileSyncStore};
 use operit_store::SyncOperationStore::{subscribeSyncMutations, syncMutationRevision, SyncMutationSubscription, SyncOperation};
 use serde::de::DeserializeOwned;
@@ -390,7 +389,7 @@ impl SpacePersistenceSyncService {
                 continue;
             }
             if let Err(error) = self
-                .synchronizeReachablePeer(targetNodeId.clone(), 512, false)
+                .synchronizeReachablePeer(targetNodeId.clone(), 512)
                 .await
             {
                 self.recordPeerPassFailed(&targetNodeId);
@@ -414,7 +413,6 @@ impl SpacePersistenceSyncService {
         &self,
         targetNodeId: String,
         limit: usize,
-        bootstrap: bool,
     ) -> Result<(), String> {
         if limit == 0 {
             return Err("sync limit must be greater than 0".to_string());
@@ -463,25 +461,11 @@ impl SpacePersistenceSyncService {
             }
             preferenceStore.merge(&preferences)?;
         }
-        // Admission is not a storage grant. No business RPC, blob transfer or
-        // bootstrap reset may run unless both endpoints currently have it.
+        // Admission is not a storage grant. Business replication requires both endpoints to provide storage.
         if !self.storageReplicationAllowed(&targetNodeId)? { return Ok(()); }
         self.validateReachableDeviceSpace(&targetNodeId).await?;
-        let spaceId = self.state.spaceStore.space()?.spaceId;
-        let completed = self.synchronizeNodeOperations(&targetNodeId, limit,
-            bootstrap || self.replicaBootstrapRequired(&spaceId)?).await?;
-        if completed && self.storageReplicationAllowed(&targetNodeId)? && self.state.spaceStore.space()?.spaceId == spaceId {
-            let marker = self.replicaMarker();
-            let mut preferences = marker.data().map_err(|error| error.to_string())?;
-            preferences.set(&stringPreferencesKey("spaceId"), spaceId);
-            marker.replaceRecoverably(preferences).map_err(|error| error.to_string())?;
-        }
+        self.synchronizeNodeOperations(&targetNodeId, limit).await?;
         Ok(())
-    }
-
-    fn replicaMarker(&self) -> CoreNodeStateStore {
-        CoreNodeStateStore::newWithStorage(self.state.localRuntime.runtimeStorageHost(),
-            "runtime/link_access/storage_replica.preferences.json")
     }
 
     /// Applies the local effects of removals that just reached this device
@@ -495,21 +479,7 @@ impl SpacePersistenceSyncService {
         crate::NodeSpaceService::space_join::applyRemovedMemberLocalEffects(&service, operations)
     }
 
-    pub(crate) fn replicaBootstrapRequired(&self, spaceId: &str) -> Result<bool, String> {
-        let preferences = self.replicaMarker().data().map_err(|error| error.to_string())?;
-        if preferences.get(&stringPreferencesKey("spaceId")).is_some_and(|ready| ready == spaceId) { return Ok(false); }
-        // A Space creator's existing local data belongs to this Space. A joined
-        // node without a completed replica must bootstrap when later authorized,
-        // even if it could not sync at the moment admission was approved.
-        let local = self.state.nodeRouter.localNodeId();
-        let policy = NetworkControlStore::new(self.state.localRuntime.runtimeStorageHost())?;
-        Ok(!policy.currentSpaceOperations()?.iter().any(|operation| {
-            serde_json::from_value::<operit_store::NetworkControlStore::NetworkControlCommandRecord>(operation.payload.clone())
-                .is_ok_and(|record| record.spaceId == spaceId && matches!(record.command,
-                    operit_store::NetworkControlStore::NetworkControlCommand::Bootstrap { initialAdminNodeId } if initialAdminNodeId == local))
-        }))
-    }
-
+    /// Checks whether both endpoints are authorized storage providers.
     pub(crate) fn storageReplicationAllowed(&self, targetNodeId: &str) -> Result<bool, String> {
         match self.state.nodeRouter.requirePeerStorageProviders(
             &self.state.nodeRouter.localNodeId(), targetNodeId,
@@ -601,8 +571,7 @@ impl SpacePersistenceSyncService {
         let decision = if !gate.backoffElapsed(currentTimeMillis()) {
             false
         } else if gate.consecutiveFailures > 0 {
-            // The previous failure may sit on this side (bootstrap reset,
-            // missing blob); retry the full pass now that the backoff elapsed.
+            // Retry the failed exchange after the backoff has elapsed.
             true
         } else if !self
             .storageReplicationAllowed(targetNodeId)
@@ -687,7 +656,6 @@ impl SpacePersistenceSyncService {
         &self,
         targetNodeId: &str,
         limit: usize,
-        bootstrap: bool,
     ) -> Result<bool, String> {
         let localVersion: String = self.callLocal("coreVersion", Value::Null).await?;
         let remoteVersion: String = callRemote(
@@ -703,26 +671,9 @@ impl SpacePersistenceSyncService {
             ));
         }
 
-        if bootstrap {
-            let _: Value = self
-                .callLocal(
-                    "syncApplyOperations",
-                    json!({
-                        "operations": {
-                            "operations": [],
-                            "forceApply": true,
-                        }
-                    }),
-                )
-                .await?;
-        }
-
-        let mut bootstrapClock = operit_store::SyncOperationStore::SyncClock::empty();
         loop {
             if !self.storageReplicationAllowed(targetNodeId)? { return Ok(false); }
-            let localClock: Value = if bootstrap {
-                serde_json::to_value(&bootstrapClock).map_err(|error| error.to_string())?
-            } else { self.callLocal("syncClock", Value::Null).await? };
+            let localClock: Value = self.callLocal("syncClock", Value::Null).await?;
             let remoteClock: Value = callRemote(
                 &self.state.nodeRouter,
                 targetNodeId,
@@ -761,38 +712,16 @@ impl SpacePersistenceSyncService {
             )
             .await?;
             if !self.storageReplicationAllowed(targetNodeId)? { return Ok(false); }
-            if bootstrap {
-                let operations = syncOperations(remoteOperations.clone())?;
-                if operations.is_empty() {
-                    break;
-                }
-                self.synchronizeRequiredBlobs(targetNodeId, &operations)
-                    .await?;
-                if !self.storageReplicationAllowed(targetNodeId)? { return Ok(false); }
-                let _: Value = self
-                    .callLocal(
-                        "syncApplyOperations",
-                        json!({
-                            "operations": {
-                                "operations": remoteOperations,
-                                "forceApply": true,
-                            }
-                        }),
-                    )
-                    .await?;
-                for operation in &operations {
-                    let operation: SyncOperationOrder = serde_json::from_value(operation.clone()).map_err(|error| error.to_string())?;
-                    if operation.sequence > bootstrapClock.sequenceFor(&operation.originDeviceId) {
-                        bootstrapClock.setSequence(operation.originDeviceId, operation.sequence);
-                    }
-                }
-                if operations.len() < limit {
-                    break;
-                }
-                continue;
-            }
+            let complete = syncOperations(localOperations.clone())?.len() < limit
+                && syncOperations(remoteOperations.clone())?.len() < limit;
             let operations = mergeSyncOperations(localOperations, remoteOperations)?;
             if operations.is_empty() {
+                if !self
+                    .applySynchronizedOperationBatch(targetNodeId, &operations, true)
+                    .await?
+                {
+                    return Ok(false);
+                }
                 operit_util::AppLogger::AppLogger::trace(
                     "CoreSyncTrace",
                     &format!(
@@ -810,23 +739,12 @@ impl SpacePersistenceSyncService {
                     summarizeSyncOperations(&operations)
                 ),
             );
-            self.synchronizeRequiredBlobs(targetNodeId, &operations)
-                .await?;
-            if !self.storageReplicationAllowed(targetNodeId)? { return Ok(false); }
-            let _: Value = callRemote(
-                &self.state.nodeRouter,
-                targetNodeId,
-                PeerSyncMethod::SyncApplyOperations,
-                json!({ "operations": operations.clone() }),
-            )
-            .await?;
-            if !self.storageReplicationAllowed(targetNodeId)? { return Ok(false); }
-            let _: Value = self
-                .callLocal(
-                    "syncApplyOperations",
-                    json!({ "operations": operations.clone() }),
-                )
-                .await?;
+            if !self
+                .applySynchronizedOperationBatch(targetNodeId, &operations, complete)
+                .await?
+            {
+                return Ok(false);
+            }
             operit_util::AppLogger::AppLogger::trace(
                 "CoreSyncTrace",
                 &format!(
@@ -835,10 +753,41 @@ impl SpacePersistenceSyncService {
                     summarizeSyncOperations(&operations)
                 ),
             );
-            if operations.len() < limit {
+            if complete {
                 break;
             }
         }
+        Ok(true)
+    }
+
+    /// Applies one transport page on both peers with an explicit current-history completion boundary.
+    #[allow(non_snake_case)]
+    async fn applySynchronizedOperationBatch(
+        &self,
+        targetNodeId: &str,
+        operations: &[Value],
+        complete: bool,
+    ) -> Result<bool, String> {
+        self.synchronizeRequiredBlobs(targetNodeId, operations).await?;
+        if !self.storageReplicationAllowed(targetNodeId)? {
+            return Ok(false);
+        }
+        let _: Value = callRemote(
+            &self.state.nodeRouter,
+            targetNodeId,
+            PeerSyncMethod::SyncApplyOperations,
+            json!({ "operations": operations, "complete": complete }),
+        )
+        .await?;
+        if !self.storageReplicationAllowed(targetNodeId)? {
+            return Ok(false);
+        }
+        let _: Value = self
+            .callLocal(
+                "syncApplyOperations",
+                json!({ "operations": operations, "complete": complete }),
+            )
+            .await?;
         Ok(true)
     }
 
@@ -1374,6 +1323,12 @@ fn mergeSyncOperations(left: Value, right: Value) -> Result<Vec<Value>, String> 
     {
         let key: SyncOperationOrder = serde_json::from_value(operation.clone())
             .map_err(|error| format!("invalid sync operation: {error}"))?;
+        if let Some((_, existing)) = byId.get(&key.opId) {
+            if existing != &operation {
+                return Err(format!("conflicting synchronization operation identity: {}", key.opId));
+            }
+            continue;
+        }
         byId.insert(key.opId.clone(), (key, operation));
     }
     let mut operations = byId.into_values().collect::<Vec<_>>();

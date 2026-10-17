@@ -54,6 +54,10 @@ var OperitComposeState = function () {
     }
     return {
       api: {
+        /// Registers cancellable work with composition-owned dependency and disposal tracking.
+        useEffect: function (key, setup, dependencies) {
+          OperitComposeReactive.effect(runtime.ctx, key, setup, dependencies);
+        },
         useState: function (key, initialValue) {
           var stateKey = String(key || '').trim();
           if (!stateKey) {

@@ -3,6 +3,7 @@ import type { CharacterRepository } from "./canonical";
 import type { Card, Memory, MemoryLink } from "./model";
 import { createCharacterDraft, createGroupDraft, createTagDraft } from "./drafts";
 import { parseDomainPayload, resolveChatConfiguration } from "./domain";
+import type { ChatConfigurationService } from "./domain";
 import { autoCategorizeMemory, updateChatMemory } from "./memory-jobs/analysis";
 import { listMemoryChats, requireChat } from "./memory-jobs/chat";
 import { rebuildMemoryEmbeddings } from "./memory-jobs/embeddings";
@@ -61,6 +62,20 @@ async function activateForChat(input: DomainInput<"activePrompt.activateForChat"
   return { characterCardName: input.characterCardName, characterGroupId: input.characterGroupId, updated: true };
 }
 
+/** Applies live privacy preferences to current and historical configuration reads. */
+export async function resolveConfiguration(
+  input: DomainInput<"chat.configuration.resolve">,
+  service: ChatConfigurationService,
+): Promise<DomainOutput<"chat.configuration.resolve">> {
+  const result = await resolveChatConfiguration(input, service);
+  if (!("profile" in result) || (await service.readGlobalMemoryPreferences()).userDescriptionEnabled) return result;
+  return {
+    ...result,
+    profile: { ...result.profile, userPreferencesText: "" },
+    participants: result.participants.map(profile => ({ ...profile, userPreferencesText: "" })),
+  };
+}
+
 /** Implements every published domain operation with typed handlers sharing the editor's actual business service. */
 const handlers: DomainHandlers = {
   /** Keeps full-filter searches and provider embedding persistence on the same serialized service. */
@@ -81,23 +96,12 @@ const handlers: DomainHandlers = {
   "memory.embeddings.rebuild": (input, repository) => rebuildMemoryEmbeddings(input.ownerKey, repository),
   /** Enqueues only actual persisted message sources and genuine bound owners. */
   "memory.candidate.enqueue": (input, repository) => enqueueCandidate(input, repository),
-  /** Resolves binding, catalogs, prompt and USER.md from one serialized repository operation. */
-  "chat.configuration.resolve": async (input, repository) => {
-    const result = await resolveChatConfiguration(input, {
-      /** Reads the same in-flight directory without reacquiring the publisher. */
-      snapshot: () => snapshot(repository),
-      readGlobalMemoryPreferences: () => repository.readGlobalMemoryPreferences(),
-      /** Executes nested resolution reads on this exact snapshot without another service. */
-      dispatchDomain: <K extends DomainOperation>(operation: K, payload: DomainInput<K>) => executeDomain(operation, payload, repository),
-    });
-    // Privacy applies to historical re-execution too, without rewriting its opaque
-    // saved marker, resolving a different actor or rereading mutable catalogs.
-    if ("profile" in result && !(await repository.readGlobalMemoryPreferences()).userDescriptionEnabled) {
-      return { ...result, profile: { ...result.profile, userPreferencesText: "" },
-        participants: result.participants.map(profile => ({ ...profile, userPreferencesText: "" })) };
-    }
-    return result;
-  },
+  /** Resolves chat configuration using this operation's existing repository snapshot. */
+  "chat.configuration.resolve": (input, repository) => resolveConfiguration(input, {
+    snapshot: () => snapshot(repository),
+    readGlobalMemoryPreferences: () => repository.readGlobalMemoryPreferences(),
+    dispatchDomain: <K extends DomainOperation>(operation: K, payload: DomainInput<K>) => executeDomain(operation, payload, repository),
+  }),
   /** Requires the chat's persisted selection rather than global active state. */
   "chat.configuration.binding.read": (input, repository) => repository.readChatBinding(input.chatId),
   /** Stages a genuine selector submission in the shared publication. */

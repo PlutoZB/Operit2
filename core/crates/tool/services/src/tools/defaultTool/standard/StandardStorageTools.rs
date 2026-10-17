@@ -28,7 +28,6 @@ impl SharedToolExecutor for StorageToolExecutor {
             StorageRequest::Query { .. }
             | StorageRequest::Get { .. }
             | StorageRequest::List { .. }
-            | StorageRequest::Changes { .. }
             | StorageRequest::Close { .. } => ToolEffect::READ,
             _ => ToolEffect::WRITE,
         };

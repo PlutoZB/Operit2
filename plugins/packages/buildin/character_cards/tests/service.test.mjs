@@ -21,7 +21,7 @@ test("memory owner payloads use exact character/shared namespaces", () => {
 /** Verifies full-record input retains every binding field rather than CLI-editable projections. */
 test("complete character provider input retains TTS mounts tool policy and timestamps", () => {
   const values = fixture().snapshot.cards[1];
-  Object.assign(values, { avatarUri: "vfs:/avatar.png", ttsConfigId: "tts-one", chatModelBindingMode: "FIXED_MODEL", chatModelId: "qwen-plus", otherContentVoice: "语音内容", advancedCustomPrompt: "完整 prompt", marks: "完整备注" });
+  Object.assign(values, { avatarUri: "vfs:/avatar.png", ttsConfigId: "tts-one", chatModelBindingMode: "FIXED_MODEL", chatModelId: "qwen-plus", chatProviderId: "provider-one", otherContentVoice: "语音内容", advancedCustomPrompt: "完整 prompt", marks: "完整备注" });
   values.sharedMemoryMounts = [{ sharedMemoryId: "shared-main", readable: true, writable: false }];
   values.toolAccessConfig = { enabled: true, allowedBuiltinTools: ["builtin"], allowedPackages: ["package"], allowedSkills: ["skill"], allowedMcpServers: ["mcp"] };
   const payload = { values };

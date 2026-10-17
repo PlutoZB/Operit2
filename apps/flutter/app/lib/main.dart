@@ -7,6 +7,8 @@ import 'package:desktop_widgets/desktop_widgets.dart';
 import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 
 import 'core/application/CoreApplicationService.dart';
+import 'core/bridge/PlatformCoreProxy.dart';
+import 'ui/rescue/DataRescueApp.dart';
 import 'core/errors/UnhandledErrorReporter.dart';
 import 'core/logging/ClientLogger.dart';
 import 'core/notifications/NotificationActivationService.dart';
@@ -30,6 +32,24 @@ void main(List<String> arguments) async {
       final startupStopwatch = Stopwatch()..start();
       final bindingStopwatch = Stopwatch()..start();
       WidgetsFlutterBinding.ensureInitialized();
+      final launch =
+          await platformCoreProxy.dataRescue({'operation': 'launchMode'})
+              as Map;
+      if (isDataRescueLaunch(
+        arguments: arguments,
+        route: PlatformDispatcher.instance.defaultRouteName,
+        uri: Uri.base,
+        hostRequested: launch['rescue'] == true,
+      )) {
+        runApp(
+          DataRescueApp(
+            canStopNormalProcess: launch['canStopNormalProcess'] == true,
+          ),
+        );
+        applicationStarted = true;
+        return;
+      }
+      await platformCoreProxy.dataRescue({'operation': 'runtimeLease'});
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
       consumeGitHubOAuthWebCallbackAtStartup();
       final bindingElapsedMs = bindingStopwatch.elapsedMilliseconds;

@@ -657,6 +657,9 @@ pub struct ToolPkgManifest {
     pub enabledByDefault: bool,
     #[serde(rename = "market_only", default)]
     pub marketOnly: bool,
+    /// Restricts installation to one explicit device or space scope.
+    #[serde(rename = "installation_scope", default)]
+    pub installationScope: Option<crate::javascript::ToolPkgConfigScope>,
     #[serde(default)]
     pub subpackages: Vec<ToolPkgManifestSubpackage>,
     /// Declares theme templates alongside the other ToolPkg capabilities.
@@ -782,6 +785,17 @@ pub struct ToolPkgParser;
 pub struct ToolPkgArchiveParser;
 
 impl ToolPkgArchiveParser {
+    /// Reads installation restrictions before any registration script can create scoped data.
+    #[allow(non_snake_case)]
+    pub fn readInstallationScope(archiveBytes: &[u8]) -> Result<Option<crate::javascript::ToolPkgConfigScope>, String> {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(archiveBytes))
+            .map_err(|error| error.to_string())?;
+        let index = Self::buildZipEntryIndex(&mut archive);
+        let entry = findManifestEntry(&index.entryNames).ok_or("ToolPkg manifest is missing")?;
+        let text = Self::readZipEntryText(&mut archive, &index, &entry).ok_or("Cannot read ToolPkg manifest")?;
+        Ok(parseToolPkgManifest(&text, &entry)?.installationScope)
+    }
+
     /// Resolves ordinary ToolPkg metadata once and validates its declared theme templates.
     #[allow(non_snake_case)]
     pub fn readThemeTemplates(archiveBytes: &[u8]) -> Result<Vec<operit_plugin_theme::ValidatedThemeTemplate>, String> {
@@ -1253,6 +1267,10 @@ impl ToolPkgArchiveParser {
         }
 
         let mut manifestExtensions = manifest.extensionFields.clone();
+        if let Some(scope) = manifest.installationScope {
+            manifestExtensions.insert("installation_scope".to_string(), serde_json::to_value(scope)
+                .map_err(|error| error.to_string())?);
+        }
         if !manifest.workspaceTemplates.is_empty() {
             manifestExtensions.insert(
                 "workspace_templates".to_string(),
@@ -3068,4 +3086,20 @@ mod navigation_registration_tests {
         assert!(load_sidebar_navigation(vec![invalid], entry).unwrap_err().contains("route must use compose_dsl for chat_input_menu_sections"));
     }
 
+}
+
+#[cfg(test)]
+mod installation_scope_tests {
+    use super::*;
+    /// Accepts exactly the declared device and space installation scopes.
+    #[test]
+    fn installation_scope_uses_the_strict_rust_scope_enum() {
+        for (text, expected) in [("device", crate::javascript::ToolPkgConfigScope::Device), ("space", crate::javascript::ToolPkgConfigScope::Space)] {
+            let manifest = parseToolPkgManifest(&serde_json::json!({"toolpkg_id":"scope.fixture", "main":"main.js", "installation_scope":text}).to_string(), "manifest.json").unwrap();
+            assert_eq!(manifest.installationScope, Some(expected));
+        }
+        for scope in [serde_json::json!("workspace"), serde_json::json!("local"), serde_json::json!("SPACE"), serde_json::json!(true), serde_json::json!(1)] {
+            assert!(parseToolPkgManifest(&serde_json::json!({"toolpkg_id":"scope.fixture", "main":"main.js", "installation_scope":scope}).to_string(), "manifest.json").is_err());
+        }
+    }
 }

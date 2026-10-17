@@ -7,7 +7,7 @@ use super::chat::ChatSendEvent;
 use super::core::JsonObject;
 use super::models::ModelsSummary;
 use super::storage::{
-    StorageChangeEntry, StorageKeyValueEntry, StorageResponse, StorageSqlExecutionResult,
+    StorageKeyValueEntry, StorageResponse, StorageSqlExecutionResult,
     StorageSqlRow, StorageValueEntry,
 };
 use super::theme::ThemeConfig;
@@ -822,10 +822,6 @@ pub enum StorageRequestResultData {
     Commit {
         version: String,
     },
-    #[serde(rename = "changes")]
-    Changes {
-        entries: Vec<StorageChangeEntry>,
-    },
 }
 
 impl From<StorageResponse> for StorageRequestResultData {
@@ -849,7 +845,6 @@ impl From<StorageResponse> for StorageRequestResultData {
             StorageResponse::Commit(result) => Self::Commit {
                 version: result.version,
             },
-            StorageResponse::Changes(entries) => Self::Changes { entries },
         }
     }
 }

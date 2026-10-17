@@ -43,6 +43,8 @@ part 'compose_dsl/retained_nodes.dart';
 part 'compose_dsl/modifiers.dart';
 part 'compose_dsl/value_parsers.dart';
 part 'compose_dsl/renderer.dart';
+part 'compose_dsl/sliver_content.dart';
+part 'compose_dsl/toolpkg_ui_content.dart';
 part 'compose_dsl/hover_region.dart';
 part 'compose_dsl/drag_drop.dart';
 part 'compose_dsl/box_layout.dart';
@@ -65,6 +67,7 @@ class ToolPkgUiLauncherScreen extends StatefulWidget {
     this.embeddedScreenPath,
     this.showLauncherChrome = true,
     this.showLoadingIndicator = true,
+    this.contentBuilder = _buildToolPkgUiBody,
     this.dialogTitle,
     this.initialState = const <String, Object?>{},
     this.initialMemo = const <String, Object?>{},
@@ -80,6 +83,9 @@ class ToolPkgUiLauncherScreen extends StatefulWidget {
   final String? embeddedScreenPath;
   final bool showLauncherChrome;
   final bool showLoadingIndicator;
+
+  /// Places session-owned content into the embedding surface.
+  final ToolPkgUiContentBuilder contentBuilder;
 
   /// Embeds the screen in the modal route owned by its caller.
   final String? dialogTitle;
@@ -1126,6 +1132,7 @@ class _ToolPkgUiLauncherScreenState extends State<ToolPkgUiLauncherScreen> {
     };
   }
 
+  /// Builds the selected session through its configured content presentation.
   @override
   Widget build(BuildContext context) {
     final hasSelectedUi = _hasSelectedUi();
@@ -1157,6 +1164,7 @@ class _ToolPkgUiLauncherScreenState extends State<ToolPkgUiLauncherScreen> {
             error: _error,
             renderResult: _renderResult,
             showLoadingIndicator: widget.showLoadingIndicator,
+            contentBuilder: widget.contentBuilder,
             dialogTitle: widget.dialogTitle,
             onAction: _dispatchAction,
             onTextInput: _dispatchTextInput,
@@ -1166,7 +1174,10 @@ class _ToolPkgUiLauncherScreenState extends State<ToolPkgUiLauncherScreen> {
                 .chatRuntimeHolderMain
                 .splitMarkdownContent(content: content),
           )
-        : const _NoUiView();
+        : widget.contentBuilder(
+            context,
+            ToolPkgUiContent._box(const _NoUiView()),
+          );
     if (!widget.showLauncherChrome) {
       return content;
     }

@@ -13,6 +13,7 @@ mod client_paths;
 mod core_proxy;
 mod error;
 mod mdns;
+mod rescue;
 mod tui;
 
 pub(crate) use bootstrap::{
@@ -54,6 +55,7 @@ async fn run() -> Result<(), CliError> {
     }
 
     match args[0].as_str() {
+        "rescue" => rescue::run(&args[1..]).map_err(CliError::user),
         "help" | "-h" | "--help" => {
             cli::print_root_usage();
             Ok(())

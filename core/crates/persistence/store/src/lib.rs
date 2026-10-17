@@ -15,6 +15,8 @@ pub mod NetworkControlStore;
 #[cfg(feature = "full")]
 #[path = "PluginStorage.rs"]
 pub mod PluginStorage;
+#[path = "PreferenceMerge.rs"]
+pub mod PreferenceMerge;
 #[path = "PreferencesDataStore.rs"]
 pub mod PreferencesDataStore;
 #[path = "PreferencesEncryption.rs"]

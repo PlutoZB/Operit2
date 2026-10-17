@@ -75,7 +75,7 @@ function characterField(field: string, raw: string): CharacterChanges {
   switch (field) {
     case "name": case "description": case "characterSetting": case "openingStatement": case "otherContentChat":
     case "otherContentVoice": case "advancedCustomPrompt": case "marks": case "chatModelBindingMode": case "memoryBindingMode": value = raw; break;
-    case "avatarUri": case "chatModelId": case "ttsConfigId": case "sharedMemoryId": value = optionalIdentifier(raw); break;
+    case "avatarUri": case "chatProviderId": case "chatModelId": case "ttsConfigId": case "sharedMemoryId": value = optionalIdentifier(raw); break;
     case "attachedTagIds": value = csv(raw); break;
     case "sharedMemoryMounts": case "toolAccessConfig": value = json(raw, field); break;
     case "isDefault": value = bool(raw, field); break;

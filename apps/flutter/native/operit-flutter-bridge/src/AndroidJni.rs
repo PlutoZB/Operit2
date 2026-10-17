@@ -281,3 +281,30 @@ fn new_java_string(mut env: JNIEnv, value: &str) -> jstring {
         .expect("JNI string allocation must succeed")
         .into_raw()
 }
+
+/// Runs offline maintenance with only the Android secret-store bridge installed.
+#[no_mangle]
+pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_dataRescue(
+    mut env: JNIEnv,
+    _class: JClass,
+    default_runtime_root: JString,
+    request: JString,
+    host: JObject,
+) -> jstring {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        (|| -> Result<String, String> {
+            let root = PathBuf::from(String::from(env.get_string(&default_runtime_root).map_err(|error| error.to_string())?));
+            let request = String::from(env.get_string(&request).map_err(|error| error.to_string())?);
+            let vm = env.get_java_vm().map_err(|error| error.to_string())?;
+            let host = env.new_global_ref(host).map_err(|error| error.to_string())?;
+            operit_host_android_native::setAndroidHostSecretStoreBridge(vm, host).map_err(|error| error.to_string())?;
+            Ok(crate::PlatformRuntimeAbi::NativeDataRescue::execute(root, &request))
+        })()
+    }));
+    let response = match result {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => serde_json::json!({"ok": false, "error": error}).to_string(),
+        Err(payload) => serde_json::json!({"ok": false, "error": panic_payload_message(payload)}).to_string(),
+    };
+    new_java_string(env, &response)
+}

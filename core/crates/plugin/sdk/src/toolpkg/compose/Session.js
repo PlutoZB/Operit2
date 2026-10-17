@@ -53,6 +53,7 @@ function renderComposeDsl(runtimeOptions) {
     return refreshComposeInputs(options);
   }
   var reuse = !!sameContext;
+  if (previous && !reuse) OperitComposeReactive.dispose(previous.ctx);
   var bundle = reuse ? previous : OperitComposeDslRuntime.createContext(options);
   bundle.composeSessionId = sessionId;
   if (reuse || options.__operit_update_inputs === true) {

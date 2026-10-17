@@ -86,12 +86,19 @@ export function createStorageHost(directory, attempted) {
           /** Executes one real SQL statement through the generic storage interface. */
           async execute(query, values = []) { attempted("storage.execute", [query, values]); const result = sql.prepare(query).run(...params(values)); return { affectedRows: result.changes, lastInsertId: String(result.lastInsertRowid) }; },
           /** Rolls back the entire SQL batch when a real SQLite constraint rejects a stale write. */
-          async transaction(statements) {
+          async transaction(statements, options = {}) {
             attempted("storage.transaction", [structuredClone(statements)]);
             if (transactionGate !== null && transactionGate.predicate(statements)) await transactionGate.promise;
             if (statements.length < 1 || statements.length > 1000) throw new Error("Storage transaction limit");
             sql.exec("BEGIN IMMEDIATE");
             try {
+              if (options.whenAbsent !== undefined) {
+                const { collection, key } = options.whenAbsent;
+                if (!/^[A-Za-z_][A-Za-z_0-9]*$/.test(collection)) throw new Error("Invalid transaction guard collection");
+                if (sql.prepare('SELECT 1 FROM "' + collection + '" WHERE "_key" = ?').get(key) !== undefined) {
+                  sql.exec("COMMIT"); return [];
+                }
+              }
               const receipts = statements.map(statement => { const result = sql.prepare(statement.sql).run(...params(statement.params)); if (statement.expectedAffectedRows !== undefined && result.changes !== statement.expectedAffectedRows) throw new Error("SQLite statement affected-row precondition failed"); return { affectedRows: result.changes, lastInsertId: String(result.lastInsertRowid) }; });
               sql.exec("COMMIT"); return receipts;
             } catch (error) { sql.exec("ROLLBACK"); throw error; }

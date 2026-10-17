@@ -301,6 +301,37 @@ impl ChatServiceCore {
             .clone()
     }
 
+    /// Clones the plugin execution host before releasing the borrowed chat core.
+    #[operit_route_macros::operit_core_internal]
+    pub fn toolPkgRouteHost(&self) -> AIToolHandler {
+        self.runtimeToolHandler()
+    }
+
+    /// Executes a decorated plugin method through the ordinary Binding route catalog.
+    #[operit_route_macros::operit_core_route(binding = bindingKey, permission = "target:runtime.execute")]
+    #[operit_route_macros::operit_core_internal]
+    pub async fn callToolPkgRoute(&self, bindingKey: String, packageName: String, methodName: String, arguments: Vec<serde_json::Value>) -> Result<serde_json::Value, String> {
+        operit_tools::tools::packTool::ToolPkgRouteRuntime::invoke(self.runtimeToolHandler(), packageName, serde_json::json!({ "op": "call", "bindingKey": bindingKey, "methodName": methodName, "arguments": arguments })).await
+    }
+
+    /// Returns a captured Core stream for a decorated plugin async generator.
+    #[operit_route_macros::operit_core_route(binding = bindingKey)]
+    #[operit_route_macros::operit_core_internal]
+    pub fn watchToolPkgRoute(&self, bindingKey: String, packageName: String, methodName: String, arguments: Vec<serde_json::Value>) -> Result<operit_link::CoreStream<serde_json::Value>, String> {
+        operit_tools::tools::packTool::ToolPkgRouteRuntime::requireSpacePackage(&packageName)?;
+        Ok(operit_tools::tools::packTool::ToolPkgRouteRuntime::stream(self.runtimeToolHandler(), packageName, bindingKey, methodName, arguments))
+    }
+
+    /// Consumes a typed ReverseStream in the decorated plugin's owning runtime.
+    #[operit_route_macros::operit_core_route(binding = bindingKey, permission = "target:runtime.execute")]
+    #[operit_route_macros::operit_core_internal]
+    pub async fn pushToolPkgRoute(&self, bindingKey: String, packageName: String, methodName: String, arguments: Vec<serde_json::Value>, inputIndex: usize, input: operit_util::stream::ReverseStream::ReverseStream<serde_json::Value>) -> Result<(), String> {
+        operit_tools::tools::packTool::ToolPkgRouteRuntime::consume(
+            self.runtimeToolHandler(), packageName,
+            serde_json::json!({ "op":"pushOpen", "bindingKey":bindingKey, "methodName":methodName, "arguments":arguments, "inputIndex":inputIndex }), input,
+        ).await
+    }
+
     /// Returns the persistent AI service instance owned by one chat id.
     fn newEnhancedAiServiceForChat(&self, chatId: &str) -> Option<EnhancedAIService> {
         let baseService = self.enhancedAiService.as_ref()?;

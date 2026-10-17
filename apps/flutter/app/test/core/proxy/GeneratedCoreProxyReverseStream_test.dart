@@ -373,6 +373,12 @@ class _GeneratedFlowCoreProxy extends CoreProxy {
   );
   var embeddedWatchOpenCount = 0;
 
+  /// Rejects offline rescue calls because this test only exercises watch streams.
+  @override
+  Future<Object?> dataRescue(Map<String, Object?> request) {
+    throw UnimplementedError();
+  }
+
   /// Rejects storage default reads because this test only exercises watch streams.
   @override
   Future<Map<Object?, Object?>> runtimeStorageDefaults() {
