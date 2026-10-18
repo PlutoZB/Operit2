@@ -45,6 +45,7 @@ Widget _surface(
   Map<String, Object?> tree,
   ScrollController controller, {
   String? error,
+  double height = 400,
   List<String>? actions,
   Future<Object?> Function(String, [Object?])? onAction,
 }) => MaterialApp(
@@ -52,7 +53,7 @@ Widget _surface(
     body: Center(
       child: SizedBox(
         width: 320,
-        height: 400,
+        height: height,
         child: CustomScrollView(
           controller: controller,
           slivers: [
@@ -94,6 +95,72 @@ int _mountedChats() => find
 /// Verifies viewport ownership, item virtualization, and independent modal lifetime.
 void main() {
   setUpAll(ClientLogger.initialize);
+
+  testWidgets(
+    'the sliver cache is not buffered twice before requesting more JS rows',
+    (tester) async {
+      final controller = ScrollController();
+      addTearDown(controller.dispose);
+      final ranges = <Map>[];
+      final tree = <String, Object?>{
+        'type': 'LazyColumn',
+        'props': {
+          'viewport': {
+            'firstIndex': 0,
+            'itemCount': 1000,
+            'itemExtent': 34,
+            'staticItemCount': 2,
+            'onRangeChanged': {'__actionId': 'range'},
+          },
+        },
+        'children': [
+          for (var index = 0; index < 2; index++)
+            {
+              'type': 'Text',
+              'props': {'text': 'Toolbar $index', 'height': 34},
+            },
+          for (var index = 0; index < 24; index++)
+            {
+              'type': 'Text',
+              'props': {'key': 'row-$index', 'text': 'Chat $index'},
+            },
+        ],
+      };
+      await tester.pumpWidget(
+        _surface(
+          tree,
+          controller,
+          height: 600,
+          onAction: (id, [payload]) async {
+            ranges.add(payload! as Map);
+            return null;
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        ranges,
+        isEmpty,
+        reason: 'The initial rows already cover the viewport and Flutter cache',
+      );
+      expect(find.text('Chat 13'), findsOneWidget);
+      controller.jumpTo(200);
+      await tester.pumpAndSettle();
+      expect(
+        ranges,
+        hasLength(1),
+        reason: 'Scrolling must still refill before the visible rows run out',
+      );
+      expect(ranges.single['lastIndex'], greaterThan(24));
+      expect(
+        ranges.single['lastIndex'],
+        lessThanOrEqualTo(32),
+        reason: 'The requested cache range needs only a small refill margin',
+      );
+      expect(find.text('Chat 18'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets(
     'expansion retains the static toolbar and rows during async work',

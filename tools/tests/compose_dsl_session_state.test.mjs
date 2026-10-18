@@ -88,6 +88,92 @@ const screen = `module.exports.default = function(ctx) {
   }, [ctx.UI.Text({ text: String(count) })]);
 };`;
 
+/** Leaves the entry opaque, as bundled plugins do when they delegate to a screen helper. */
+const opaqueAsyncScreen = `
+  function screen(ctx) {
+    globalThis.renderCount = (globalThis.renderCount || 0) + 1;
+    const [count, setCount] = ctx.useState('count', 0);
+    const ref = ctx.useRef('final-value', 'initial');
+    globalThis.publish = () => setCount(count + 1);
+    return ctx.UI.Column({
+      wait: async change => {
+        if (change) setCount(count + 1);
+        ref.current = 'pending';
+        await new Promise(resolve => { globalThis.release = resolve; });
+        ref.current = 'finished';
+      }
+    }, [ctx.UI.Text({ text: String(count) + ':' + ref.current })]);
+  }
+  module.exports.default = ctx => screen(ctx);
+`;
+
+/** Drains scheduled JS work while the controlled action stays blocked on its own gate. */
+async function drainComposeJobs() {
+  await new Promise(resolve => setImmediate(resolve));
+}
+
+test('eager and final evaluations preserve asynchronous progress in untracked refs', async () => {
+  const s = session(opaqueAsyncScreen);
+  s.render();
+  assert.equal(s.context.renderCount, 1);
+  const action = s.action('wait', false);
+  await drainComposeJobs();
+  assert.equal(s.context.renderCount, 2);
+  assert.ok(s.events.some(event => event.update.upserts.some(node => node.props.text === '0:pending')));
+  s.context.release();
+  const result = await action;
+  assert.equal(s.context.renderCount, 3);
+  assert.ok(result.update.upserts.some(node => node.props.text === '0:finished'));
+});
+
+test('state progress streams and a host render consumes queued state invalidations', async () => {
+  for (const consumeWithHostRender of [false, true]) {
+    const s = session(opaqueAsyncScreen);
+    s.render();
+    const action = s.action('wait', !consumeWithHostRender);
+    await drainComposeJobs();
+    assert.equal(s.context.renderCount, 2);
+    if (consumeWithHostRender) {
+      s.context.publish();
+      s.render();
+      await drainComposeJobs();
+    }
+    const expected = consumeWithHostRender ? 3 : 2;
+    assert.equal(s.context.renderCount, expected, 'consumed state invalidations must not force another root execution');
+    assert.ok(s.events.some(event => event.update.upserts.some(node => node.props.text === '1:pending')),
+      'pending asynchronous actions must still publish their actual state progress');
+    s.context.release();
+    const result = await action;
+    assert.equal(s.context.renderCount, expected + 1);
+    assert.ok(result.update.upserts.some(node => node.props.text === '1:finished'));
+  }
+});
+
+test('intermediate commits preserve direct node mutations before an asynchronous wait', async () => {
+  const s = session(`
+    function screen(ctx) {
+      globalThis.renderCount = (globalThis.renderCount || 0) + 1;
+      const node = ctx.useRef('node', null);
+      if (!node.current) node.current = ctx.UI.Text({ text: 'initial' });
+      return ctx.UI.Column({ wait: async () => {
+        node.current.props.text = 'pending';
+        await new Promise(resolve => { globalThis.release = resolve; });
+        node.current.props.text = 'finished';
+      } }, [node.current]);
+    }
+    module.exports.default = ctx => screen(ctx);
+  `);
+  s.render();
+  const action = s.action('wait');
+  await drainComposeJobs();
+  assert.equal(s.context.renderCount, 2);
+  assert.ok(s.events.some(event => event.update.upserts.some(node => node.props.text === 'pending')));
+  s.context.release();
+  const result = await action;
+  assert.equal(s.context.renderCount, 3);
+  assert.ok(result.update.upserts.some(node => node.props.text === 'finished'));
+});
+
 test('retained responses never read large state or memo, including intermediate events', async () => {
   const s = session(screen);
   noSnapshot(s.render({ state: { huge: 'x'.repeat(4 * 1024 * 1024) } }));
@@ -131,6 +217,46 @@ test('compiled state consumers observe explicit host input updates', () => {
   s.render();
   const response = s.render({ __operit_update_inputs: true, __operit_input_state: { label: 'host change' } });
   assert.ok(response.update.upserts.some(node => node.props.text === 'host change'));
+  noSnapshot(response);
+});
+
+test('host input updates automatically await the current root lifecycle in the same command', async () => {
+  const s = session(`module.exports.default = function(ctx) {
+    const [label] = ctx.useState('label', 'initial');
+    const [loaded, setLoaded] = ctx.useState('loaded', 'not loaded');
+    const calls = ctx.useRef('calls', []);
+    globalThis.inputCalls = calls.current;
+    return ctx.UI.Column({ onInputsChanged: async () => {
+      calls.current.push(label);
+      await Promise.resolve();
+      setLoaded('loaded ' + label);
+    } }, ctx.UI.Text({ text: loaded }));
+  };`);
+  s.render();
+  assert.equal(s.context.inputCalls.length, 0, 'Initial mounting belongs to onLoad');
+  const response = await s.render({ __operit_update_inputs: true, __operit_input_state: { label: 'new chat' } });
+  assert.deepEqual(Array.from(s.context.inputCalls), ['new chat']);
+  assert.ok(response.update.upserts.some(node => node.props.text === 'loaded new chat') ||
+    s.events.some(event => event.update?.upserts.some(node => node.props.text === 'loaded new chat')));
+  noSnapshot(response);
+  await s.render({ __operit_update_inputs: true, __operit_input_state: { label: 'second chat' } });
+  assert.deepEqual(Array.from(s.context.inputCalls), ['new chat', 'second chat']);
+});
+
+test('input lifecycle failures reject the input command and keep the live context usable', async () => {
+  const s = session(`module.exports.default = function(ctx) {
+    const [fail] = ctx.useState('fail', false);
+    const [count, setCount] = ctx.useState('count', 0);
+    return ctx.UI.Column({ onInputsChanged: async () => {
+      if (fail) throw Error('input refresh failed');
+      setCount(count + 1);
+    } }, ctx.UI.Text({ text: String(count) }));
+  };`);
+  s.render();
+  await assert.rejects(Promise.resolve().then(() => s.render({ __operit_update_inputs: true,
+    __operit_input_state: { fail: true } })), /input refresh failed/);
+  const response = await s.render({ __operit_update_inputs: true, __operit_input_state: { fail: false } });
+  assert.ok(s.events.some(event => event.update?.upserts.some(node => node.props.text === '1')));
   noSnapshot(response);
 });
 
@@ -249,7 +375,7 @@ test('WebView interface replacement keeps method IDs and releases removed method
   assert.throws(() => s.context.__operit_compose_bundle.invokeAction(initial.currentTheme.__actionId), /compose action not found/);
 });
 
-test('actual packaged character-card screen keeps currentTheme callable after HTML path refresh', async () => {
+test('actual packaged character-card screen keeps loadScreen callable after HTML path refresh', async () => {
   const source = readFileSync(new URL('../../plugins/packages/buildin/character_cards/dist/ui/main/index.ui.js', import.meta.url), 'utf8');
   const commands = [];
   const s = session(source);
@@ -259,17 +385,22 @@ test('actual packaged character-card screen keeps currentTheme callable after HT
   };
   s.context.ToolPkg = {
     /** Supplies a fixture resource path without reading personal application data. */
-    async readResource() { return '/fixture/character-memory.html'; }
+    async readResource() { return '/fixture/character-memory.html'; },
+    ipc: { async call(channel, request) {
+      assert.equal(channel, 'character-memory.request');
+      assert.equal(request.action, 'snapshot');
+      return { fixture: true };
+    } },
   };
   s.render({theme:{brightness:'dark', colors:{primary:'#ff102030'}}});
   await s.action('onLoad');
   assert.equal(s.context.__operit_compose_bundle.stateStore['character-memory-html'], '/fixture/character-memory.html');
   const methods = commands[0].payload.object;
   for (let index = 0; index < 5; index++) {
-    const response = await s.context.__operit_dispatch_compose_dsl_action({actionId:methods.currentTheme.__actionId});
-    assert.equal(response.actionResult.brightness, 'dark'); noSnapshot(response);
-    const screenResponse = await s.context.__operit_dispatch_compose_dsl_action({actionId:methods.currentScreen.__actionId, payload:[]});
-    assert.equal(screenResponse.actionResult.input.mode, 'manage');
+    const response = await s.context.__operit_dispatch_compose_dsl_action({actionId:methods.loadScreen.__actionId, payload:[]});
+    assert.equal(response.actionResult.theme.brightness, 'dark'); noSnapshot(response);
+    assert.equal(response.actionResult.screen.input.mode, 'manage');
+    assert.equal(response.actionResult.snapshot.fixture, true);
   }
 });
 
@@ -405,4 +536,105 @@ test('effects in removed composition branches release their subscriptions', asyn
   assert.deepEqual(Array.from(s.context.effectEvents), ['open', 'close']);
   await s.action('toggle');
   assert.deepEqual(Array.from(s.context.effectEvents), ['open', 'close', 'open']);
+});
+
+/** A pending action with no visual change should not wake every host transport stage. */
+test('unchanged async intermediates are suppressed while the final response remains contiguous', async () => {
+  const s = session(`
+    function screen(ctx) {
+      return ctx.UI.Button({ text: 'unchanged', wait: async () => {
+        await new Promise(resolve => { globalThis.release = resolve; });
+        return 'completed';
+      } });
+    }
+    module.exports.default = ctx => screen(ctx);
+  `);
+  const initial = s.render();
+  const action = s.action('wait');
+  await drainComposeJobs();
+  assert.equal(s.events.length, 1, 'no unchanged intermediate should be published');
+  s.context.release();
+  const final = await action;
+  assert.equal(final.actionResult, 'completed');
+  assert.equal(final.update.revision, initial.update.revision + 1);
+  assert.equal(s.events.length, 2);
+});
+
+/** A callback already finished in this turn needs one final evaluation, not an eager duplicate. */
+test('settled asynchronous actions coalesce eager and state work into their final render', async () => {
+  const s = session(`
+    function screen(ctx) {
+      globalThis.renderCount = (globalThis.renderCount || 0) + 1;
+      const [count, setCount] = ctx.useState('count', 0);
+      const ref = ctx.useRef('last', 'initial');
+      return ctx.UI.Button({ text: count + ':' + ref.current, edit: async () => {
+        setCount(count + 1);
+        ref.current = 'finished';
+        return 'completed';
+      } });
+    }
+    module.exports.default = ctx => screen(ctx);
+  `);
+  const initial = s.render();
+  const final = await s.action('edit');
+  assert.equal(s.context.renderCount, 2, 'initial and final should each evaluate once');
+  assert.equal(s.events.length, 2, 'a settled action has no pending state to stream');
+  assert.equal(final.update.upserts.find(node => node.id === final.update.rootId).props.text, '1:finished');
+  assert.equal(final.actionResult, 'completed');
+  assert.equal(final.update.revision, initial.update.revision + 1);
+});
+
+/** State written immediately after an await belongs to the completing action's final revision. */
+test('the final state change after an asynchronous wait is built once', async () => {
+  const s = session(`
+    function screen(ctx) {
+      globalThis.renderCount = (globalThis.renderCount || 0) + 1;
+      const [count, setCount] = ctx.useState('count', 0);
+      return ctx.UI.Button({ text: String(count), wait: async () => {
+        await new Promise(resolve => { globalThis.release = resolve; });
+        setCount(9);
+        return 'completed';
+      } });
+    }
+    module.exports.default = ctx => screen(ctx);
+  `);
+  s.render();
+  const action = s.action('wait');
+  await drainComposeJobs();
+  assert.equal(s.context.renderCount, 2, 'a pending action retains its eager evaluation');
+  assert.equal(s.events.length, 1, 'an unchanged eager tree needs no transport commit');
+  s.context.release();
+  const final = await action;
+  assert.equal(s.context.renderCount, 3, 'completion should build the changed state only once');
+  assert.equal(final.update.upserts.find(node => node.id === final.update.rootId).props.text, '9');
+  assert.equal(final.actionResult, 'completed');
+  assert.equal(s.events.length, 2);
+});
+
+test('same-session useMemo keeps stable dependency references out of JSON serialization', () => {
+  const s = session(`module.exports.default = function(ctx) {
+    const dep = ctx.useRef('large-dependency', { value: 1 });
+    globalThis.memoRuns = globalThis.memoRuns || 0;
+    const memo = ctx.useMemo('identity-fast-path', () => ({ run: ++globalThis.memoRuns }), [dep.current]);
+    globalThis.memoProbe = { dep, memo };
+    return ctx.UI.Text({ text: String(memo.run) });
+  };`);
+  s.render();
+  assert.equal(s.context.memoRuns, 1);
+  vm.runInContext(`
+    globalThis.stringifyCalls = 0;
+    globalThis.originalStringify = JSON.stringify;
+    JSON.stringify = function(value) {
+      globalThis.stringifyCalls += 1;
+      return globalThis.originalStringify.call(this, value);
+    };
+  `, s.context);
+  s.render();
+  assert.equal(s.context.stringifyCalls, 0);
+  assert.equal(s.context.memoRuns, 1);
+
+  s.context.memoProbe.dep.current = { value: 2 };
+  s.render();
+  assert.equal(s.context.stringifyCalls, 1);
+  assert.equal(s.context.memoRuns, 2);
 });

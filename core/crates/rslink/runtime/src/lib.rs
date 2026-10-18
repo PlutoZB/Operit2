@@ -53,7 +53,7 @@ impl CoreStreamPool {
         }
         let mut args = object_args(request.args.clone())?;
         let streamId: String = decode_core_arg(&mut args, "streamId")?;
-        AppLogger::i(
+        AppLogger::trace(
             "CoreRouteStream",
             &format!(
                 "pool.open requestId={} property={} streamId={}",
@@ -76,7 +76,7 @@ impl CoreStreamPool {
                 );
                 CoreLinkError::watchNotFound(&request.registryKey())
             })?;
-        AppLogger::i(
+        AppLogger::trace(
             "CoreRouteStream",
             &format!(
                 "pool.source.found requestId={} property={} streamId={}",
@@ -94,13 +94,13 @@ impl CoreStreamPool {
             .expect("core stream pool mutex poisoned");
         if let Some(existing) = sources.get(&attachment.streamId) {
             if !Arc::ptr_eq(existing, &attachment.source) {
-                AppLogger::i(
+                AppLogger::trace(
                     "CoreRouteStream",
                     &format!("pool.adopt.duplicate streamId={}", attachment.streamId),
                 );
             }
         } else {
-            AppLogger::i(
+            AppLogger::trace(
                 "CoreRouteStream",
                 &format!("pool.adopt.insert streamId={}", attachment.streamId),
             );
@@ -500,7 +500,7 @@ async fn core_state_flow_from_stream_with_decoder<T>(
 where
     T: Clone + PartialEq + Send + 'static,
 {
-    AppLogger::i("CoreRouteStream", "state_flow.wait_snapshot");
+    AppLogger::trace("CoreRouteStream", "state_flow.wait_snapshot");
     let first = match stream.recv().await {
         Some(first) => first,
         None => {
@@ -511,7 +511,7 @@ where
             ));
         }
     };
-    AppLogger::i(
+    AppLogger::trace(
         "CoreRouteStream",
         &format!(
             "state_flow.initial_event requestId={} target={} property={} kind={:?} value={} summary={}",
@@ -527,7 +527,7 @@ where
             core_value_trace_summary(&first.value)
         ),
     );
-    AppLogger::d(
+    AppLogger::trace(
         "CoreRouteStream",
         &format!(
             "state_flow.first requestId={} target={} property={} kind={:?} value={} summary={}",
@@ -724,7 +724,7 @@ pub async fn core_route_state_flow<T>(
 where
     T: DeserializeOwned + Clone + PartialEq + Send + 'static,
 {
-    AppLogger::i(
+    AppLogger::trace(
         "CoreRouteStream",
         &format!("wrapper.watch method={}", method_name),
     );
@@ -734,7 +734,7 @@ where
         args.clone(),
     );
     let request = core_route_watch_request(method_name, args);
-    AppLogger::i(
+    AppLogger::trace(
         "CoreRouteStream",
         &format!(
             "wrapper.watch.open requestId={} method={}",
@@ -744,14 +744,14 @@ where
     let requestId = request.requestId.0.clone();
     let stream = match runtime.watch(request).await {
         Ok(stream) => {
-            AppLogger::i(
+            AppLogger::trace(
                 "CoreRouteStream",
                 &format!(
                     "wrapper.watch.stream_opened requestId={} method={}",
                     requestId, method_name
                 ),
             );
-            AppLogger::i(
+            AppLogger::trace(
                 "CoreRouteStream",
                 &format!(
                     "wrapper.watch.wait_snapshot requestId={} method={}",
@@ -784,7 +784,7 @@ pub async fn core_route_state_flow_with_local_source<T>(
 where
     T: Serialize + DeserializeOwned + Clone + PartialEq + Send + 'static,
 {
-    AppLogger::d(
+    AppLogger::trace(
         "CoreRouteStream",
         &format!("wrapper.watch.local_source method={}", method_name),
     );
@@ -803,7 +803,7 @@ where
         args,
         sources,
     );
-    AppLogger::d(
+    AppLogger::trace(
         "CoreRouteStream",
         &format!(
             "wrapper.watch.local_source.open requestId={} method={}",
@@ -865,7 +865,7 @@ fn adopt_core_stream_attachments(
     attachments: Vec<CoreStreamAttachment>,
 ) {
     if !attachments.is_empty() {
-        AppLogger::i(
+        AppLogger::trace(
             "CoreRouteStream",
             &format!("route.attachments.adopt count={}", attachments.len()),
         );
@@ -880,7 +880,7 @@ fn adopt_core_stream_attachments(
             } else {
                 "duplicate"
             };
-            AppLogger::i(
+            AppLogger::trace(
                 "CoreRouteStream",
                 &format!(
                     "route.attachments.{relation} streamId={}",
@@ -888,7 +888,7 @@ fn adopt_core_stream_attachments(
                 ),
             );
         } else {
-            AppLogger::i(
+            AppLogger::trace(
                 "CoreRouteStream",
                 &format!("route.attachments.insert streamId={}", attachment.streamId),
             );
@@ -908,7 +908,7 @@ fn routed_core_stream_source_for_descriptor(
     if descriptor.target != CORE_STREAM_TARGET
         || descriptor.propertyName != "openCoreStream"
     {
-        AppLogger::i(
+        AppLogger::trace(
             "CoreRouteStream",
             &format!(
                 "route.descriptor.skip streamId={} target={} property={}",
@@ -921,7 +921,7 @@ fn routed_core_stream_source_for_descriptor(
         .lock()
         .expect("routed core stream source registry mutex poisoned");
     if let Some(source) = sources.get(&descriptor.streamId) {
-        AppLogger::i(
+        AppLogger::trace(
             "CoreRouteStream",
             &format!(
                 "route.descriptor.existing streamId={} sourceMethod={}",
@@ -930,7 +930,7 @@ fn routed_core_stream_source_for_descriptor(
         );
         return Some(source.clone());
     }
-    AppLogger::i(
+    AppLogger::trace(
         "CoreRouteStream",
         &format!(
             "route.descriptor.create streamId={} sourceMethod={}",
@@ -957,7 +957,7 @@ fn core_route_embedded_stream_source(
     CoreStreamSource::new(move |open_request| {
         let mut routed_open_request = open_request;
         let streamId = core_stream_id_argument(&routed_open_request.args);
-        AppLogger::i(
+        AppLogger::trace(
             "CoreRouteStream",
             &format!(
                 "embedded.open.prepare requestId={} streamId={} sourceMode={} sourceMethod={} property={}",
@@ -990,7 +990,7 @@ fn core_route_embedded_stream_source(
                                 let property_name = routed_open_request.propertyName.clone();
                                 let stream_id = core_stream_id_argument(&routed_open_request.args)
                                     .unwrap_or_else(|| "<missing>".to_string());
-                                AppLogger::i(
+                                AppLogger::trace(
                                     "CoreRouteStream",
                                     &format!(
                                         "embedded.watch.start requestId={} streamId={} property={}",
@@ -1000,7 +1000,7 @@ fn core_route_embedded_stream_source(
                                 match runtime.watch(routed_open_request).await {
                                     Ok(mut stream) => {
                                         let mut event_count = 0_u64;
-                                        AppLogger::i(
+                                        AppLogger::trace(
                                             "CoreRouteStream",
                                             &format!(
                                                 "embedded.watch.opened requestId={} streamId={} property={}",
@@ -1010,7 +1010,7 @@ fn core_route_embedded_stream_source(
                                         while let Some(event) = stream.recv().await {
                                             event_count += 1;
                                             if event_count == 1 {
-                                                AppLogger::i(
+                                                AppLogger::trace(
                                                     "CoreRouteStream",
                                                     &format!(
                                                         "embedded.watch.first_event requestId={} streamId={} kind={:?}",
@@ -1034,7 +1034,7 @@ fn core_route_embedded_stream_source(
                                                 VERBOSE_LEVEL_6,
                                             );
                                             if sender.send(event).is_err() {
-                                                AppLogger::i(
+                                                AppLogger::trace(
                                                     "CoreRouteStream",
                                                     &format!(
                                                         "embedded.watch.receiver_closed requestId={} streamId={}",
@@ -1044,7 +1044,7 @@ fn core_route_embedded_stream_source(
                                                 break;
                                             }
                                             if completed {
-                                                AppLogger::i(
+                                                AppLogger::trace(
                                                     "CoreRouteStream",
                                                     &format!(
                                                         "embedded.watch.completed requestId={} streamId={} events={}",

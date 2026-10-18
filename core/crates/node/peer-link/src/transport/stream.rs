@@ -232,7 +232,7 @@ impl PeerConnection for FramedPeerConnection {
     async fn send(&self, message: PeerMessage) -> Result<(), String> {
         let mut payload = encodeLink(message).map_err(|e| e.to_string())?;
         if payload.is_empty() || payload.len() > self.maxMessageBytes {
-            return Err("peer message exceeds limit".into());
+            return Err(crate::MESSAGE_TOO_LARGE_ERROR.into());
         }
         let _guard = self.writeLock.lock().await;
         if self.closeRequested.load(Ordering::Acquire) || self.remoteClosed.load(Ordering::Acquire) {

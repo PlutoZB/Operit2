@@ -46,7 +46,9 @@ use super::CharacterPluginLegacyData::{CharacterGroupCard, GroupMemberConfig};
 use super::CharacterPluginLegacyData::{PromptTag, TagType};
 use crate::data::preferences::FunctionalConfigManager::FunctionalConfigManager;
 use crate::data::preferences::ModelConfigManager::ModelConfigManager;
-use crate::data::preferences::TtsConfigManager::TtsConfigManager;
+use crate::data::preferences::TtsConfigManager::{
+    normalizeConfig as normalizeTtsConfig, TtsConfigManager,
+};
 use operit_model::ApiKeyInfo::{ApiKeyAvailabilityStatus, ApiKeyInfo};
 use operit_model::ChatMessage::ChatMessage;
 use operit_model::ChatMessageDisplayMode::ChatMessageDisplayMode;
@@ -64,6 +66,7 @@ use operit_model::OperitChatArchive::{
     ARCHIVE_TYPE, CURRENT_FORMAT_VERSION,
 };
 use operit_model::StandardModelParameters::StandardModelParameters;
+use operit_model::TtsCatalog::TtsCatalog;
 use operit_model::TtsConfig::{
     TtsConfig, TtsHttpHeader, TtsHttpResponsePipelineStep, TtsProviderType,
 };
@@ -223,7 +226,7 @@ pub fn observeOperit1SnapshotImportProgress() -> StateFlow<Operit1SnapshotImport
 
 /// Publishes Operit1 snapshot import progress.
 pub fn publishOperit1SnapshotImportProgress(progress: Operit1SnapshotImportProgress) {
-    AppLogger::i(
+    AppLogger::trace_detail(
         "Operit1SnapshotImport",
         &format!(
             "stage={} progress={:.0}% active={} title={} detail={}",

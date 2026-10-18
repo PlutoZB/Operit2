@@ -133,7 +133,7 @@ export async function searchMemorySpaceDebug(space: MemorySpace, options: Memory
   }
   scores.sort(
     /** Orders actual ranked hits with a stable lossless identity tie breaker. */
-    (left, right) => right.score - left.score || (BigInt(left.memory.id) < BigInt(right.memory.id) ? -1 : BigInt(left.memory.id) > BigInt(right.memory.id) ? 1 : 0),
+    (left, right) => right.score - left.score || (left.memory.id < right.memory.id ? -1 : left.memory.id > right.memory.id ? 1 : 0),
   );
   result.candidates = scores; return result;
 }

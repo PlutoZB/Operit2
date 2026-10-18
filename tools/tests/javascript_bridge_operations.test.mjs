@@ -72,6 +72,8 @@ function runtime(operations = {}) {
   }
   context.__operitNativeCancelJavaScriptPromises = registry.syncBinding(builtins.__operitNativeCancelJavaScriptPromises);
   context.__operitNativeScheduleJavaScriptTimer = registry.binding((id, delay) => timers.set(id, delay));
+  vm.runInContext(`globalThis.__operitNativeCompileModuleFactory = body =>
+    new Function('module', 'exports', 'require', '__operit_call_runtime', body);`, context);
   vm.runInContext(productionBootstrap(), context, { filename: 'production-bootstrap.js' });
   /** Opens a real execution session for direct public library calls. */
   function openCall(id = 'owner') {
@@ -171,11 +173,18 @@ test('ToolPkg resources and WASM pass owned arrays and never treat failures as p
   assert.equal(context.__operitGetCallState('owner').pendingReferences, 0);
 });
 
+/** Registers exact source before entering the production source-ID execution API. */
+function executeScript(context, id, params, script, ...options) {
+  const sourceId = createHash('sha256').update(script).digest('hex');
+  context.__operitRegisterScriptSource(sourceId, script);
+  return context.__operitExecuteScriptFunction(id, params, sourceId, ...options);
+}
+
 /** Runs an actual script through the bootstrap lifecycle and receives its final result as structured data. */
 test('script completion uses structured host values with JSON text disabled', async () => {
   const { context, outputs, failures } = runtime();
   vm.runInContext('JSON.parse = JSON.stringify = function() { throw Error("JSON transport used"); };', context);
-  context.__operitExecuteScriptFunction('script-owner', {__operit_toolpkg_api_version: '2.0.0'},
+  executeScript(context, 'script-owner', {__operit_toolpkg_api_version: '2.0.0'},
     'exports.run = function() { return { literal: "{\\\"data\\\":1}", nested: {value: 7} }; };', 'run', 60, 10000);
   await flush();
   assert.equal(failures.size, 0);
@@ -187,7 +196,7 @@ test('script completion uses structured host values with JSON text disabled', as
 /** Checks result conversion failures cannot mark a session completed before reporting the error. */
 test('cyclic script results fail explicitly rather than producing replacement data', async () => {
   const { context, outputs, failures } = runtime();
-  context.__operitExecuteScriptFunction('cycle-owner', {__operit_toolpkg_api_version: '2.0.0'},
+  executeScript(context, 'cycle-owner', {__operit_toolpkg_api_version: '2.0.0'},
     'exports.run = function() { var value = {}; value.self = value; return value; };', 'run', 60, 10000);
   await flush();
   assert.equal(outputs.size, 0);
@@ -326,7 +335,7 @@ test('module reads preserve empty source and propagate the original resource-own
       return resources.has(path) ? resources.get(path) : null;
     },
   });
-  successful.context.__operitExecuteScriptFunction('modules', {
+  executeScript(successful.context, 'modules', {
     __operit_toolpkg_api_version:'2.0.0', toolPkgId:'fixture', __operit_ui_package_name:'fixture',
     __operit_script_screen:'dist/main.js',
   }, 'var empty = require("./empty"); var shared = require("./shared"); exports.run = function() { return {empty:empty.missing===undefined, label:shared.label}; };', 'run', 60, 10000);
@@ -338,7 +347,7 @@ test('module reads preserve empty source and propagate the original resource-own
     /** Rejects the real owner failure instead of reporting an absent module or empty source. */
     __operitNativeReadToolPkgTextResource() { throw new Error('resource owner read denied'); },
   });
-  failed.context.__operitExecuteScriptFunction('failed-modules', {
+  executeScript(failed.context, 'failed-modules', {
     __operit_toolpkg_api_version:'2.0.0', toolPkgId:'fixture', __operit_ui_package_name:'fixture',
     __operit_script_screen:'dist/main.js',
   }, 'var shared = require("./shared"); exports.run = function() { return shared; };', 'run', 60, 10000);

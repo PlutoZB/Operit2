@@ -11,28 +11,19 @@ use super::TtsConfigManager::TtsConfigManager;
 pub(crate) fn schema(
     storage: std::sync::Arc<dyn operit_host_api::RuntimeStorageHost>,
 ) -> Result<PreferenceMergeSchema, String> {
-    let model = ModelConfigManager::spaceMergeCatalog();
-    let tts = TtsConfigManager::spaceMergeCatalog();
-    let stt = SttConfigManager::spaceMergeCatalog();
-    let theme = ThemeConfigManager::spaceMergeCatalog();
-    let functional = FunctionalConfigManager::spaceMergeReference();
+    let model = ModelConfigManager::spaceMergeStore();
+    let tts = TtsConfigManager::spaceMergeStore();
+    let stt = SttConfigManager::spaceMergeStore();
+    let theme = ThemeConfigManager::spaceMergeStore();
+    let functional = FunctionalConfigManager::spaceMergeStore();
     for store in [
-        ModelConfigManager::preferenceStore(storage.clone(), model.store.path),
-        TtsConfigManager::preferenceStore(storage.clone(), tts.store.path),
-        SttConfigManager::preferenceStore(storage.clone(), stt.store.path),
+        ModelConfigManager::preferenceStore(storage.clone(), model.path.clone()),
+        TtsConfigManager::preferenceStore(storage.clone(), tts.path.clone()),
+        SttConfigManager::preferenceStore(storage.clone(), stt.path.clone()),
         super::UserPreferencesManager::UserPreferencesManager::store(storage.clone()),
-        FunctionalConfigManager::preferenceStore(storage, functional.store.path),
+        FunctionalConfigManager::preferenceStore(storage, functional.path.clone()),
     ] {
         store.data().map_err(|error| error.to_string())?;
     }
-    Ok(PreferenceMergeSchema {
-        catalogs: vec![model, tts, stt, theme],
-        projections: vec![ThemeConfigManager::spaceMergeProjection()],
-        references: vec![
-            ThemeConfigManager::spaceMergeReference(),
-            TtsConfigManager::spaceMergeReference(),
-            SttConfigManager::spaceMergeReference(),
-            functional,
-        ],
-    })
+    Ok(PreferenceMergeSchema { stores: vec![model, tts, stt, theme, functional] })
 }

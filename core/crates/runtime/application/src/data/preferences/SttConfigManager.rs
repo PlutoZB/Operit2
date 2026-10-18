@@ -1,7 +1,6 @@
 #![allow(non_snake_case)]
-use operit_store::PreferenceMerge::{
-    PreferenceMergeCatalog, PreferenceMergeReference, PreferenceMergeStore,
-};
+use operit_host_api::PluginStorage::{StoragePreferencesMergeCatalog, StoragePreferencesMergeDescriptor, StoragePreferencesMergeKey, StoragePreferencesMergeReference};
+use operit_store::PreferenceMerge::PreferenceMergeStore;
 
 use operit_host_api::TimeUtils::currentTimeMillis;
 use operit_local_models::LocalEngineManifest::LocalPlatformTarget;
@@ -34,30 +33,29 @@ impl SttConfigManager {
             .withSchema(Self::PREFERENCES_VERSION, Self::migratePreferences)
     }
 
-    /// Declares this owner's entity identity, name and content metadata for Core merging.
-    pub(crate) fn spaceMergeCatalog() -> PreferenceMergeCatalog {
-        PreferenceMergeCatalog {
-            store: PreferenceMergeStore {
-                path: operit_util::RuntimeStorageLayout::STT_CONFIGS_PREFERENCES_PATH,
-                encrypted: true,
+    /// Declares this owner's catalog and references using the shared merge contract.
+    pub(crate) fn spaceMergeStore() -> PreferenceMergeStore {
+        let path = operit_util::RuntimeStorageLayout::STT_CONFIGS_PREFERENCES_PATH;
+        PreferenceMergeStore {
+            path: path.to_string(),
+            encrypted: true,
+            merge: StoragePreferencesMergeDescriptor {
+                version: 1,
+                catalog: Some(StoragePreferencesMergeCatalog {
+                    key_prefix: "stt_config_".to_string(),
+                    key_suffix: "_json".to_string(),
+                    identity_field: "id".to_string(),
+                    name_field: "name".to_string(),
+                    ignored_fields: vec!["createdAt".to_string(), "updatedAt".to_string()],
+                    retired_keys: vec!["stt_config_list".to_string()],
+                }),
+                references: vec![StoragePreferencesMergeReference {
+                    key: StoragePreferencesMergeKey::Exact { key: "current_stt_config_id".to_string() },
+                    path: vec![],
+                    target: path.to_string(),
+                }],
+                projection: None,
             },
-            keyPrefix: "stt_config_",
-            keySuffix: "_json",
-            identityField: "id",
-            nameField: "name",
-            ignoredFields: &["createdAt", "updatedAt"],
-            retiredKeys: &["stt_config_list"],
-        }
-    }
-
-    /// Declares the current selection as a scalar reference into this owner's catalog.
-    pub(crate) fn spaceMergeReference() -> PreferenceMergeReference {
-        let catalog = Self::spaceMergeCatalog();
-        PreferenceMergeReference {
-            store: catalog.store,
-            key: "current_stt_config_id",
-            path: &[],
-            target: catalog.store.path,
         }
     }
 

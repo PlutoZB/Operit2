@@ -28,6 +28,7 @@ pub mod NetworkUtils;
 pub mod OCRUtils;
 pub mod OperitPaths;
 pub mod PortProcessKiller;
+pub mod PluginStoragePaths;
 #[path = "RuntimeStorageLayout.rs"]
 pub mod RuntimeStorageLayout;
 #[path = "RuntimeStoreRoot.rs"]

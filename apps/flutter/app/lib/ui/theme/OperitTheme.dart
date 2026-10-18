@@ -14,6 +14,7 @@ import '../../core/runtime/RuntimeBootstrapManager.dart';
 import '../../data/preferences/UserPreferencesManager.dart';
 import '../../l10n/generated/app_localizations.dart';
 import '../common/AppToastHost.dart';
+import '../common/MacNoticeScaffoldMessenger.dart';
 import '../common/RuntimeBootstrapScreen.dart';
 import '../common/layout/ApplicationZoom.dart';
 import '../common/layout/ApplicationZoomPreferences.dart';
@@ -399,25 +400,25 @@ class _OperitMaterialApp extends StatelessWidget {
           zoom: zoom,
           shortcutsEnabled: zoomShortcutsEnabled,
           onZoomChanged: onZoomChanged,
-          child: appContent,
+          child: AppToastHost(
+            child: MacNoticeScaffoldMessenger(child: appContent),
+          ),
         );
       },
       home: UnhandledErrorHost(
         child: RuntimeBrowserOwnerHost(
           enabled: hostInteractionHostsEnabled,
           child: WorkspaceWebVisitHost(
-            child: AppToastHost(
-              child: Stack(
-                fit: StackFit.expand,
-                children: <Widget>[
-                  Positioned.fill(child: child),
-                  const TtsFloatingPanel(),
-                  PluginLoadingOverlay(
-                    key: const ValueKey<String>('plugin-loading-overlay'),
-                    enabled: hostInteractionHostsEnabled,
-                  ),
-                ],
-              ),
+            child: Stack(
+              fit: StackFit.expand,
+              children: <Widget>[
+                Positioned.fill(child: child),
+                const TtsFloatingPanel(),
+                PluginLoadingOverlay(
+                  key: const ValueKey<String>('plugin-loading-overlay'),
+                  enabled: hostInteractionHostsEnabled,
+                ),
+              ],
             ),
           ),
         ),

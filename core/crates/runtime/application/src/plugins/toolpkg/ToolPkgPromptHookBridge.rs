@@ -245,7 +245,7 @@ impl ToolPromptComposeHook for ToolPromptComposeBridge {
             let manager = RuntimePackageManager::readySnapshot(
                 self.runtime.tool_handler().getOrCreatePackageManager(),
             ).await?;
-            ToolPkgToolLifecycleBridge::validateExecutionSnapshot(&manager, executionContext.as_ref())?;
+            ToolPkgToolLifecycleBridge::validateExecutionContext(&manager, executionContext.as_ref())?;
             let budget = ToolPkgPreHookTimeout::fromPreferences();
             let mut current = context.clone();
             let mut combined = PromptHookMutation::default();
@@ -367,7 +367,7 @@ async fn dispatch_prompt_hooks(
             );
             break;
         };
-        ChainLogger::info(
+        ChainLogger::verbose_with_level(
             PLUGIN_CHAIN,
             "plugin.toolpkg.prompt.run.start",
             &[
@@ -377,6 +377,7 @@ async fn dispatch_prompt_hooks(
                 ("hookId", hook.hookId.clone()),
                 ("function", hook.functionName.clone()),
             ],
+            operit_util::AppLogger::VERBOSE_LEVEL_3,
         );
         let raw = package_manager
             .runToolPkgMainHookWithTimeoutMillis(
@@ -441,7 +442,7 @@ async fn dispatch_prompt_hooks(
             apply_prompt_mutation(&mut current, next_mutation.clone());
             merge_prompt_mutation(&mut mutation, next_mutation);
             changed = true;
-            ChainLogger::info(
+            ChainLogger::verbose_with_level(
                 PLUGIN_CHAIN,
                 "plugin.toolpkg.prompt.run.changed",
                 &[
@@ -450,9 +451,10 @@ async fn dispatch_prompt_hooks(
                     ("package", hook.containerPackageName.clone()),
                     ("hookId", hook.hookId.clone()),
                 ],
+                operit_util::AppLogger::VERBOSE_LEVEL_3,
             );
         } else {
-            ChainLogger::info(
+            ChainLogger::verbose_with_level(
                 PLUGIN_CHAIN,
                 "plugin.toolpkg.prompt.run.done",
                 &[
@@ -462,6 +464,7 @@ async fn dispatch_prompt_hooks(
                     ("hookId", hook.hookId.clone()),
                     ("changed", ChainLogger::boolField(false)),
                 ],
+                operit_util::AppLogger::VERBOSE_LEVEL_3,
             );
         }
     }

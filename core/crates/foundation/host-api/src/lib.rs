@@ -10,7 +10,9 @@ pub mod Tcp;
 pub mod TerminalWorkingDirectory;
 pub mod TimeUtils;
 pub mod JavaScriptBootstrap;
+pub mod JavaScriptCodeCache;
 pub use JavaScriptBootstrap::HostJavaScriptBootstrap;
+pub use JavaScriptCodeCache::HostJavaScriptCodeCache;
 pub use Tcp::{TcpConnection, TcpHost, TcpListener};
 pub mod SerialPort;
 pub use SerialPort::{SerialPortConnection, SerialPortHost};
@@ -2008,6 +2010,14 @@ pub trait HostJavaScriptRuntime {
     /// Executes shared trusted bootstrap bytecode in this runtime's independent global scope.
     fn evaluateHostJavaScriptBootstrap(&mut self, source: &'static str) -> HostResult<()>;
 
+    /// Installs a Function-constructor equivalent with fixed parameter names.
+    /// Hosts may reuse compiled bytes; every invocation creates a function in this runtime only.
+    fn registerHostJavaScriptFunctionConstructor(
+        &mut self,
+        name: &str,
+        parameters: &[&str],
+    ) -> HostResult<()>;
+
     /// Evaluates one script without reading its return value.
     fn evaluateHostJavaScriptVoid(&mut self, scriptName: &str, script: &str) -> HostResult<()>;
 
@@ -2039,10 +2049,12 @@ pub trait HostJavaScriptRuntime {
     ) -> HostResult<()>;
 
     /// Settles a Promise on its owning executor exactly once; cancelled ids are ignored.
+    /// Transfers ownership of the result so the host can reuse its allocations after
+    /// fully materializing the JavaScript value without cloning the Rust tree.
     fn settleHostJavaScriptPromise(
         &mut self,
         id: u64,
-        value: &Value,
+        value: Value,
         reject: bool,
     ) -> HostResult<()>;
 
@@ -2177,6 +2189,14 @@ pub trait HostJavaScriptRuntimeHost: Send + Sync {
         timeoutMillis: u64,
         task: HostJavaScriptRuntimeStateTask,
     ) -> HostResult<HostJavaScriptRuntimeStateOutput>;
+
+    /// Enqueues a finite synchronous continuation directly on its owner without waiting for completion.
+    fn enqueueHostJavaScriptRuntimeStateTask(
+        &self,
+        handle: HostJavaScriptRuntimeStateHandle,
+        timeoutMillis: u64,
+        task: HostJavaScriptRuntimeStateTask,
+    ) -> HostResult<()>;
 
     /// Executes one asynchronous operation against an affine JavaScript runtime state.
     fn executeHostJavaScriptRuntimeStateAsyncTask(

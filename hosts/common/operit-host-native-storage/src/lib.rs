@@ -823,6 +823,7 @@ impl RuntimeSqliteTransaction for RusqliteRuntimeTransaction<'_> {
     }
 }
 
+/// Reuses a connection-owned prepared query while keeping each row result owned.
 fn queryRowsConnection(
     connection: &rusqlite::Connection,
     sql: &str,
@@ -830,11 +831,12 @@ fn queryRowsConnection(
 ) -> HostResult<Vec<SqliteRow>> {
     let params = params.into_iter().map(toRusqliteValue).collect::<Vec<_>>();
     let mut statement = connection
-        .prepare(sql)
+        .prepare_cached(sql)
         .map_err(|error| HostError::new(error.to_string()))?;
     collectRows(&mut statement, params)
 }
 
+/// Reuses a prepared query within the exact active transaction.
 fn queryRowsTransaction(
     transaction: &rusqlite::Transaction<'_>,
     sql: &str,
@@ -842,7 +844,7 @@ fn queryRowsTransaction(
 ) -> HostResult<Vec<SqliteRow>> {
     let params = params.into_iter().map(toRusqliteValue).collect::<Vec<_>>();
     let mut statement = transaction
-        .prepare(sql)
+        .prepare_cached(sql)
         .map_err(|error| HostError::new(error.to_string()))?;
     collectRows(&mut statement, params)
 }

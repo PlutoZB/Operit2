@@ -23,7 +23,6 @@ export interface Card {
   sharedMemoryId: string | null;
   sharedMemoryMounts: SharedMemoryMount[];
   toolAccessConfig: ToolAccessConfig;
-  isDefault: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -161,7 +160,7 @@ export interface Memory {
   tags: { id: string; name: string }[];
   properties: { id: string; key: string; value: string }[];
 }
-/** Preserves the complete DocumentChunk serde record, including its lossless SQLite identity. */
+/** Preserves a complete document chunk with a plugin-owned UUID identity. */
 export interface DocumentChunk { id: string; memoryUuid: string; chunkIndex: number; content: string }
 /** Persists one exact owner-scoped message revision candidate and its durable execution metadata. */
 export interface MemoryCandidate {
@@ -257,6 +256,7 @@ export type Request =
   | { action: "deleteCharacter"; id: string }
   | { action: "activate"; type: "card" | "group"; id: string }
   | { action: "readActive" }
+  | { action: "listBindableChats" }
   | { action: "readChatBinding"; chatId: string }
   | { action: "writeChatBinding"; chatId: string; selection: string }
   | { action: "deleteChatBinding"; chatId: string }
@@ -335,7 +335,7 @@ export interface MemoryJobWindow { chatId: string; chatTitle: string; messages: 
 /** Persists the private rebuild cursor in the same authoritative owner snapshot. */
 export interface MemoryRebuildTask { id: string; windows: MemoryJobWindow[]; nextWindow: number }
 /** Stores a real provider embedding, keyed by exact configured source and input text. */
-export interface MemoryEmbedding { endpoint: string; model: string; text: string; vector: number[]; updatedAt: number }
+export interface MemoryEmbedding { id: string; endpoint: string; model: string; text: string; vector: number[]; updatedAt: number }
 /** Reports actual committed domain operations for a manual or background extraction. */
 export interface MemoryExtractionResult { ownerKey: string; created: number; updated: number; merged: number; links: number; profileUpdated: boolean }
 
@@ -393,9 +393,8 @@ export interface MemorySpace {
 }
 /** Owns the file schema for this plugin only; no runtime-wide storage schema is imposed. */
 export interface CharacterState {
-  version: 3;
+  version: 1;
   memoryPreferences: GlobalMemoryPreferences;
-  nextId: string;
   cards: Card[];
   groups: Group[];
   tags: Tag[];
@@ -421,6 +420,12 @@ export interface CharacterDirectories {
 /** Projects an explicit record-extension selection; this DTO is never stored in plugin files. */
 export interface ChatBinding { chatId: string; selection: string }
 
+/** Supplies history and its explicit nullable role binding to the batch picker. */
+export interface BindableChat {
+  id: string; title: string; updatedAt: string; messageCount: number;
+  isCurrent: boolean; selection: string | null;
+}
+
 /** Stages an owner document edit for the same serialized service operation. */
 export interface UserDocumentWrite { ownerKey: string; path: string; content: string; newDocument: boolean }
 
@@ -440,6 +445,7 @@ export interface RequestResults {
   deleteCharacter: Snapshot;
   activate: Snapshot;
   readActive: ActivePrompt;
+  listBindableChats: BindableChat[];
   readChatBinding: import("./api").ChatBindingRecord;
   writeChatBinding: import("./api").ChatBindingRecord;
   deleteChatBinding: { chatId: string; deleted: boolean; };

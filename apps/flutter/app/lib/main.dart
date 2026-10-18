@@ -55,45 +55,52 @@ void main(List<String> arguments) async {
       final bindingElapsedMs = bindingStopwatch.elapsedMilliseconds;
       final loggerStopwatch = Stopwatch()..start();
       await ClientLogger.initialize();
-      ClientLogger.i(
+      ClientLogger.v(
         'widgets binding initialized elapsedMs=$bindingElapsedMs',
         tag: _appStartupLogTag,
+        verboseLevel: VerboseLevel.level1,
       );
-      ClientLogger.i(
+      ClientLogger.v(
         'client logger initialized elapsedMs=${loggerStopwatch.elapsedMilliseconds}',
         tag: _appStartupLogTag,
+        verboseLevel: VerboseLevel.level1,
       );
       final hooksStopwatch = Stopwatch()..start();
       _installClientLogHooks();
-      ClientLogger.i(
+      ClientLogger.v(
         'client log hooks installed elapsedMs=${hooksStopwatch.elapsedMilliseconds}',
         tag: _appStartupLogTag,
+        verboseLevel: VerboseLevel.level1,
       );
       final startsDetachedChatWindow = _startsDetachedChatWindow(arguments);
       if (startsDetachedChatWindow) {
-        ClientLogger.i(
+        ClientLogger.v(
           'skip process-owned startup for detached chat window',
           tag: _appStartupLogTag,
+          verboseLevel: VerboseLevel.level1,
         );
         await RuntimeBootstrapManager.instance.initializeForDetachedWindow();
-        ClientLogger.i(
+        ClientLogger.v(
           'detached runtime bootstrap state loaded',
           tag: _appStartupLogTag,
+          verboseLevel: VerboseLevel.level1,
         );
       } else {
         NotificationActivationService.instance.initialize(arguments);
         final runtimeStopwatch = Stopwatch()..start();
         await RuntimeBootstrapManager.instance.initialize();
-        ClientLogger.i(
+        ClientLogger.v(
           'runtime bootstrap initialized elapsedMs=${runtimeStopwatch.elapsedMilliseconds}',
           tag: _appStartupLogTag,
+          verboseLevel: VerboseLevel.level1,
         );
       }
       final glassStopwatch = Stopwatch()..start();
       await LiquidGlassWidgets.initialize();
-      ClientLogger.i(
+      ClientLogger.v(
         'liquid glass initialized elapsedMs=${glassStopwatch.elapsedMilliseconds}',
         tag: _appStartupLogTag,
+        verboseLevel: VerboseLevel.level1,
       );
       await DesktopWidgets.run(
         arguments: arguments,
@@ -104,17 +111,19 @@ void main(List<String> arguments) async {
         application: () async {
           final windowStopwatch = Stopwatch()..start();
           final windowArguments = await readOperitWindowArguments();
-          ClientLogger.i(
+          ClientLogger.v(
             'window arguments read type=${windowArguments.runtimeType} elapsedMs=${windowStopwatch.elapsedMilliseconds}',
             tag: _appStartupLogTag,
+            verboseLevel: VerboseLevel.level1,
           );
           switch (windowArguments) {
             case MainWindowArguments():
               final coreStopwatch = Stopwatch()..start();
               CoreApplicationService.instance.initialize();
-              ClientLogger.i(
+              ClientLogger.v(
                 'core application initialize dispatched elapsedMs=${coreStopwatch.elapsedMilliseconds}',
                 tag: _appStartupLogTag,
+                verboseLevel: VerboseLevel.level1,
               );
               _runMainWindow();
               applicationStarted = true;
@@ -167,7 +176,11 @@ bool _startsDetachedChatWindow(List<String> arguments) {
 
 /// Starts the main application window without touching runtime services.
 void _runMainWindow() {
-  ClientLogger.i('run main window', tag: _appStartupLogTag);
+  ClientLogger.v(
+    'run main window',
+    tag: _appStartupLogTag,
+    verboseLevel: VerboseLevel.level1,
+  );
   runApp(
     LiquidGlassWidgets.wrap(
       respectSystemAccessibility: false,
@@ -183,7 +196,11 @@ void _runMainWindow() {
 
 /// Starts a detached chat window after runtime configuration is loaded.
 void _runDetachedChatWindow(DetachedChatWindowArguments arguments) {
-  ClientLogger.i('run detached chat window', tag: _appStartupLogTag);
+  ClientLogger.v(
+    'run detached chat window',
+    tag: _appStartupLogTag,
+    verboseLevel: VerboseLevel.level1,
+  );
   runApp(
     LiquidGlassWidgets.wrap(
       respectSystemAccessibility: false,

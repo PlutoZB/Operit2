@@ -52,7 +52,7 @@ impl Duplex {
         if first {
             *LAST_ERROR.lock().unwrap() = Some(e.message.clone());
             #[cfg(not(target_os = "espidf"))]
-            operit_util::AppLogger::AppLogger::trace("RuntimePeerService", &format!("Reusable carrier failed: {e}"));
+            operit_util::AppLogger::AppLogger::v_with_level("RuntimePeerService", &format!("Reusable carrier failed: {e}"), operit_util::AppLogger::VERBOSE_LEVEL_3);
         }
         self.finish();
     }

@@ -69,21 +69,42 @@ fn console_toast(message: &str) -> HostResult<()> {
     Ok(())
 }
 
-/// Isolates explicit CLI profiles across all native IPC carriers.
+/// Isolates explicit CLI profiles across all native IPC carriers, and gives
+/// short-lived Cores their own instance so they can run next to the daemon/TUI
+/// without fighting over the same D-Bus service name.
 fn create_cli_plugin_sdk_ipc_host(
     runtimeRoot: &std::path::Path,
 ) -> Arc<dyn operit_host_api::PluginSdkIpcHost> {
-    if env::var_os("OPERIT_CLI_CONFIG_DIR").is_some_and(|path| !path.is_empty())
-        && !env::var_os("OPERIT_PLUGIN_SDK_INSTANCE").is_some_and(|value| !value.is_empty())
-    {
-        use sha2::{Digest, Sha256};
-        let key = format!(
-            "{:x}",
-            Sha256::digest(runtimeRoot.as_os_str().as_encoded_bytes())
-        );
-        return Arc::new(NativePluginSdkIpcHost::withInstance(&key[..16]));
+    if env::var_os("OPERIT_PLUGIN_SDK_INSTANCE").is_some_and(|value| !value.is_empty()) {
+        return Arc::new(NativePluginSdkIpcHost::new());
     }
-    Arc::new(NativePluginSdkIpcHost::new())
+    let stableInstance =
+        if env::var_os("OPERIT_CLI_CONFIG_DIR").is_some_and(|path| !path.is_empty()) {
+            use sha2::{Digest, Sha256};
+            let key = format!(
+                "{:x}",
+                Sha256::digest(runtimeRoot.as_os_str().as_encoded_bytes())
+            );
+            key[..16].to_string()
+        } else {
+            String::new()
+        };
+    let instance = cli_plugin_sdk_instance_name(&stableInstance, crate::daemon::process_is_owner());
+    Arc::new(NativePluginSdkIpcHost::withInstance(&instance))
+}
+
+/// The owner keeps the profile-stable service name; every short-lived Core
+/// gets a process-unique suffix so concurrent CLI commands never collide.
+fn cli_plugin_sdk_instance_name(stable: &str, ownerProcess: bool) -> String {
+    if ownerProcess {
+        return stable.to_string();
+    }
+    let pid = std::process::id();
+    if stable.is_empty() {
+        format!("pid-{pid}")
+    } else {
+        format!("{stable}-pid-{pid}")
+    }
 }
 
 /// Creates the CLI host manager with frontend-owned toast presentation.
@@ -193,11 +214,16 @@ pub(crate) fn create_cli_application() -> OperitApplication {
 pub(crate) async fn create_cli_core_application(
     deviceName: &str,
 ) -> Result<CoreApplication, String> {
-    CoreApplication::start(CoreApplicationConfig::new(
+    let mut config = CoreApplicationConfig::new(
         create_cli_host_manager(),
         LinkDeviceInfo::nativeCli(deviceName),
-    ))
-    .await
+    );
+    // A short-lived CLI Core running next to the daemon/TUI must not claim
+    // the persistent Space sync worker as well.
+    if !crate::daemon::process_is_owner() && crate::daemon::owner_is_running() {
+        config = config.withSpaceSync(false);
+    }
+    CoreApplication::start(config).await
 }
 
 /// Starts a short-lived CLI Core tree without claiming the persistent sync worker.
@@ -344,6 +370,14 @@ impl CliStorageConfig {
 pub(crate) fn cli_identities() -> (Vec<CliIdentity>, String) {
     let config = CliStorageConfig::read();
     (config.identities, config.activeIdentityId)
+}
+
+/// Returns the selected identity and the runtime/workspace roots it owns.
+pub(crate) fn active_cli_identity() -> (CliIdentity, PathBuf, PathBuf) {
+    let config = CliStorageConfig::read();
+    let identity = config.activeIdentity().clone();
+    let (runtimeRoot, workspaceRoot) = config.activeRoots();
+    (identity, runtimeRoot, workspaceRoot)
 }
 
 /// Creates one isolated CLI identity without changing the active process identity.
@@ -602,6 +636,16 @@ mod tests {
     use operit_tools::tools::AIToolHandler::AIToolHandler;
     use operit_tools::tools::ToolResultDataClasses::ToolResultData;
     use operit_tools::ToolExecutionManager::{AITool, ToolParameter};
+
+    #[test]
+    fn short_lived_cores_get_a_process_unique_plugin_sdk_instance() {
+        assert_eq!(cli_plugin_sdk_instance_name("", true), "");
+        assert_eq!(cli_plugin_sdk_instance_name("profile", true), "profile");
+        let short_lived = cli_plugin_sdk_instance_name("profile", false);
+        assert!(short_lived.starts_with("profile-pid-"));
+        assert_ne!(short_lived, "profile");
+        assert!(cli_plugin_sdk_instance_name("", false).starts_with("pid-"));
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn direct_terminal_tool_chain_executes_visible_terminal() {

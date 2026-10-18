@@ -105,7 +105,7 @@ fn put(key: &str, value: Value) -> Value {
 #[test]
 fn storage_ownership_selects_replication_without_open_options() {
     for scope in ["space", "device"] {
-        for kind in ["sqlite", "objects", "data_store"] {
+        for kind in ["sqlite", "objects"] {
             let f = Fixture::withScope("first", scope);
             let handle = f.open(kind);
             if kind == "sqlite" {
@@ -143,7 +143,7 @@ fn plugins_share_local_databases_by_path_without_replication() {
     let mut f = Fixture::new("first");
     let local = operit_store::ExtensionStore::ExtensionStore::localDataPath("storage_test").unwrap();
     f.path = format!("{local}/cache.sqlite");
-    let handle = f.open("data_store");
+    let handle = f.open("objects");
     f.call(json!({"op":"commit","handle":handle,"mutations":[put("cached",json!(1))]})).unwrap();
     assert_eq!(f.get(&handle, "cached")["value"], 1);
     assert!(f.export().is_empty());
@@ -152,10 +152,10 @@ fn plugins_share_local_databases_by_path_without_replication() {
         .unwrap();
     assert!(SyncOperationStore::new(f.host.clone(), "runtime/sync").operationsSince(&SyncClock::empty(), &[], 100).unwrap().is_empty());
     let other = operit_store::ExtensionStore::ExtensionStore::localDataPath("another_plugin").unwrap();
-    let otherOpened = f.call(json!({"op":"open","path":format!("{other}/cache.sqlite"),"kind":"data_store"})).unwrap();
+    let otherOpened = f.call(json!({"op":"open","path":format!("{other}/cache.sqlite"),"kind":"objects"})).unwrap();
     assert!(otherOpened["handle"].is_string());
     let otherSession = PluginStorageSession::default();
-    let reopened = otherSession.request(f.host.clone(), f.host.clone(), serde_json::from_value(json!({"op":"open","path":f.path,"kind":"data_store"})).unwrap(), "second-script").unwrap();
+    let reopened = otherSession.request(f.host.clone(), f.host.clone(), serde_json::from_value(json!({"op":"open","path":f.path,"kind":"objects"})).unwrap(), "second-script").unwrap();
     let operit_host_api::PluginStorage::StorageResponse::Open(reopened) = reopened else { panic!("Expected storage open result") };
     let otherHandle = &reopened.handle;
     let stored = otherSession.request(f.host.clone(), f.host.clone(), serde_json::from_value(json!({"op":"get","handle":otherHandle,"collection":"keys","key":"cached"})).unwrap(), "second-script").unwrap();
@@ -173,16 +173,16 @@ fn open_wire_contract_rejects_sync_parameter() {
     for sync in [true, false] {
         assert!(serde_json::from_value::<StorageRequest>(json!({
             "op":"open", "path":"runtime/plugin_data/space/storage_test/records.sqlite",
-            "kind":"data_store", "sync":sync
+            "kind":"objects", "sync":sync
         })).is_err());
     }
 }
 
 /// Keeps null, missing keys, durable reopen and immutable storage policies distinct.
 #[test]
-fn datastore_preserves_null_and_reopens_without_changing_identity() {
+fn objects_preserve_null_and_reopen_without_changing_identity() {
     let f = Fixture::withScope("first", "device");
-    let handle = f.open("data_store");
+    let handle = f.open("objects");
     f.call(json!({"op":"commit","handle":handle,"mutations":[put("nullable",Value::Null)]}))
         .unwrap();
     assert_eq!(f.get(&handle, "nullable")["value"], Value::Null);
@@ -193,19 +193,19 @@ fn datastore_preserves_null_and_reopens_without_changing_identity() {
         f.call(json!({"op":"get","handle":handle,"collection":"keys","key":"nullable"}))
             .is_err()
     );
-    let reopened = f.open("data_store");
+    let reopened = f.open("objects");
     assert!(f.get(&reopened, "nullable")["version"].is_string());
     assert!(
-        f.call(json!({"op":"open","path":f.path,"kind":"objects"}))
+        f.call(json!({"op":"open","path":f.path,"kind":"sqlite"}))
             .is_err()
     );
     assert!(
         f.call(
-            json!({"op":"open","path":"runtime/outside.sqlite","kind":"data_store"})
+            json!({"op":"open","path":"runtime/outside.sqlite","kind":"objects"})
         )
         .is_err()
     );
-    assert!(f.call(json!({"op":"open","path":format!("{}/../escape.sqlite",f.roots[0]),"kind":"data_store"})).is_err());
+    assert!(f.call(json!({"op":"open","path":format!("{}/../escape.sqlite",f.roots[0]),"kind":"objects"})).is_err());
     f.dispose();
 }
 
@@ -213,7 +213,7 @@ fn datastore_preserves_null_and_reopens_without_changing_identity() {
 #[test]
 fn compare_and_set_batches_are_atomic() {
     let f = Fixture::withScope("first", "device");
-    let handle = f.open("data_store");
+    let handle = f.open("objects");
     f.call(
         json!({"op":"commit","handle":handle,"mutations":[put("a",json!(1)),put("b",json!(2))]}),
     )
@@ -390,13 +390,13 @@ fn existing_unowned_databases_are_not_modified() {
 fn key_sync_resolves_conflicts_and_forwards_original_transactions() {
     let a = Fixture::new("a");
     let b = Fixture::new("b");
-    let ah = a.open("data_store");
+    let ah = a.open("objects");
     a.call(json!({"op":"commit","handle":ah,"mutations":[put("key",Value::Null)]}))
         .unwrap();
     let first = a.export();
     b.replay(&first);
     b.replay(&first);
-    let bh = b.open("data_store");
+    let bh = b.open("objects");
     assert!(b.get(&bh, "key")["version"].is_string());
     assert_eq!(b.export().len(), 1);
     assert_eq!(b.export()[0].opId, first[0].opId);
@@ -474,7 +474,7 @@ fn sqlite_sync_is_atomic_and_validates_declared_rows() {
 #[test]
 fn file_sync_excludes_database_and_sidecars_but_keeps_ordinary_files() {
     let f = Fixture::new("first");
-    let handle = f.open("data_store");
+    let handle = f.open("objects");
     let files = RuntimeFileSyncStore::new(f.host.clone(), "runtime/sync");
     assert!(files.writeBytes(&f.path, b"corrupt").is_err());
     for suffix in ["", ".operit-storage.json", "-wal", "-shm", "-journal"] {
@@ -504,7 +504,7 @@ fn file_sync_excludes_database_and_sidecars_but_keeps_ordinary_files() {
 #[test]
 fn recreated_database_does_not_reuse_old_sync_operation_ids() {
     let f = Fixture::new("first");
-    let handle = f.open("data_store");
+    let handle = f.open("objects");
     f.call(json!({"op":"commit","handle":handle,"mutations":[put("key",json!(1))]}))
         .unwrap();
     let previous = f.export()[0].opId.clone();
@@ -514,7 +514,7 @@ fn recreated_database_does_not_reuse_old_sync_operation_ids() {
     f.host
         .delete(&format!("{}.operit-storage.json", f.path), false)
         .unwrap();
-    let handle = f.open("data_store");
+    let handle = f.open("objects");
     f.call(json!({"op":"commit","handle":handle,"mutations":[put("key",json!(2))]}))
         .unwrap();
     assert_ne!(f.export()[0].opId, previous);
@@ -554,9 +554,9 @@ fn plugin_scope_moves_preserve_data_scopes_and_database_handles() {
     f.host.writeBytes(&format!("{config}/settings.txt"), b"configuration").unwrap();
     let local = operit_store::ExtensionStore::ExtensionStore::localDataPath("storage_test").unwrap();
     let localPath = format!("{local}/cache.sqlite");
-    let localHandle = f.call(json!({"op":"open","path":localPath,"kind":"data_store"})).unwrap()["handle"].as_str().unwrap().to_string();
+    let localHandle = f.call(json!({"op":"open","path":localPath,"kind":"objects"})).unwrap()["handle"].as_str().unwrap().to_string();
     f.call(json!({"op":"commit","handle":localHandle,"mutations":[put("cache",json!(7))]})).unwrap();
-    let sharedHandle = f.open("data_store");
+    let sharedHandle = f.open("objects");
     f.call(json!({"op":"commit","handle":sharedHandle,"mutations":[put("memory",json!(9))]})).unwrap();
     let before = f.export();
     assert_eq!(before.len(), 1);
@@ -581,11 +581,11 @@ fn plugin_scope_moves_preserve_data_scopes_and_database_handles() {
 fn malformed_remote_transactions_leave_no_database_or_catalog_entry() {
     let a = Fixture::new("a");
     let b = Fixture::new("b");
-    let ah = a.open("data_store");
+    let ah = a.open("objects");
     a.call(json!({"op":"commit","handle":ah,"mutations":[put("key",json!(1))]}))
         .unwrap();
     let mut invalid = a.export()[0].clone();
-    invalid.payload["changes"][0]["collection"] = json!("other");
+    invalid.payload["changes"][0]["collection"] = json!("");
     assert!(
         PluginStorage::applyOperation(
             b.host.clone(),
@@ -611,8 +611,8 @@ fn malformed_remote_transactions_leave_no_database_or_catalog_entry() {
 fn bootstrap_excludes_only_preexisting_local_operations() {
     let a = Fixture::new("a");
     let b = Fixture::new("b");
-    let ah = a.open("data_store");
-    let bh = b.open("data_store");
+    let ah = a.open("objects");
+    let bh = b.open("objects");
     a.call(json!({"op":"commit","handle":ah,"mutations":[put("key",json!(1))]}))
         .unwrap();
     b.call(json!({"op":"commit","handle":bh,"mutations":[put("local",json!(2))]}))
@@ -634,11 +634,11 @@ fn plugin_uninstall_preserves_independent_local_and_shared_databases() {
     let extensions = operit_store::ExtensionStore::ExtensionStore::new(f.host.clone());
     extensions.registerDevice("package","storage_test","",json!({"members":["storage_test"],"enabledNames":["storage_test"],"disabledNames":[],"subpackageStates":{},"order":0,"builtin":false,"installationId":"0123456789abcdef0123456789abcdef"})).unwrap();
     extensions.moveScope("package", "storage_test", "space").unwrap();
-    let sharedHandle = f.open("data_store");
+    let sharedHandle = f.open("objects");
     f.call(json!({"op":"commit","handle":sharedHandle,"mutations":[put("memory",json!(1))]})).unwrap();
     let local = operit_store::ExtensionStore::ExtensionStore::localDataPath("storage_test").unwrap();
     let localPath = format!("{local}/cache.sqlite");
-    let localHandle = f.call(json!({"op":"open","path":localPath,"kind":"data_store"})).unwrap()["handle"].as_str().unwrap().to_string();
+    let localHandle = f.call(json!({"op":"open","path":localPath,"kind":"objects"})).unwrap()["handle"].as_str().unwrap().to_string();
     f.call(json!({"op":"commit","handle":localHandle,"mutations":[put("cached",json!(9))]})).unwrap();
     extensions.delete("package", "storage_test").unwrap();
     assert!(extensions.records("package").unwrap().is_empty());
@@ -773,7 +773,7 @@ fn open_merge_fixture(fixture: &Fixture) -> String {
         {"collection":"items","identityColumn":"id","nameColumn":"name","ignoredColumns":[],
          "keyEncoding":"length_prefixed_root","references":[]},
         {"collection":"owners","identityColumn":"ownerKey","nameColumn":null,"ignoredColumns":[],
-         "keyEncoding":"slash_root","matchMode":"identity","keyReferences":[{"collection":"items","prefix":"owner:"}],
+         "keyEncoding":"slash_root","matchMode":"identity","keyReferences":[{"target":{"kind":"collection","collection":"items"},"prefix":"owner:"}],
          "references":[{"collection":"owners","column":"document","target":{"kind":"collection","collection":"owners"},
                         "keyPrefix":"owners/","keySuffix":"/USER.md","valueEncoding":"uri_component"}]}
     ]});
@@ -896,4 +896,290 @@ fn record_watch_supports_device_storage_and_releases_pending_waits() {
     let mut wait=Box::pin(f.session.waitForRecord(handle.clone(),"keys".into(),"local".into(),Some(StorageRecordWatchState{version:Some(entry.version)})));
     assert!(wait.as_mut().poll(&mut context).is_pending());f.call(json!({"op":"close","handle":handle})).unwrap();
     assert!(matches!(wait.as_mut().poll(&mut context),Poll::Ready(Err(_))));drop(wait);f.dispose();
+}
+
+
+/// Measures actual retained storage handles, file validation and SQLite reads independently.
+#[test]
+#[ignore = "Manual native storage benchmark with real files and SQLite"]
+fn storage_query_roundtrip_benchmark() {
+    use operit_store::SqliteStore::SqliteRowGet;
+    /// Returns the median time of a fixed number of successful real host operations.
+    fn median_micros(mut operation: impl FnMut(), iterations: usize) -> f64 {
+        for _ in 0..10 { operation(); }
+        let mut samples = Vec::new();
+        for _ in 0..5 {
+            let started = std::time::Instant::now();
+            for _ in 0..iterations { operation(); }
+            samples.push(started.elapsed().as_secs_f64() * 1e6 / iterations as f64);
+        }
+        samples.sort_by(f64::total_cmp);
+        samples[2]
+    }
+    let fixture = Fixture::new("storage-benchmark");
+    let handle = fixture.open("sqlite");
+    let store = SqliteStore::openWithHost(fixture.host.clone(), &fixture.path).unwrap();
+    let request = json!({"op":"query","handle":handle,"statement":{"sql":"SELECT 1 AS value","params":[]}});
+    let session = median_micros(|| {
+        let result = fixture.call(request.clone()).unwrap();
+        assert_eq!(result[0]["values"][0], json!({"kind":"integer","value":"1"}));
+    }, 200);
+    let validation = median_micros(|| {
+        assert!(fixture.host.exists(&fixture.path).unwrap());
+        assert!(PluginStorage::ownsFile(fixture.host.clone(), &fixture.path).unwrap());
+    }, 200);
+    let query = median_micros(|| {
+        assert_eq!(store.queryRows("SELECT 1 AS value", vec![]).unwrap()[0].get::<_,i64>(0).unwrap(), 1);
+    }, 200);
+    let transaction = median_micros(|| {
+        assert_eq!(store.transaction(|tx| tx.queryRows("SELECT 1 AS value", vec![])).unwrap()[0].get::<_,i64>(0).unwrap(), 1);
+    }, 200);
+    eprintln!("STORAGE_BENCH session_us={session:.3} validation_us={validation:.3} query_us={query:.3} transaction_query_us={transaction:.3}");
+    drop(store);
+    fixture.dispose();
+}
+
+
+/// Allows a read-only SDK query while another connection holds SQLite's writer reservation.
+#[test]
+fn sql_query_does_not_reserve_the_writer() {
+    let fixture = Fixture::new("concurrent-reader");
+    let handle = fixture.open("sqlite");
+    fixture.call(json!({"op":"define_table","handle":handle,"table":table()})).unwrap();
+    let writer = SqliteStore::openWithHost(fixture.host.clone(), &fixture.path).unwrap();
+    writer.transaction(|_| {
+        let rows = fixture.call(json!({"op":"query","handle":handle,"statement":{
+            "sql":"SELECT id FROM records", "params":[],
+        }})).map_err(operit_store::SqliteStore::SqliteStoreError::Message)?;
+        assert_eq!(rows, json!([]));
+        Ok(())
+    }).unwrap();
+    drop(writer);
+    fixture.dispose();
+}
+
+/// Opens complete JSON records with the same content matching and dependent ownership rules as SQL records.
+fn open_object_merge_fixture(fixture: &Fixture) -> String {
+    fixture.call(json!({"op":"open","path":fixture.path,"kind":"objects","merge":{
+        "version":3,"maxEntities":2,"maxReferences":10,"entities":[{
+            "collection":"cards","identityColumn":"id","nameColumn":"name",
+            "ignoredColumns":["createdAt","updatedAt"],"keyEncoding":"slash_root","matchMode":"content",
+            "keyReferences":[],"childCollections":[],"references":[
+                {"collection":"cards","column":"providerId","target":{"kind":"preference","path":"models"}},
+                {"collection":"cards","column":"mounts/*/providerId","target":{"kind":"preference","path":"models"}},
+                {"collection":"meta","column":"active/CharacterCard/id","target":{"kind":"collection","collection":"cards"}},
+                {"collection":"chat_bindings","column":"selection","target":{"kind":"collection","collection":"cards"},"keyPrefix":"card:"}
+            ]
+        },{
+            "collection":"owners","identityColumn":"ownerKey","nameColumn":null,"ignoredColumns":[],
+            "keyEncoding":"slash_root","matchMode":"identity","keyReferences":[{"target":{"kind":"collection","collection":"cards"},"prefix":"character:"}],
+            "childCollections":["memories"],"references":[
+                {"collection":"owners","column":"ownerKey","target":{"kind":"collection","collection":"cards"},"keyPrefix":"character:"},
+                {"collection":"owners","column":"userDocumentPath","target":{"kind":"collection","collection":"owners"},"keyPrefix":"owners/","keySuffix":"/USER.md","valueEncoding":"uri_component"},
+                {"collection":"memories","column":"ownerKey","target":{"kind":"collection","collection":"cards"},"keyPrefix":"character:"}
+            ]
+        }]
+    }})).unwrap()["handle"].as_str().unwrap().into()
+}
+
+/// Writes one complete nested JSON document through the actual object transaction engine.
+fn seed_object_card(fixture: &Fixture, handle: &str, id: &str, name: &str, content: &str) {
+    fixture.call(json!({"op":"commit","handle":handle,"mutations":[{
+        "collection":"cards","key":id,"value":{"id":id,"name":name,"providerId":"remote-provider","mounts":[{"providerId":"remote-provider","writable":true}],"prompt":{"text":content}},
+        "deleted":false,"checkVersion":false,"expectedVersion":null
+    }]})).unwrap();
+}
+
+/// Keeps duplicate input positions and distinguishes absent records from stored JSON null.
+#[test]
+fn object_batch_reads_are_ordered_bounded_and_preserve_null_records() {
+    let fixture = Fixture::new("object-batch");
+    let handle = fixture.open("objects");
+    fixture.call(json!({"op":"commit","handle":handle,"mutations":[put("one",json!({"nested":[1,2]})),put("nullable",Value::Null)]})).unwrap();
+    let result = fixture.call(json!({"op":"get_many","handle":handle,"collection":"keys","keys":["one","missing","nullable","one"]})).unwrap();
+    assert_eq!(result.as_array().unwrap().len(), 4);
+    assert_eq!(result[0], result[3]);
+    assert_eq!(result[0]["value"]["nested"], json!([1,2]));
+    assert!(result[1].is_null());
+    assert!(!result[2].is_null());
+    assert!(result[2]["value"].is_null());
+    assert!(fixture.call(json!({"op":"get_many","handle":handle,"collection":"keys","keys":[]})).is_err());
+    assert!(fixture.call(json!({"op":"get_many","handle":handle,"collection":"keys","keys":vec!["one";1001]})).is_err());
+    assert!(fixture.call(json!({"op":"get_many","handle":handle,"collection":"keys","keys":[""]})).is_err());
+    fixture.dispose();
+}
+
+/// Uses the existing content deduplication, UUID ordering and name collision policy for complete JSON.
+#[test]
+fn object_entities_use_the_existing_content_and_name_merge_rules() {
+    let left = Fixture::new("object-left");
+    let right = Fixture::new("object-right");
+    let left_handle = open_object_merge_fixture(&left);
+    let right_handle = open_object_merge_fixture(&right);
+    let first = "11111111-1111-4111-8111-111111111111";
+    let second = "22222222-2222-4222-8222-222222222222";
+    seed_object_card(&left, &left_handle, first, "Same", "equal");
+    seed_object_card(&right, &right_handle, second, "Same", "equal");
+    seed_object_card(&left, &left_handle, "33333333-3333-4333-8333-333333333333", "Role", "left");
+    seed_object_card(&right, &right_handle, "44444444-4444-4444-8444-444444444444", "Role", "right");
+    let left_operations = left.export();
+    let right_operations = right.export();
+    left.replay(&right_operations); right.replay(&left_operations);
+    let request = |handle: &str| json!({"op":"list","handle":handle,"collection":"cards","after":null,"limit":100});
+    let left_rows = left.call(request(&left_handle)).unwrap();
+    let right_rows = right.call(request(&right_handle)).unwrap();
+    let values = |rows: &Value| rows.as_array().unwrap().iter().map(|row| row["value"].clone()).collect::<Vec<_>>();
+    assert_eq!(values(&left_rows), values(&right_rows));
+    assert_eq!(left_rows.as_array().unwrap().len(), 3);
+    assert_eq!(left_rows[0]["key"], first);
+    assert_eq!(left_rows[0]["value"]["id"], first);
+    assert_eq!(left_rows[1]["value"]["name"], "Role");
+    assert_eq!(left_rows[2]["value"]["name"], "Role（1）");
+    assert_eq!(left_rows[2]["value"]["prompt"]["text"], "right");
+    left.replay(&right_operations);
+    assert_eq!(left.call(request(&left_handle)).unwrap(), left_rows);
+    let sql = SqliteStore::openWithHost(left.host.clone(), &left.path).unwrap();
+    assert!(sql.queryRows("SELECT name FROM sqlite_master WHERE type='table' AND name='cards'",vec![]).unwrap().is_empty());
+    drop(sql); left.dispose(); right.dispose();
+}
+
+/// Preserves all owner-scoped memory and rewrites existing selections when equivalent card UUIDs converge.
+#[test]
+fn object_content_merge_rekeys_owners_memories_and_existing_selection_references() {
+    let left = Fixture::new("object-owner-left"); let right = Fixture::new("object-owner-right");
+    let a = open_object_merge_fixture(&left); let b = open_object_merge_fixture(&right);
+    let low = "11111111-1111-4111-8111-111111111111";
+    let high = "22222222-2222-4222-8222-222222222222";
+    for (fixture, handle, id, timestamp, memory) in [(&left, &a, high, 10, "memory-left"), (&right, &b, low, 20, "memory-right")] {
+        let owner = format!("character:{id}");
+        fixture.call(json!({"op":"commit","handle":handle,"mutations":[
+            {"collection":"cards","key":id,"value":{"id":id,"name":"Same","nested":{"array":[1,2]},"createdAt":timestamp,"updatedAt":timestamp},"deleted":false,"checkVersion":false,"expectedVersion":null},
+            {"collection":"owners","key":owner,"value":{"ownerKey":owner,"userDocumentPath":format!("owners/character%3A{id}/USER.md")},"deleted":false,"checkVersion":false,"expectedVersion":null},
+            {"collection":"memories","key":format!("{owner}/{memory}"),"value":{"ownerKey":owner,"record":{"id":memory,"content":memory}},"deleted":false,"checkVersion":false,"expectedVersion":null},
+            {"collection":"meta","key":"state","value":{"active":{"CharacterCard":{"id":id}}},"deleted":false,"checkVersion":false,"expectedVersion":null},
+            {"collection":"chat_bindings","key":memory,"value":{"selection":format!("card:{id}")},"deleted":false,"checkVersion":false,"expectedVersion":null}
+        ]})).unwrap();
+    }
+    let left_ops = left.export(); let right_ops = right.export();
+    left.replay(&right_ops); right.replay(&left_ops);
+    for (fixture, handle) in [(&left, &a), (&right, &b)] {
+        let owner = fixture.call(json!({"op":"list","handle":handle,"collection":"owners","limit":100})).unwrap();
+        assert_eq!(owner.as_array().unwrap().len(), 1);
+        assert_eq!(owner[0]["key"],format!("character:{low}"));
+        assert_eq!(owner[0]["value"]["ownerKey"],format!("character:{low}"));
+        assert_eq!(owner[0]["value"]["userDocumentPath"],format!("owners/character%3A{low}/USER.md"));
+        let memories = fixture.call(json!({"op":"list","handle":handle,"collection":"memories","limit":100})).unwrap();
+        assert_eq!(memories.as_array().unwrap().len(), 2);
+        for row in memories.as_array().unwrap() {
+            assert!(row["key"].as_str().unwrap().starts_with(&format!("character:{low}/")));
+            assert_eq!(row["value"]["ownerKey"],format!("character:{low}"));
+        }
+        let metadata = fixture.call(json!({"op":"get","handle":handle,"collection":"meta","key":"state"})).unwrap();
+        assert_eq!(metadata["value"]["active"]["CharacterCard"]["id"],low);
+        let bindings = fixture.call(json!({"op":"list","handle":handle,"collection":"chat_bindings","limit":100})).unwrap();
+        assert!(bindings.as_array().unwrap().iter().all(|row|row["value"]["selection"]==format!("card:{low}")));
+    }
+    left.dispose(); right.dispose();
+}
+
+/// Rewrites explicit nested JSON references without changing synchronization history or document identity.
+#[test]
+fn object_preference_aliases_rewrite_nested_json_without_new_operations() {
+    let fixture = Fixture::new("object-reference");
+    let handle = open_object_merge_fixture(&fixture);
+    let id = "11111111-1111-4111-8111-111111111111";
+    seed_object_card(&fixture, &handle, id, "Role", "Complete original JSON");
+    let history = serde_json::to_value(fixture.export()).unwrap();
+    let references = std::collections::BTreeMap::from([("models\u{001f}remote-provider".to_string(), "canonical-provider".to_string())]);
+    PluginStorage::reconcilePreferenceReferences(fixture.host.clone(), &references).unwrap();
+    let result = fixture.call(json!({"op":"get","handle":handle,"collection":"cards","key":id})).unwrap();
+    assert_eq!(result["value"]["id"], id);
+    assert_eq!(result["value"]["providerId"], "canonical-provider");
+    assert_eq!(result["value"]["mounts"][0]["providerId"], "canonical-provider");
+    assert_eq!(result["value"]["mounts"][0]["writable"], true);
+    assert_eq!(serde_json::to_value(fixture.export()).unwrap(), history);
+    fixture.dispose();
+}
+
+/// Keeps memory ownership aligned with native preference aliases without recreating configuration catalogs in SQLite.
+#[test]
+fn character_memory_contract_uses_native_preference_owner_aliases() {
+    let descriptor: Value = serde_json::from_str(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+        "/../../../../plugins/packages/buildin/character_cards/src/storage/memory-merge.json"))).unwrap();
+    assert_eq!(descriptor["entities"].as_array().unwrap().len(), 1);
+    let fixture = Fixture::new("character-memory");
+    let handle = fixture.call(json!({"op":"open","path":fixture.path,"kind":"objects","merge":descriptor})).unwrap()["handle"].as_str().unwrap().to_owned();
+    let old = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    let canonical = "00000000-0000-4000-8000-000000000001";
+    let owner = format!("character:{old}");
+    fixture.call(json!({"op":"commit","handle":handle,"mutations":[
+        {"collection":"owners","key":owner,"value":{"ownerKey":owner,"userDocumentPath":format!("owners/character%3A{old}/USER.md")},"deleted":false,"checkVersion":false,"expectedVersion":null},
+        {"collection":"memories","key":format!("{owner}/memory"),"value":{"ownerKey":owner,"record":{"id":"memory","content":"Retained content"}},"deleted":false,"checkVersion":false,"expectedVersion":null}
+    ]})).unwrap();
+    let history = serde_json::to_value(fixture.export()).unwrap();
+    let references = std::collections::BTreeMap::from([(
+        format!("runtime/plugin_data/space/com.operit.character_cards/cards.preferences.json\u{001f}{old}"), canonical.to_owned()
+    )]);
+    PluginStorage::reconcilePreferenceReferences(fixture.host.clone(), &references).unwrap();
+    let owners = fixture.call(json!({"op":"list","handle":handle,"collection":"owners","limit":100})).unwrap();
+    assert_eq!(owners.as_array().unwrap().len(), 1);
+    assert_eq!(owners[0]["key"], format!("character:{canonical}"));
+    assert_eq!(owners[0]["value"]["userDocumentPath"], format!("owners/character%3A{canonical}/USER.md"));
+    let memories = fixture.call(json!({"op":"list","handle":handle,"collection":"memories","limit":100})).unwrap();
+    assert_eq!(memories[0]["key"], format!("character:{canonical}/memory"));
+    assert_eq!(memories[0]["value"]["ownerKey"], format!("character:{canonical}"));
+    assert_eq!(memories[0]["value"]["record"]["content"], "Retained content");
+    assert_eq!(serde_json::to_value(fixture.export()).unwrap(), history);
+    fixture.dispose();
+}
+
+/// Byte budgets bound one exported page without splitting a transaction or reordering it.
+#[test]
+fn byte_budgets_bound_exported_pages_without_reordering() {
+    let f = Fixture::new("first");
+    let handle = f.open("objects");
+    // Each object commit is one synchronization transaction. A 48 KiB value
+    // makes a single transaction larger than a small page budget.
+    for index in 0..4 {
+        f.call(json!({
+            "op": "commit",
+            "handle": handle,
+            "mutations": [put(&format!("key-{index}"), json!("x".repeat(48 * 1024)))],
+        }))
+        .unwrap();
+    }
+    let all = f.export();
+    assert!(all.len() >= 4, "each commit must export one transaction");
+    let budget = 64 * 1024;
+    let page = PluginStorage::operationsSinceWithBudget(
+        f.host.clone(),
+        &SyncClock::empty(),
+        &[],
+        1000,
+        budget,
+    )
+    .unwrap();
+    assert!(!page.is_empty());
+    assert!(page.len() < all.len(), "the byte budget must cut the page");
+    // The page is an ordered prefix of the unbounded export: no transaction is
+    // split and nothing is reordered.
+    let pageIds = page
+        .iter()
+        .map(|operation| operation.opId.clone())
+        .collect::<Vec<_>>();
+    let prefixIds = all
+        .iter()
+        .take(page.len())
+        .map(|operation| operation.opId.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(pageIds, prefixIds);
+    if page.len() > 1 {
+        let bytes = page
+            .iter()
+            .map(|operation| serde_json::to_vec(&operation.payload).unwrap().len())
+            .sum::<usize>();
+        assert!(bytes <= budget, "a multi-operation page must stay in budget");
+    }
+    f.call(json!({"op":"close","handle":handle})).unwrap();
+    f.dispose();
 }

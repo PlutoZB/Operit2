@@ -100,6 +100,7 @@ pub struct EnhancedAISharedState {
     pub last_provider_model: Option<String>,
     pub last_turn_model_identity: Option<TurnModelIdentity>,
     pub last_turn_token_snapshot: Option<TurnTokenSnapshot>,
+    pub last_turn_context_window: Option<i64>,
     pub pendingRouteChange: Option<RouteChangeIntent>,
 }
 
@@ -163,6 +164,7 @@ impl EnhancedAISharedState {
         });
         self.last_reply_content = None;
         self.last_turn_token_snapshot = None;
+        self.last_turn_context_window = None;
     }
 }
 
@@ -281,6 +283,7 @@ pub struct MessageExecutionContext {
     pub workspaceFolders: Vec<String>,
     pub proxySenderName: Option<String>,
     pub eventChannel: MutableSharedStreamMirror<TextStreamEventMirror>,
+    preparedRequest: Option<PreparedRequestWindow>,
 }
 
 impl MessageExecutionContext {
@@ -304,6 +307,34 @@ impl MessageExecutionContext {
             workspaceFolders,
             proxySenderName,
             eventChannel,
+            preparedRequest: None,
+        }
+    }
+}
+
+/// Retains the exact tools of the latest actual request. History already lives
+/// in the execution context, so completing the estimate needs no copied prefix.
+#[derive(Clone, Debug)]
+struct PreparedRequestWindow {
+    historyLength: usize,
+    availableTools: Vec<ToolPrompt>,
+}
+
+impl PreparedRequestWindow {
+    fn completeHistory(&self, history: &mut Vec<PromptTurn>, pendingResponse: impl FnOnce() -> String) {
+        // Normal completion has appended this round already. Empty/pure-thinking
+        // completion can return earlier; include that response at most once.
+        if history.len() == self.historyLength {
+            let response = pendingResponse();
+            if response.is_empty() {
+                return;
+            }
+            history.push(PromptTurn {
+                kind: PromptTurnKind::ASSISTANT,
+                content: response,
+                tool_name: None,
+                metadata: HashMap::new(),
+            });
         }
     }
 }
@@ -1032,12 +1063,13 @@ impl EnhancedAIService {
         context: &mut MessageExecutionContext,
         reason: String,
     ) {
-        AppLogger::d(
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "执行上下文已失效: id={}, reason={}",
                 context.executionId, reason
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
         context.isConversationActive = false;
         if let Some(active) = self
@@ -1050,7 +1082,7 @@ impl EnhancedAIService {
     }
 
     pub fn invalidateAllExecutionContexts(&mut self, reason: String) {
-        AppLogger::d(TAG, &format!("准备失效全部执行上下文: reason={}", reason));
+        AppLogger::v_with_level(TAG, &format!("准备失效全部执行上下文: reason={}", reason), operit_util::AppLogger::VERBOSE_LEVEL_2);
         self.shared_state().invalidateExecutionContexts();
     }
 
@@ -1188,7 +1220,6 @@ impl EnhancedAIService {
                 // The native API replaces this unresolved field with the selected owner's actual record before invoking the plugin.
                 chatExtension: None,
                 // Fresh execution has no requested historical revision; stored message resolution supplies its exact snapshot separately.
-                messageExtension: None,
                 participantId: options.executionParticipantId.clone(),
                 promptFunctionType: options.promptFunctionType.clone(),
                 defaultModelBinding,
@@ -1383,6 +1414,12 @@ impl EnhancedAIService {
             self.unregisterExecutionContext(&execContext);
             return Ok(());
         }
+        // System composition and finalization belong to one preparation. Estimates
+        // use their own runtime and intentionally do not inherit this identity.
+        runtime.promptMetadata.insert(
+            "promptPreparationId".to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        );
         let message = options.message.clone();
         let chatId = options.chatId.clone();
         let logChatId = chatId
@@ -1409,13 +1446,14 @@ impl EnhancedAIService {
         let onNonFatalError = options.onNonFatalError;
         let onTokenLimitExceeded = options.onTokenLimitExceeded;
         let onToolInvocation = options.onToolInvocation;
-        AppLogger::i(
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "sendMessage调用开始: 功能类型={}, 提示词类型={}",
                 function_type_name(&functionType),
                 prompt_function_type_name(&promptFunctionType)
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
 
         {
@@ -1464,7 +1502,7 @@ impl EnhancedAIService {
             )
             .await?;
         let tAfterPrepareHistory = runtimeSupport.messageTimingNow();
-        AppLogger::d(
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "sendMessage本地耗时: prepareConversationHistory={}ms",
@@ -1472,6 +1510,7 @@ impl EnhancedAIService {
                     .startedAtMs
                     .saturating_sub(startTime.startedAtMs)
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
         lifecycle.push(SendMessageLifecycleStage::SyncPreparedHistoryToExecutionContext);
         execContext.conversationHistory.clear();
@@ -1499,7 +1538,7 @@ impl EnhancedAIService {
             &runtime,
         );
         let tAfterModelParams = runtimeSupport.messageTimingNow();
-        AppLogger::d(
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "sendMessage本地耗时: getModelParametersForFunction={}ms",
@@ -1507,6 +1546,7 @@ impl EnhancedAIService {
                     .startedAtMs
                     .saturating_sub(tAfterPrepareHistory.startedAtMs)
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
         lifecycle.push(SendMessageLifecycleStage::ClearPerRequestTokenCounts);
         {
@@ -1539,7 +1579,7 @@ impl EnhancedAIService {
         )
         .await?;
         let tAfterGetTools = runtimeSupport.messageTimingNow();
-        AppLogger::d(
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "sendMessage本地耗时: getAvailableToolsForFunction={}ms",
@@ -1547,6 +1587,7 @@ impl EnhancedAIService {
                     .startedAtMs
                     .saturating_sub(tAfterModelParams.startedAtMs)
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
         lifecycle.push(SendMessageLifecycleStage::GetAIServiceForFunction);
         let serviceForFunction = self.getAIServiceForFunction(
@@ -1556,7 +1597,7 @@ impl EnhancedAIService {
             &mut runtime,
         );
         let tAfterGetService = runtimeSupport.messageTimingNow();
-        AppLogger::d(
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "sendMessage本地耗时: getAIServiceForFunction={}ms",
@@ -1564,9 +1605,19 @@ impl EnhancedAIService {
                     .startedAtMs
                     .saturating_sub(tAfterGetTools.startedAtMs)
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
         let mut finalProcessedInput = message.clone();
         let mut finalPreparedHistory = preparedHistory;
+        let mut finalizeMetadata = btree_to_value_map(&runtime.promptMetadata);
+        finalizeMetadata.extend(self.buildPromptFinalizeMetadata(
+            chatId.clone(),
+            participantId.clone(),
+            workspacePath.clone(),
+            enableThinking,
+            stream,
+            isSubTask,
+        ));
         let beforeFinalizeContext = self
             .applyPromptFinalizeHooks(
                 PromptHookContext {
@@ -1581,14 +1632,7 @@ impl EnhancedAIService {
                     prepared_history: finalPreparedHistory.clone(),
                     model_parameters: serializePromptHookModelParameters(&modelParameters),
                     available_tools: serializePromptHookToolPrompts(&availableTools),
-                    metadata: self.buildPromptFinalizeMetadata(
-                        chatId.clone(),
-                        participantId.clone(),
-                        workspacePath.clone(),
-                        enableThinking,
-                        stream,
-                        isSubTask,
-                    ),
+                    metadata: finalizeMetadata,
                     ..PromptHookContext::default()
                 },
                 PromptHookRegistry::dispatchPromptFinalizeHooks,
@@ -1644,7 +1688,7 @@ impl EnhancedAIService {
             return Ok(());
         }
         let tBeforeRequest = runtimeSupport.messageTimingNow();
-        AppLogger::d(
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "sendMessage请求前准备耗时: {}ms, 流式输出: {}",
@@ -1653,6 +1697,7 @@ impl EnhancedAIService {
                     .saturating_sub(startTime.startedAtMs),
                 stream
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
         let requestStartTime = runtimeSupport.messageTimingNow();
         let _ = requestWindowSize;
@@ -1662,12 +1707,13 @@ impl EnhancedAIService {
             let service = serviceForFunction.lock().await;
             service.provider_model()
         };
-        AppLogger::i(
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "provider send_message begin chatId={} providerModel={}",
                 logChatId, providerModel
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_3,
         );
         let providerOnNonFatalError: Option<Arc<dyn Fn(String) + Send + Sync>> = {
             let callbackFn = onNonFatalError;
@@ -1723,6 +1769,10 @@ impl EnhancedAIService {
                 }
             }
         };
+        execContext.preparedRequest = Some(PreparedRequestWindow {
+            historyLength: requestHistory.len(),
+            availableTools,
+        });
         lifecycle.push(SendMessageLifecycleStage::StartAssistantResponseRound);
         self.startAssistantResponseRound(&mut execContext);
 
@@ -1748,14 +1798,6 @@ impl EnhancedAIService {
                         return;
                     }
                     if isFirstChunk {
-                        AppLogger::i(
-                            "CoreSend",
-                            &format!(
-                                "provider stream first chunk chatId={} chars={}",
-                                logChatId,
-                                content.chars().count()
-                            ),
-                        );
                         if !isSubTask {
                             self.setInputProcessingState(InputProcessingState::Receiving {
                                 message: "enhanced_receiving_response".to_string(),
@@ -1777,7 +1819,7 @@ impl EnhancedAIService {
                     totalChars += content.len() as i32;
                     let currentTime = runtimeSupport.messageTimingNow().startedAtMs;
                     if currentTime.saturating_sub(lastLogTime) > 5000 {
-                        AppLogger::d(
+                        AppLogger::trace_detail(
                             TAG,
                             &format!("已接收 {} 个内容块，总计 {} 个字符", chunkCount, totalChars),
                         );
@@ -1805,13 +1847,6 @@ impl EnhancedAIService {
                 }
             })
             .await;
-        AppLogger::i(
-            "CoreSend",
-            &format!(
-                "provider stream collect return chatId={} chunks={}",
-                logChatId, chunkCount
-            ),
-        );
         if !self.isExecutionContextActive(&execContext) {
             self.unregisterExecutionContext(&execContext);
             return Ok(());
@@ -1880,7 +1915,7 @@ impl EnhancedAIService {
                 shared.accumulated_cached_input_token_count,
             )
         };
-        AppLogger::d(
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "Token count updated for {}. Input: {}, Output: {}, CachedInput: {}. Turn Accumulated: {}, {}, {}",
@@ -1892,6 +1927,7 @@ impl EnhancedAIService {
                 accumulatedOutputTokenCount,
                 accumulatedCachedInputTokenCount
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
         runtimeSupport.logMessageTiming(
             "enhanced.sendMessage.streamComplete",
@@ -1944,32 +1980,71 @@ impl EnhancedAIService {
             self.unregisterExecutionContext(&execContext);
             return Err(error);
         }
-        AppLogger::d(
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "response completion processing done chatId={} executionId={}",
                 logChatId, execContext.executionId
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
 
         if !self.isExecutionContextActive(&execContext) {
-            AppLogger::d(
+            AppLogger::v_with_level(
                 TAG,
                 &format!(
                     "response completion inactive chatId={} executionId={}",
                     logChatId, execContext.executionId
                 ),
+                operit_util::AppLogger::VERBOSE_LEVEL_2,
             );
             self.unregisterExecutionContext(&execContext);
             return Ok(());
         }
 
-        AppLogger::d(
+        let preparedRequest = execContext.preparedRequest.take()
+            .expect("completed execution must retain its last prepared request");
+        preparedRequest.completeHistory(
+            &mut execContext.conversationHistory,
+            || execContext.roundManager.getCurrentRoundContent(),
+        );
+        let contextWindowStart = runtimeSupport.messageTimingNow();
+        let completedContextWindow = match self.estimatePreparedRequestWindow(
+            runtime.aiService.clone(),
+            &execContext.conversationHistory,
+            &preparedRequest.availableTools,
+            false,
+        ).await {
+            Ok(windowSize) => Some(windowSize),
+            Err(error) => {
+                AppLogger::w(TAG, &format!("Completed request window estimate failed: {error}"));
+                None
+            }
+        };
+        // Cancellation while the estimator was awaiting must not publish a
+        // completed window or close a cancelled execution as a successful turn.
+        if !self.isExecutionContextActive(&execContext) {
+            self.unregisterExecutionContext(&execContext);
+            return Ok(());
+        }
+        if let Some(windowSize) = completedContextWindow {
+            self.publishRequestWindowEstimate(windowSize);
+        }
+        AppLogger::v_with_level(TAG, &format!(
+            "completed request window from prepared state chatId={} executionId={} elapsedMs={} success={}",
+            logChatId, execContext.executionId,
+            runtimeSupport.messageTimingNow().startedAtMs.saturating_sub(contextWindowStart.startedAtMs),
+            completedContextWindow.is_some(),
+        ),
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
+        );
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "response post-processing done chatId={} executionId={}",
                 logChatId, execContext.executionId
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
 
         lifecycle.push(SendMessageLifecycleStage::UnregisterExecutionContext);
@@ -1983,6 +2058,7 @@ impl EnhancedAIService {
         {
             let mut shared = self.shared_state();
             shared.last_reply_content = Some(execContext.roundManager.getDisplayContent());
+            shared.last_turn_context_window = completedContextWindow;
             shared.last_turn_token_snapshot = Some(TurnTokenSnapshot {
                 inputTokens: shared.accumulated_input_token_count,
                 outputTokens: shared.accumulated_output_token_count,
@@ -1994,12 +2070,13 @@ impl EnhancedAIService {
         let _ = requestWindowSize;
         let _ = lifecycle;
         responseStream.close();
-        AppLogger::d(
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "response stream closed chatId={} executionId={}",
                 logChatId, execContext.executionId
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
         Ok(())
     }
@@ -2051,7 +2128,7 @@ impl EnhancedAIService {
             toolNames.clone()
         };
         let successCount = results.iter().filter(|result| result.success).count();
-        AppLogger::d(
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "chat.tool_result.start executionId={} round={} resultCount={} successCount={} tools=[{}] messageBytes={} historyTurns={}",
@@ -2063,6 +2140,7 @@ impl EnhancedAIService {
                 toolResultMessageLen,
                 context.conversationHistory.len()
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
 
         if !self.isExecutionContextActive(context) {
@@ -2097,7 +2175,7 @@ impl EnhancedAIService {
         context.conversationHistory.extend(normalizedChatHistory);
         let currentChatHistory = context.conversationHistory.clone();
 
-        AppLogger::d(
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "chat.tool_result.history_ready executionId={} round={} historyTurns={} messageBytes={}",
@@ -2106,14 +2184,16 @@ impl EnhancedAIService {
                 currentChatHistory.len(),
                 toolResultMessageLen
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
         self.startAssistantResponseRound(context);
-        AppLogger::d(
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "chat.response.round_started executionId={} round={} reason=tool_result tools=[{}]",
                 context.executionId, context.roundManager.roundIndex, displayToolNames
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
 
         let modelParameters = self.getModelParametersForFunction(
@@ -2194,7 +2274,7 @@ impl EnhancedAIService {
             shared.current_request_cached_input_token_count = 0;
         }
 
-        AppLogger::d(
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "chat.model_request.after_tool_result executionId={} round={} tools=[{}] historyTurns={} availableTools={} stream={}",
@@ -2205,6 +2285,7 @@ impl EnhancedAIService {
                 availableTools.len(),
                 stream
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
         let mut response = {
             let providerOnNonFatalError: Option<Arc<dyn Fn(String) + Send + Sync>> =
@@ -2227,7 +2308,7 @@ impl EnhancedAIService {
                     thinking_configurations: runtime.modelConfig.thinkingConfigurations.clone(),
                     thinking_option_id: runtime.modelConfig.thinkingOptionId.clone(),
                     stream,
-                    available_tools: availableTools,
+                    available_tools: availableTools.clone(),
                     preserve_think_in_history: false,
                     enable_retry: true,
                     on_non_fatal_error: providerOnNonFatalError,
@@ -2235,6 +2316,11 @@ impl EnhancedAIService {
                 })
                 .await?
         };
+
+        context.preparedRequest = Some(PreparedRequestWindow {
+            historyLength: context.conversationHistory.len(),
+            availableTools,
+        });
 
         if !self.isExecutionContextActive(context) {
             return Ok(());
@@ -2290,7 +2376,7 @@ impl EnhancedAIService {
             return Ok(());
         }
         ensure_response_completed(response.as_ref())?;
-        AppLogger::d(
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "chat.model_response.after_tool_result_complete executionId={} round={} tools=[{}] chunkCount={} totalChars={}",
@@ -2300,6 +2386,7 @@ impl EnhancedAIService {
                 chunkCount,
                 totalChars
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
 
         let (providerModel, inputTokens, cachedInputTokens, outputTokens) = {
@@ -2343,7 +2430,7 @@ impl EnhancedAIService {
                 shared.accumulated_cached_input_token_count,
             )
         };
-        AppLogger::d(
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "Token count updated after tool result for {}. Input: {}, Output: {}, CachedInput: {}. Turn Accumulated: {}, {}, {}. executionId={}, round={}, tools=[{}]",
@@ -2358,6 +2445,7 @@ impl EnhancedAIService {
                 context.roundManager.roundIndex,
                 displayToolNames
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
 
         Box::pin(self.processStreamCompletion(
@@ -2420,7 +2508,7 @@ impl EnhancedAIService {
         }
 
         let content = context.streamBuffer.trim().to_string();
-        AppLogger::d(
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "chat.response.complete_start executionId={} round={} contentChars={} historyTurns={}",
@@ -2429,14 +2517,16 @@ impl EnhancedAIService {
                 content.len(),
                 context.conversationHistory.len()
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
         if content.is_empty() {
-            AppLogger::d(
+            AppLogger::v_with_level(
                 TAG,
                 &format!(
                     "chat.response.finalize_empty executionId={} round={}",
                     context.executionId, context.roundManager.roundIndex
                 ),
+                operit_util::AppLogger::VERBOSE_LEVEL_2,
             );
             self.finalizeAssistantResponse(
                 context,
@@ -2513,7 +2603,7 @@ impl EnhancedAIService {
 
         let finalContent = self.enhanceToolDetection(&content);
         if finalContent != content {
-            AppLogger::d(
+            AppLogger::v_with_level(
                 TAG,
                 &format!(
                     "chat.tool_call.normalized_xml executionId={} round={} beforeChars={} afterChars={}",
@@ -2522,6 +2612,7 @@ impl EnhancedAIService {
                     content.len(),
                     finalContent.len()
                 ),
+                operit_util::AppLogger::VERBOSE_LEVEL_2,
             );
             context.streamBuffer.clear();
             context.streamBuffer.push_str(&finalContent);
@@ -2534,7 +2625,7 @@ impl EnhancedAIService {
             .map(|invocation| invocation.tool.name.clone())
             .collect::<Vec<_>>()
             .join(", ");
-        AppLogger::d(
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "chat.tool_call.detected executionId={} round={} toolCount={} tools=[{}] finalChars={}",
@@ -2544,6 +2635,7 @@ impl EnhancedAIService {
                 extractedToolNames,
                 finalContent.len()
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
 
         if !self.isExecutionContextActive(context) {
@@ -2562,7 +2654,7 @@ impl EnhancedAIService {
         }
 
         if !extractedToolInvocations.is_empty() {
-            AppLogger::d(
+            AppLogger::v_with_level(
                 TAG,
                 &format!(
                     "chat.tool_call.dispatch executionId={} round={} toolCount={} tools=[{}]",
@@ -2571,6 +2663,7 @@ impl EnhancedAIService {
                     extractedToolInvocations.len(),
                     extractedToolNames
                 ),
+                operit_util::AppLogger::VERBOSE_LEVEL_2,
             );
             return Box::pin(self.handleToolInvocation(
                 collector,
@@ -2600,7 +2693,7 @@ impl EnhancedAIService {
             .await;
         }
 
-        AppLogger::d(
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "chat.response.finalize_no_tools executionId={} round={} displayChars={} historyTurns={}",
@@ -2609,6 +2702,7 @@ impl EnhancedAIService {
                 context.roundManager.getDisplayContent().len(),
                 context.conversationHistory.len()
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
         self.finalizeAssistantResponse(
             context,
@@ -2667,7 +2761,7 @@ impl EnhancedAIService {
             .map(|invocation| resolveToolDisplayName(&invocation.tool))
             .collect::<Vec<_>>()
             .join(", ");
-        AppLogger::d(
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "chat.tool_call.handle_start executionId={} round={} toolCount={} tools=[{}] historyTurns={}",
@@ -2677,6 +2771,7 @@ impl EnhancedAIService {
                 toolNames,
                 context.conversationHistory.len()
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
 
         for invocation in &toolInvocations {
@@ -2722,7 +2817,7 @@ impl EnhancedAIService {
                 context.workspaceFolders.clone(),
                 toolExposureMode,
                 runtime.chatConfiguration.extensionOwner.clone(),
-                runtime.chatConfiguration.messageExtension.clone(),
+                runtime.chatConfiguration.executionData.clone(),
             )
             .await
             .map_err(AiServiceError::RequestFailed)?;
@@ -2732,7 +2827,7 @@ impl EnhancedAIService {
         if let Some(routeChangeIntent) = routeChangeIntent {
             self.shared_state().pendingRouteChange = Some(routeChangeIntent);
         }
-        AppLogger::d(
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "chat.tool_call.handle_executed executionId={} round={} toolCount={} resultCount={} messageBytes={}",
@@ -2742,6 +2837,7 @@ impl EnhancedAIService {
                 allToolResults.len(),
                 toolResultMessage.len()
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
 
         if !self.isExecutionContextActive(context) {
@@ -2874,10 +2970,11 @@ impl EnhancedAIService {
         self.multi_service_manager.cancelAllStreaming().await;
         self.input_processing_state
             .set_value(InputProcessingState::Idle);
-        AppLogger::d(TAG, "Conversation canceled");
+        AppLogger::v_with_level(TAG, "Conversation canceled", operit_util::AppLogger::VERBOSE_LEVEL_2);
         {
             let mut shared = self.shared_state();
             shared.per_request_token_counts = None;
+            shared.last_turn_context_window = None;
             shared.accumulated_input_token_count = 0;
             shared.accumulated_output_token_count = 0;
             shared.accumulated_cached_input_token_count = 0;
@@ -2888,7 +2985,7 @@ impl EnhancedAIService {
             shared.current_complete_callback_registered = false;
         }
         self.stopAiService(None, None);
-        AppLogger::d(TAG, "Conversation cancellation complete");
+        AppLogger::v_with_level(TAG, "Conversation cancellation complete", operit_util::AppLogger::VERBOSE_LEVEL_2);
     }
 
     pub fn cancelAllToolExecutions(&mut self) {
@@ -2934,6 +3031,13 @@ impl EnhancedAIService {
     #[allow(non_snake_case)]
     pub fn getLastTurnTokenSnapshot(&self) -> Option<TurnTokenSnapshot> {
         self.shared_state().last_turn_token_snapshot.clone()
+    }
+
+    /// Returns the completed estimate from this turn's actual prepared request.
+    /// A failed or cancelled turn never falls back to a previous turn's value.
+    #[allow(non_snake_case)]
+    pub fn getLastTurnContextWindow(&self) -> Option<i64> {
+        self.shared_state().last_turn_context_window
     }
 
     #[allow(non_snake_case)]
@@ -3339,9 +3443,9 @@ fn toolRuntimeContextForConfiguration(
             ToolExposureMode::Full => RuntimeToolExposureMode::FULL,
         },
         extensionOwner: configuration.extensionOwner.clone(),
-        messageExtension: configuration.messageExtension.clone(),
+        executionData: configuration.executionData.clone(),
     };
-    context.validateSnapshot().map_err(AiServiceError::RequestFailed)?;
+    context.validateExecutionContext().map_err(AiServiceError::RequestFailed)?;
     Ok(context)
 }
 
@@ -3405,6 +3509,66 @@ fn resolve_workspace_path_mappings(
         .filter(|mapping| std::path::Path::new(&mapping.physicalPath).is_absolute())
         .filter(|mapping| seen.insert(mapping.vfsPath.clone()))
         .collect()
+}
+
+#[cfg(test)]
+mod completed_request_window_tests {
+    use super::PreparedRequestWindow;
+    use operit_model::PromptTurn::{PromptTurn, PromptTurnKind};
+    use std::collections::HashMap;
+
+    fn turn(kind: PromptTurnKind, content: &str) -> PromptTurn {
+        PromptTurn { kind, content: content.into(), tool_name: None, metadata: HashMap::new() }
+    }
+
+    #[test]
+    fn completed_reply_reuses_the_prepared_prefix_without_copying_or_duplicating_response() {
+        let mut history = vec![
+            turn(PromptTurnKind::SYSTEM, "plugin-modified system prompt"),
+            turn(PromptTurnKind::USER, "plugin-modified current input"),
+            turn(PromptTurnKind::ASSISTANT, "completed reply"),
+        ];
+        let prefix = history.as_ptr();
+        let request = PreparedRequestWindow { historyLength: 2, availableTools: Vec::new() };
+        request.completeHistory(&mut history, || panic!("already recorded response must not be copied"));
+        assert_eq!(history.as_ptr(), prefix);
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[1].content, "plugin-modified current input");
+        assert_eq!(history[2].content, "completed reply");
+    }
+
+    #[test]
+    fn pure_thinking_completion_is_included_once_when_normal_history_append_was_skipped() {
+        let mut history = vec![turn(PromptTurnKind::USER, "question")];
+        let request = PreparedRequestWindow { historyLength: 1, availableTools: Vec::new() };
+        request.completeHistory(&mut history, || "<think>thinking only</think>".into());
+        request.completeHistory(&mut history, || panic!("response must be included only once"));
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[1].kind, PromptTurnKind::ASSISTANT);
+    }
+
+    #[test]
+    fn empty_completion_does_not_create_a_synthetic_assistant_turn() {
+        let mut history = vec![turn(PromptTurnKind::USER, "question")];
+        let request = PreparedRequestWindow { historyLength: 1, availableTools: Vec::new() };
+        request.completeHistory(&mut history, String::new);
+        assert_eq!(history.len(), 1);
+    }
+
+    #[test]
+    fn tool_continuation_keeps_all_prior_rounds_and_the_latest_response_once() {
+        let mut history = vec![
+            turn(PromptTurnKind::USER, "question"),
+            turn(PromptTurnKind::ASSISTANT, "tool invocation"),
+            turn(PromptTurnKind::TOOL_RESULT, "tool result"),
+        ];
+        let request = PreparedRequestWindow { historyLength: 3, availableTools: Vec::new() };
+        request.completeHistory(&mut history, || "reply after tool result".into());
+        request.completeHistory(&mut history, || panic!("last round must not be duplicated"));
+        assert_eq!(history.len(), 4);
+        assert_eq!(history[2].kind, PromptTurnKind::TOOL_RESULT);
+        assert_eq!(history[3].content, "reply after tool result");
+    }
 }
 
 #[cfg(test)]
@@ -3556,6 +3720,7 @@ mod model_identity_tests {
         state.beginTurn(&first, first.providerModelLabel());
         let previous_identity = state.last_turn_model_identity.clone();
         state.last_reply_content = Some("previous reply".into());
+        state.last_turn_context_window = Some(1234);
         state.last_turn_token_snapshot = Some(TurnTokenSnapshot {
             inputTokens: 100,
             outputTokens: 50,
@@ -3578,6 +3743,7 @@ mod model_identity_tests {
         assert_eq!(previous_identity.unwrap().modelName, "model-a");
         assert!(state.last_reply_content.is_none());
         assert!(state.last_turn_token_snapshot.is_none());
+        assert!(state.last_turn_context_window.is_none());
     }
 }
 

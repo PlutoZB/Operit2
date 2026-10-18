@@ -2368,6 +2368,7 @@ dependencies = [
  "base64",
  "crossterm",
  "flate2",
+ "fs2",
  "futures-util",
  "hmac",
  "image",
@@ -2771,6 +2772,7 @@ dependencies = [
  "sha2",
  "uuid",
  "wasmi",
+ "zeroize",
  "zip",
 ]
 

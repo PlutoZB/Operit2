@@ -2,7 +2,7 @@ import type { ComposeDslContext, ComposeLazyItems, ComposeNode } from '../../../
 import type { CharacterSidebarSection, ConversationSidebarGroup, CurrentSidebar, SidebarCatalog, SidebarChatSummary } from './ui-sidebar';
 
 export interface SidebarLayoutState {
-  data: SidebarCatalog; query: string; collapsed: string[]; expandedGroups: string[];
+  data: SidebarCatalog; query: string; collapsed: string[]; expandedGroups: string[]; busy: boolean;
 }
 export interface SidebarLayoutActions {
   activate(chatId: string): { type: string; chatId: string };

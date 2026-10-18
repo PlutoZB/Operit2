@@ -408,7 +408,7 @@
           "name": "link_id",
           "type": "string",
           "required": false,
-          "description": "Lossless decimal-string relationship ID."
+          "description": "Opaque stable relationship identity."
         },
         {
           "name": "source_title",
@@ -456,7 +456,7 @@
           "name": "link_id",
           "type": "string",
           "required": false,
-          "description": "Lossless decimal-string relationship ID."
+          "description": "Opaque stable relationship identity."
         },
         {
           "name": "source_title",
@@ -516,7 +516,7 @@
           "name": "link_id",
           "type": "string",
           "required": false,
-          "description": "Lossless decimal-string relationship ID."
+          "description": "Opaque stable relationship identity."
         },
         {
           "name": "source_title",
@@ -670,12 +670,6 @@ function timeBoundary(input, name) {
 }
 
 // src/validation.ts
-function requireDecimal(value, label, positive = false) {
-  if (typeof value !== "string" || !/^(0|[1-9][0-9]*)$/.test(value)) throw new Error(`${label} must be a canonical decimal string`);
-  const integer2 = BigInt(value);
-  if (integer2 > 9223372036854775807n || positive && integer2 === 0n) throw new Error(`${label} is outside its i64 range`);
-  return value;
-}
 function assertObject(value, label) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} \u5FC5\u987B\u662F\u5BF9\u8C61`);
 }
@@ -708,7 +702,7 @@ function requireName(value, label) {
 }
 function assertMemory(value) {
   assertObject(value, "\u8BB0\u5FC6\u8BB0\u5F55");
-  requireDecimal(value.id, "\u8BB0\u5FC6\u6570\u636E\u5E93\u6807\u8BC6", true);
+  requireId(value.id, "\u8BB0\u5FC6\u6570\u636E\u5E93\u6807\u8BC6");
   requireId(value.uuid, "\u8BB0\u5FC6 UUID");
   for (const field of ["title", "content", "contentType", "source"]) assertString(value[field], field);
   assertNumber(value.credibility, "\u53EF\u4FE1\u5EA6", 0, 1);
@@ -719,12 +713,12 @@ function assertMemory(value) {
   if (!Array.isArray(value.tags) || !Array.isArray(value.properties)) throw new Error("\u8BB0\u5FC6\u6807\u7B7E\u548C\u5C5E\u6027\u5FC5\u987B\u662F\u6570\u7EC4");
   for (const tag of value.tags) {
     assertObject(tag, "\u8BB0\u5FC6\u6807\u7B7E");
-    requireDecimal(tag.id, "\u8BB0\u5FC6\u6807\u7B7E\u6807\u8BC6");
+    requireId(tag.id, "\u8BB0\u5FC6\u6807\u7B7E\u6807\u8BC6");
     assertString(tag.name, "\u8BB0\u5FC6\u6807\u7B7E\u540D\u79F0");
   }
   for (const property2 of value.properties) {
     assertObject(property2, "\u8BB0\u5FC6\u5C5E\u6027");
-    requireDecimal(property2.id, "\u8BB0\u5FC6\u5C5E\u6027\u6807\u8BC6");
+    requireId(property2.id, "\u8BB0\u5FC6\u5C5E\u6027\u6807\u8BC6");
     assertString(property2.key, "\u8BB0\u5FC6\u5C5E\u6027\u952E");
     assertString(property2.value, "\u8BB0\u5FC6\u5C5E\u6027\u503C");
   }
@@ -754,6 +748,7 @@ function assertSearchConfig(value) {
 // src/memory-jobs/embeddings.ts
 function assertEmbedding(value) {
   assertObject(value, "embedding");
+  requireId(value.id, "embedding id");
   requireName(value.endpoint, "embedding endpoint");
   requireName(value.model, "embedding model");
   assertString(value.text, "embedding text");
@@ -814,8 +809,8 @@ function assertMemorySpace(value) {
   }
   for (const link of value.links) {
     assertObject(link, "link");
-    requireDecimal(link.id, "link id", true);
-    const source = requireDecimal(link.sourceMemoryId, "source memory id", true), target = requireDecimal(link.targetMemoryId, "target memory id", true);
+    requireId(link.id, "link id");
+    const source = requireId(link.sourceMemoryId, "source memory id"), target = requireId(link.targetMemoryId, "target memory id");
     if (!memoryIds.has(source) || !memoryIds.has(target)) throw new Error("Relationship references a missing memory: " + link.id);
     if (source === target) throw new Error("Relationship cannot point to itself");
     assertString(link.type_, "link type");
@@ -825,7 +820,7 @@ function assertMemorySpace(value) {
   const indices = /* @__PURE__ */ new Set();
   for (const chunk of value.chunks) {
     assertObject(chunk, "chunk");
-    requireDecimal(chunk.id, "chunk id", true);
+    requireId(chunk.id, "chunk id");
     const memoryUuid = requireId(chunk.memoryUuid, "chunk memory UUID");
     assertInteger(chunk.chunkIndex, "chunk index", 0);
     assertString(chunk.content, "chunk content");
@@ -838,7 +833,7 @@ function assertMemorySpace(value) {
   const candidateSources = /* @__PURE__ */ new Set();
   for (const candidate of value.candidates) {
     assertObject(candidate, "candidate");
-    requireDecimal(candidate.id, "candidate id", true);
+    requireId(candidate.id, "candidate id");
     requireId(candidate.chatId, "candidate chat id");
     for (const field of ["triggerMessageTimestamp", "triggerVariantIndex", "createdAt", "updatedAt", "attemptCount"]) assertInteger(candidate[field], field, 0);
     for (const field of ["status", "lastError", "sourceType"]) assertString(candidate[field], field);
@@ -862,7 +857,7 @@ function assertMemorySpace(value) {
   )) throw new Error("Invalid memory rebuild status");
   if (value.rebuildTask !== null) {
     assertObject(value.rebuildTask, "rebuild task");
-    requireDecimal(value.rebuildTask.id, "rebuild task id", true);
+    requireId(value.rebuildTask.id, "rebuild task id");
     array(value.rebuildTask.windows, "rebuild windows");
     assertInteger(value.rebuildTask.nextWindow, "rebuild cursor", 0);
     if (value.rebuildTask.windows.length === 0 || value.rebuildTask.nextWindow > value.rebuildTask.windows.length) throw new Error("Invalid rebuild cursor or source plan");
@@ -954,10 +949,8 @@ function nonblank(value, path) {
   text(value, path);
   if (value.trim() === "") throw new Error(`${path} must not be blank`);
 }
-function parseMemoryIdentifier(value, path, positive = true) {
-  if (typeof value !== "string" || !/^(0|[1-9][0-9]*)$/.test(value)) throw new Error(`${path} must be a canonical decimal string`);
-  const id2 = BigInt(value);
-  if (id2 > 9223372036854775807n || positive && id2 === 0n) throw new Error(`${path} is outside its declared identity range`);
+function parseMemoryIdentifier(value, path, _positive = true) {
+  if (typeof value !== "string" || value.trim() === "" || value !== value.trim() || value.length > 256) throw new Error(`${path} must be a nonblank identity`);
   return value;
 }
 function memoryIdentifier(value, path) {
@@ -1053,7 +1046,6 @@ var characterFields = {
   sharedMemoryId: optional(nullable(text)),
   sharedMemoryMounts: optional(array2(mount)),
   toolAccessConfig: optional(toolAccess),
-  isDefault: optional(boolean),
   createdAt: optional(integer),
   updatedAt: optional(integer)
 };
@@ -1117,7 +1109,6 @@ var validators = {
   "character.delete": id,
   "character.setActive": id,
   "character.combine": shape({ id: required(nonblank), promptFunctionType: optional(enumeration("CHAT", "VOICE")), additionalTagIds: optional(identifiers) }),
-  "character.resetDefault": empty,
   "character.export": shape({ id: required(nonblank), format: required(format) }),
   "character.import": shape({ format: required(format), content: required(nonblank) }),
   "character.exportBackup": empty,
@@ -1177,7 +1168,6 @@ function parseChatConfigurationRequest(value) {
     purpose: required(enumeration("display", "execution")),
     chatId: required(nullable(nonblank)),
     chatExtension: required(nullable(markerObject)),
-    messageExtension: required(nullable(markerObject)),
     participantId: required(nullable(nonblank)),
     promptFunctionType: required(enumeration("CHAT", "VOICE")),
     defaultModelBinding: required(shape({ providerId: required(text), modelId: required(text) })),
@@ -1185,7 +1175,7 @@ function parseChatConfigurationRequest(value) {
   })(value, "chat.configuration.resolve");
   const request = value;
   if (request.purpose === "display") {
-    if (request.participantId !== null || request.messageExtension !== null) throw new Error("Display configuration cannot request an execution participant or message snapshot");
+    if (request.participantId !== null) throw new Error("Display configuration cannot request an execution participant");
   } else {
     nonblank(request.defaultModelBinding.providerId, "execution default provider");
     nonblank(request.defaultModelBinding.modelId, "execution default model");
@@ -1361,8 +1351,8 @@ var MemoryTools = class {
       }
     }
     return [...scores.values()].sort(
-      /** Preserves original RRF ordering and lossless numeric identity ties. */
-      (left, right) => right.score - left.score || (BigInt(left.chunk.id) < BigInt(right.chunk.id) ? -1 : BigInt(left.chunk.id) > BigInt(right.chunk.id) ? 1 : 0)
+      /** Preserves original RRF ordering and stable identity ties. */
+      (left, right) => right.score - left.score || (left.chunk.id < right.chunk.id ? -1 : left.chunk.id > right.chunk.id ? 1 : 0)
     ).slice(0, count).map(
       /** Returns complete original chunk records rather than a synthetic projection. */
       (item) => item.chunk
@@ -1694,6 +1684,6 @@ async function list_character_cards(input) {
   const records = await callDomain("character.list", {});
   return { totalCount: records.length, cards: records.map(
     /** Preserves the historical tool projection from actual complete stored card records. */
-    (card) => ({ id: card.id, name: card.name, description: card.description, isDefault: card.isDefault, createdAt: card.createdAt, updatedAt: card.updatedAt })
+    (card) => ({ id: card.id, name: card.name, description: card.description, createdAt: card.createdAt, updatedAt: card.updatedAt })
   ) };
 }

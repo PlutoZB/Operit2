@@ -250,6 +250,15 @@ impl CoreNodeRouter {
         self.peerServices.get().ok_or_else(|| "Node services are not installed".into())
     }
 
+    /// Largest encoded Link message one direct peer connection can carry.
+    /// Callers that build their own payloads size them against this ceiling;
+    /// an uninstalled peer service falls back to the documented default.
+    pub fn maxPeerMessageBytes(&self) -> usize {
+        self.nodeServices()
+            .map(|services| services.peers().maxMessageBytes())
+            .unwrap_or(operit_peer_link::DEFAULT_MAX_PEER_MESSAGE_BYTES)
+    }
+
     /// Creates a router over the local Core and its runtime-owned Link Access records.
     pub fn new(localCore: CoreNodeLocalRuntime) -> Self {
         let bindingStore = Arc::new(
@@ -1421,7 +1430,7 @@ impl CoreNodeRouter {
                 ),
                 VERBOSE_LEVEL_5,
             );
-            AppLogger::i(
+            AppLogger::trace(
                 "CoreNodeRouter",
                 &format!(
                     "binding watch segment open requestId={} property={} owner={} generation={} localSource={}",
@@ -1477,7 +1486,7 @@ impl CoreNodeRouter {
                     }
                 }
             };
-            AppLogger::i(
+            AppLogger::trace(
                 "CoreNodeRouter",
                 &format!(
                     "binding watch segment stream opened requestId={} property={} owner={} generation={}",
@@ -1544,7 +1553,7 @@ impl CoreNodeRouter {
                         };
                         if !firstEventLogged {
                             firstEventLogged = true;
-                            AppLogger::i(
+                            AppLogger::trace(
                                 "CoreNodeRouter",
                                 &format!(
                                     "binding watch first event requestId={} property={} owner={} generation={} kind={:?}",
@@ -1604,7 +1613,7 @@ impl CoreNodeRouter {
                             VERBOSE_LEVEL_6,
                         );
                         if event.kind == CoreEventKind::Snapshot {
-                            AppLogger::i(
+                            AppLogger::trace(
                                 "CoreNodeRouter",
                                 &format!(
                                     "binding watch snapshot forwarded requestId={} property={} owner={} generation={}",
@@ -2125,7 +2134,7 @@ impl CoreLinkSharedClient for CoreNodeRouter {
             }
         }
         if let GeneratedCoreRoute::Binding { key, .. } = &route {
-            operit_util::AppLogger::AppLogger::i(
+            operit_util::AppLogger::AppLogger::trace(
                 "CoreNodeRouter",
                 &format!(
                     "binding call route requestId={} path={} method={} key={} source={} target={}",
@@ -2144,7 +2153,7 @@ impl CoreLinkSharedClient for CoreNodeRouter {
         let methodName = request.methodName.clone();
         let requestId = request.requestId.0.clone();
         let response = self.callNode(targetNodeId.clone(), request).await;
-        operit_util::AppLogger::AppLogger::i(
+        operit_util::AppLogger::AppLogger::trace(
             "CoreNodeRouter",
             &format!(
                 "remote call returned requestId={} method={} target={} success={}",
@@ -2217,7 +2226,7 @@ impl CoreLinkSharedClient for CoreNodeRouter {
             );
         }
         if let GeneratedCoreRoute::Binding { key, .. } = &route {
-            operit_util::AppLogger::AppLogger::i(
+            operit_util::AppLogger::AppLogger::trace(
                 "CoreNodeRouter",
                 &format!(
                     "binding watch open requestId={} path={} property={} key={} source={}",
@@ -3558,7 +3567,7 @@ mod tests {
                     runtimeChatHistory: Vec::new(), workspacePath: None,
                     promptFunctionType: operit_model::PromptFunctionType::PromptFunctionType::CHAT,
                     enableThinking: false, participantId: String::new(), extensionOwner: String::new(),
-                    messageExtension: serde_json::Map::new(), proxySenderName: None,
+                    proxySenderName: None,
                     notifyReplyOverride: None, chatProviderIdOverride: None, chatModelIdOverride: None,
                     turnOptions: Default::default(),
                 };

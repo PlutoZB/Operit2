@@ -1232,3 +1232,6 @@ mod annotated_route_tests {
 
 #[path = "support/ui_resource_tests.rs"]
 mod ui_resource_tests;
+
+#[path = "support/failed_package_tests.rs"]
+mod failed_package_tests;

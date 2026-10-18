@@ -16,6 +16,7 @@ struct _WebviewAllLinuxPlugin {
 
   FlPluginRegistrar *registrar;
   FlMethodChannel *root_channel;
+  FlMethodChannel *resource_channel;
   GtkOverlay *overlay;
   GtkWidget *flutter_view;
   GtkWidget *flutter_input_widget;
@@ -45,6 +46,7 @@ typedef struct {
   GHashTable *user_scripts;
   GPtrArray *user_script_order;
   gint next_request_id;
+  gboolean local_resources_enabled;
   gboolean console_enabled;
   gboolean scroll_enabled;
   gboolean java_script_alert_dialog_enabled;

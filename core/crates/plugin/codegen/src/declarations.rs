@@ -209,7 +209,7 @@ fn generate_declaration_file(
         source: if spec.ts_file == "toolpkg.d.ts" {
             format!("{}\nimport {{ ToolPkg as ToolPkgRuntime }} from \"./toolpkg\";\ndeclare global {{ export import ToolPkg = ToolPkgRuntime; }}\n", context.emit())
         } else if spec.ts_file == "storage.d.ts" {
-            format!("{}\nexport type {{ StorageRequest, StorageTable, StorageSqlValue, StorageMergeDescriptor, StorageKind, StorageColumn, StorageColumnType, StorageMutation, StorageStatement, StorageMergeEntity, StorageMergeReference, StorageMergeTarget, StorageMergeKeyEncoding }} from \"./storage.generated\";\n", context.emit())
+            format!("{}\nexport type {{ StorageRequest, StorageTable, StorageSqlValue, StorageMergeDescriptor, StorageKind, StorageColumn, StorageColumnType, StorageMutation, StorageStatement, StorageMergeEntity, StorageMergeReference, StorageMergeTarget, StorageMergeKeyEncoding, StoragePreferencesMergeDescriptor, StoragePreferencesMergeCatalog, StoragePreferencesMergeReference, StoragePreferencesMergeKey, StoragePreferencesMergePathSegment, StoragePreferencesMergeProjection }} from \"./storage.generated\";\n", context.emit())
         } else { context.emit() },
     }
 }
@@ -1065,8 +1065,49 @@ impl<'a> EmitContext<'a> {
             Type::Never(_) => "never".to_string(),
             Type::Paren(parenthesized) => self.emit_type(&parenthesized.elem, scope),
             Type::Group(group) => self.emit_type(&group.elem, scope),
-            Type::Slice(slice) => format!("{}[]", self.emit_type(&slice.elem, scope)),
+            Type::Slice(slice) => self.emit_array_type(&slice.elem, scope),
             _ => panic!("unsupported Rust SDK type node"),
+        }
+    }
+
+    /// Groups union and function element types before applying TypeScript's array postfix.
+    fn emit_array_type(&self, element: &Type, scope: &[String]) -> String {
+        let emitted = self.emit_type(element, scope);
+        if self.array_element_requires_parentheses(element) {
+            format!("({emitted})[]")
+        } else {
+            format!("{emitted}[]")
+        }
+    }
+
+    /// Determines array precedence from the Rust type tree rather than inspecting emitted text.
+    fn array_element_requires_parentheses(&self, element: &Type) -> bool {
+        if is_function_type(element) { return true; }
+        match element {
+            Type::Path(path) => {
+                let segment = path.path.segments.last().expect("Rust type paths have a segment");
+                let name = segment.ident.to_string();
+                match name.as_str() {
+                    "Option" | "JsUndefined" | "JsOptional" | "JsNullable" | "JsMethodDecorator" => true,
+                    "Arc" | "Box" | "Pin" | "PhantomData" => {
+                        let (_, inner) = single_type_argument(element).expect("Transparent SDK types require an inner type");
+                        self.array_element_requires_parentheses(inner)
+                    }
+                    _ => match self.inline_items.get(&name) {
+                        Some(ItemRef::Enum(_)) => true,
+                        Some(ItemRef::Type(item)) => self.array_element_requires_parentheses(&item.ty),
+                        Some(ItemRef::Struct(item)) => match &item.fields {
+                            Fields::Unnamed(fields) if fields.unnamed.len() == 1 => self.array_element_requires_parentheses(&fields.unnamed[0].ty),
+                            _ => false,
+                        },
+                        _ => false,
+                    }
+                }
+            }
+            Type::Reference(reference) => self.array_element_requires_parentheses(&reference.elem),
+            Type::Paren(parenthesized) => self.array_element_requires_parentheses(&parenthesized.elem),
+            Type::Group(group) => self.array_element_requires_parentheses(&group.elem),
+            _ => false,
         }
     }
 
@@ -1090,7 +1131,10 @@ impl<'a> EmitContext<'a> {
             "JsAny" => "any".to_string(),
             "JsObject" => "object".to_string(),
             "JsNever" => "never".to_string(),
-            "Vec" => format!("{}[]", self.emit_first_argument(arguments, scope)),
+            "Vec" => match arguments.and_then(|arguments| arguments.args.first()) {
+                Some(GenericArgument::Type(element)) => self.emit_array_type(element, scope),
+                _ => panic!("Vec SDK types require an element type"),
+            },
             "Option" if self.nullable_wire_fields => {
                 format!("{} | null", self.emit_first_argument(arguments, scope))
             }
@@ -2140,6 +2184,32 @@ mod tests {
             context.emit_inline_struct(&item, &[]),
             "{ expectedVersion: string | null; }"
         );
+    }
+
+    /// Keeps nullable array elements inside the array across facade, wire, slice and callback types.
+    #[test]
+    fn preserves_array_element_type_precedence() {
+        for wire in [false, true] {
+            let spec = ModuleSpec { rust_file: "js_sdk/storage.rs", additional_rust_file: None,
+                ts_file: "storage.generated.d.ts", nullable_wire_fields: wire };
+            let context = EmitContext::new(&[], &spec, TypeCatalog::new());
+            for (source, expected) in [
+                ("Vec<String>", "string[]"),
+                ("Vec<JsNullable<String>>", "(string | null)[]"),
+                ("Vec<JsOptional<String>>", "(string | null | undefined)[]"),
+                ("Vec<JsUndefined<String>>", "(string | undefined)[]"),
+                ("Vec<Box<JsNullable<String>>>", "(string | null)[]"),
+                ("&[JsNullable<String>]", "(string | null)[]"),
+                ("Vec<Vec<JsNullable<String>>>", "(string | null)[][]"),
+                ("JsFuture<Vec<JsNullable<StorageEntry<T>>>>", "Promise<(StorageEntry<T> | null)[]>"),
+                ("Vec<Arc<dyn Fn(String) -> String>>", "((arg0: string) => string)[]"),
+            ] {
+                let value: Type = syn::parse_str(source).unwrap();
+                assert_eq!(context.emit_type(&value, &[]), expected, "{source}");
+            }
+            let value: Type = syn::parse_quote! { Vec<Option<String>> };
+            assert_eq!(context.emit_type(&value, &[]), if wire { "(string | null)[]" } else { "(string | undefined)[]" });
+        }
     }
 
     /// Verifies that ordinary Rust composition fields retain interface and open-object semantics.

@@ -11,6 +11,7 @@ import 'package:operit2/core/link/CoreLinkProtocol.dart';
 import 'package:operit2/core/proxy/generated/CoreProxyClients.g.dart';
 import 'package:operit2/core/proxy/generated/CoreProxyModels.g.dart'
     as core_proxy;
+import 'package:operit2/ui/features/packages/components/PackageListItem.dart';
 import 'package:operit2/ui/features/packages/screens/PackageManagerScreen.dart';
 import 'package:operit2/ui/features/packages/dialogs/PackageEnvironmentVariablesDialog.dart';
 import 'package:operit2/ui/main/navigation/ToolPkgCatalogChangeBus.dart';
@@ -32,10 +33,12 @@ void main() {
           ..enabled = true;
         bridge.preferences['chat_sidebar_tab_v1'] = selection;
         final selectionsAtNotification = <String?>[];
-        final subscription = ToolPkgCatalogChangeBus.listen(() {
+        final reloadPolicies = <bool>[];
+        final subscription = ToolPkgCatalogChangeBus.listenChanges((change) {
           selectionsAtNotification.add(
             bridge.preferences['chat_sidebar_tab_v1'],
           );
+          reloadPolicies.add(change.reloadPluginCode);
         });
         addTearDown(subscription.cancel);
         await tester.pumpWidget(_manager(bridge));
@@ -53,6 +56,7 @@ void main() {
         expect(bridge.scans, 0);
         expect(bridge.preferences['chat_sidebar_tab_v1'], expected);
         expect(selectionsAtNotification, [expected]);
+        expect(reloadPolicies, [false]);
         expect(
           bridge.mutations,
           expected != selection ? ['disable', 'selection'] : ['disable'],
@@ -61,6 +65,24 @@ void main() {
       },
     );
   }
+
+  testWidgets('enabling a plugin requests a registration-only refresh', (
+    tester,
+  ) async {
+    final bridge = _CatalogBridge()..installed = true;
+    final changes = <ToolPkgCatalogChange>[];
+    final subscription = ToolPkgCatalogChangeBus.listenChanges(changes.add);
+    addTearDown(subscription.cancel);
+    await tester.pumpWidget(_manager(bridge));
+    await tester.pumpAndSettle();
+    expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
+    await tester.tap(find.byType(Switch));
+    await tester.pumpAndSettle();
+    expect(bridge.enabled, isTrue);
+    expect(bridge.mutations, ['enable']);
+    expect(changes.map((change) => change.reloadPluginCode), [false]);
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets('failed plugin disable keeps the current sidebar selection', (
     tester,
@@ -85,6 +107,289 @@ void main() {
     expect(find.textContaining('Disable rejected'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  for (final name in <String>[
+    'com.operit.plan_mode_bundle',
+    'com.operit.goal_mode_bundle',
+  ]) {
+    for (final runtimeFallback in <bool>[false, true]) {
+      testWidgets(
+        'fixed-scope extra loads directly: $name, fallback=$runtimeFallback',
+        (tester) async {
+          final bridge = _CatalogBridge();
+          if (runtimeFallback) {
+            bridge.extraRuntimes.add(
+              _pluginRuntime().toJson()
+                ..['packageName'] = name
+                ..['manifestExtensions'] = <String, Object?>{
+                  'installation_scope': 'space',
+                },
+            );
+          } else {
+            bridge.extraCandidates.add(
+              _extraCandidate(name, requiredScope: 'space'),
+            );
+          }
+          await tester.pumpWidget(_manager(bridge));
+          await tester.pumpAndSettle();
+          await tester.tap(find.byTooltip('展开'));
+          await tester.pumpAndSettle();
+          await tester.ensureVisible(find.text('加载'));
+          await tester.tap(find.text('加载'));
+          await tester.pumpAndSettle();
+          expect(find.text('选择存放位置'), findsNothing);
+          expect(bridge.imports, [name]);
+          expect(bridge.scopeChanges, isEmpty);
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+  }
+
+  for (final scope in <String>['device', 'space']) {
+    testWidgets('unrestricted extra keeps scope selection: $scope', (
+      tester,
+    ) async {
+      final bridge = _CatalogBridge()
+        ..extraCandidates.add(_extraCandidate('flexible.plugin'));
+      await tester.pumpWidget(_manager(bridge));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('展开'));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('加载'));
+      await tester.tap(find.text('加载'));
+      await tester.pumpAndSettle();
+      expect(find.text('选择存放位置'), findsOneWidget);
+      expect(bridge.imports, isEmpty);
+      await tester.tap(find.text(scope == 'space' ? '设备空间' : '仅本设备'));
+      await tester.pumpAndSettle();
+      expect(bridge.imports, ['flexible.plugin']);
+      expect(bridge.scopeChanges.single['scope'], scope);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  for (final packageName in <String?>['broken_toolpkg', null]) {
+    testWidgets(
+      'failed package can be deleted from its details: $packageName',
+      (tester) async {
+        final issue = core_proxy.ToolPkgLoadIssue(
+          sourcePath: '/packages/broken.toolpkg',
+          packageName: packageName,
+          displayName: 'Broken package',
+          code: 'parse_failed',
+          message: 'Invalid manifest',
+          packageKind: 'toolpkg',
+        );
+        final bridge = _CatalogBridge()..loadIssues.add(issue);
+        await tester.pumpWidget(_manager(bridge));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Broken package'));
+        await tester.pumpAndSettle();
+        expect(find.text('Invalid manifest'), findsWidgets);
+        await tester.tap(find.widgetWithText(FilledButton, '删除'));
+        await tester.pumpAndSettle();
+        expect(find.text('删除加载失败的包'), findsOneWidget);
+        await tester.tap(find.widgetWithText(FilledButton, '删除'));
+        await tester.pumpAndSettle();
+        expect(bridge.deletedIssues.single.toJson(), issue.toJson());
+        expect(find.text('Broken package'), findsNothing);
+        expect(find.text('已删除，可重新添加'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets('broken import bookkeeping can be deleted from its details', (
+    tester,
+  ) async {
+    final bridge = _CatalogBridge()
+      ..loadIssues.add(
+        const core_proxy.ToolPkgLoadIssue(
+          sourcePath: '/packages',
+          packageName: null,
+          displayName: '插件导入记录',
+          code: 'scan_failed',
+          message: 'missing field scope',
+          packageKind: 'package_manager',
+        ),
+      );
+    await tester.pumpWidget(_manager(bridge));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('包'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('插件导入记录'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '删除'));
+    await tester.pumpAndSettle();
+    expect(find.text('删除导入记录'), findsOneWidget);
+    await tester.tap(find.widgetWithText(FilledButton, '删除'));
+    await tester.pumpAndSettle();
+    expect(bridge.deletedIssues.single.packageKind, 'package_manager');
+    expect(find.text('插件导入记录'), findsNothing);
+    expect(find.text('导入记录已删除'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'plugin packages and failed plugins stay out of the package tab',
+    (tester) async {
+      final bridge = _CatalogBridge()
+        ..scopes.addAll(<String, String>{
+          'owner_plugin': 'device',
+          'standalone_tools': 'device',
+        })
+        ..executablePackages.addAll(<String, core_proxy.ToolPackage>{
+          'plugin_inner_tools': _namedPackage(
+            'plugin_inner_tools',
+            'Inner tools',
+          ),
+          'standalone_tools': _namedPackage(
+            'standalone_tools',
+            'Standalone tools',
+          ),
+        })
+        ..installedContainers.add(
+          _pluginRuntime().toJson()
+            ..['packageName'] = 'owner_plugin'
+            ..['displayName'] = <String, Object?>{
+              'values': <String, String>{'default': 'Owner plugin'},
+            }
+            ..['sourcePath'] = 'owner_plugin.toolpkg'
+            ..['subpackages'] = <Object?>[
+              const core_proxy.ToolPkgSubpackageRuntime(
+                packageName: 'plugin_inner_tools',
+                containerPackageName: 'owner_plugin',
+                subpackageId: 'tools',
+                entryPath: 'dist/tools.js',
+                displayName: core_proxy.LocalizedText(
+                  values: <String, String>{'default': 'Inner tools'},
+                ),
+                description: core_proxy.LocalizedText(
+                  values: <String, String>{'default': 'Owned by the plugin'},
+                ),
+                enabledByDefault: true,
+                toolCount: 1,
+              ).toJson(),
+            ],
+        )
+        ..loadIssues.addAll(<core_proxy.ToolPkgLoadIssue>[
+          const core_proxy.ToolPkgLoadIssue(
+            sourcePath: '/packages/broken.toolpkg',
+            packageName: 'broken_plugin',
+            displayName: 'Broken plugin',
+            code: 'toolpkg_load',
+            message: 'Invalid plugin manifest',
+            packageKind: 'package',
+          ),
+          const core_proxy.ToolPkgLoadIssue(
+            sourcePath: '/packages/broken.js',
+            packageName: 'broken_script',
+            displayName: 'Broken script',
+            code: 'package_parse',
+            message: 'Invalid script package',
+            packageKind: 'javascript',
+          ),
+        ]);
+      await tester.pumpWidget(_manager(bridge));
+      await tester.pumpAndSettle();
+      expect(find.text('Owner plugin'), findsOneWidget);
+      expect(
+        find.byKey(
+          const ValueKey<String>(
+            'plugin-load-issue:/packages/broken.toolpkg:toolpkg_load:0',
+          ),
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Inner tools'), findsNothing);
+      expect(find.text('Standalone tools'), findsNothing);
+      await tester.tap(find.text('包'));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey<String>('package:standalone_tools')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey<String>('package:plugin_inner_tools')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(
+          const ValueKey<String>(
+            'package-load-issue:/packages/broken.js:package_parse:0',
+          ),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(
+          const ValueKey<String>(
+            'package-load-issue:/packages/broken.toolpkg:toolpkg_load:0',
+          ),
+        ),
+        findsNothing,
+      );
+      expect(find.text('Inner tools'), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('cancelling failed package deletion keeps its source', (
+    tester,
+  ) async {
+    final bridge = _CatalogBridge()
+      ..loadIssues.add(
+        const core_proxy.ToolPkgLoadIssue(
+          sourcePath: '/packages/broken.toolpkg',
+          packageName: 'broken',
+          displayName: 'Broken package',
+          code: 'parse_failed',
+          message: 'Invalid manifest',
+          packageKind: 'toolpkg',
+        ),
+      );
+    await tester.pumpWidget(_manager(bridge));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Broken package'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '删除'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(bridge.deletedIssues, isEmpty);
+    expect(find.text('Broken package'), findsOneWidget);
+  });
+
+  testWidgets(
+    'failed deletion reports the error and keeps the failed package',
+    (tester) async {
+      final bridge = _CatalogBridge()
+        ..deleteIssueError = StateError('Storage rejected deletion')
+        ..loadIssues.add(
+          const core_proxy.ToolPkgLoadIssue(
+            sourcePath: '/packages/broken.toolpkg',
+            packageName: 'broken',
+            displayName: 'Broken package',
+            code: 'parse_failed',
+            message: 'Invalid manifest',
+            packageKind: 'toolpkg',
+          ),
+        );
+      await tester.pumpWidget(_manager(bridge));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Broken package'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, '删除'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, '删除'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Storage rejected deletion'), findsOneWidget);
+      expect(find.text('Broken package'), findsOneWidget);
+      expect(bridge.deletedIssues, isEmpty);
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets('catalog change refreshes list without reopening or rescanning', (
     tester,
@@ -273,6 +578,70 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('plugin and package tabs keep visited cards without rebuilding', (
+    tester,
+  ) async {
+    final bridge = _CatalogBridge()..installed = true;
+    await tester.pumpWidget(_manager(bridge));
+    await tester.pumpAndSettle();
+    final expand = find.byIcon(Icons.keyboard_arrow_down);
+    await tester.ensureVisible(expand);
+    await tester.tap(expand);
+    await tester.pumpAndSettle();
+    expect(find.text('demo_toolpkg'), findsOneWidget);
+
+    await tester.tap(
+      find.descendant(of: find.byType(TabBar), matching: find.text('包')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('快速创作你的插件'), findsOneWidget);
+    expect(find.text('demo_toolpkg'), findsNothing);
+
+    await tester.tap(
+      find.descendant(of: find.byType(TabBar), matching: find.text('插件')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('demo_toolpkg'), findsOneWidget);
+    expect(find.text('快速创作你的插件'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('package cards do not blur when transparent surfaces are on', (
+    tester,
+  ) async {
+    final snapshot = ThemePreferenceSnapshot.fromJson(<String, Object?>{
+      ...UserPreferencesManager.defaultThemePreferenceSnapshot.toJson(),
+      'transparentSurfaceEnabled': true,
+    });
+    await tester.pumpWidget(
+      OperitTheme(
+        initialThemePreferenceSnapshot: snapshot,
+        initialThemeIsReady: true,
+        unconfiguredChildEnabled: true,
+        hostInteractionHostsEnabled: false,
+        child: const Material(
+          child: PackageListItem(
+            icon: Icons.extension_outlined,
+            title: 'Demo package',
+            subtitle: 'A package card',
+            metadata: <String>['demo'],
+            enabled: true,
+            onEnabledChanged: _ignorePackageEnabled,
+          ),
+        ),
+      ),
+    );
+    expect(
+      find.descendant(
+        of: find.byType(PackageListItem),
+        matching: find.byType(BackdropFilter),
+      ),
+      findsNothing,
+    );
+    expect(find.text('Demo package'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('package manager action opens the runtime environment editor', (
     tester,
   ) async {
@@ -309,6 +678,9 @@ void main() {
     await tester.pumpAndSettle();
   });
 }
+
+/// Ignores switch changes in the package-card rendering probe.
+void _ignorePackageEnabled(bool enabled) {}
 
 /// Mounts the production package controls with the supplied runtime bridge.
 Widget _manager(_CatalogBridge bridge) => OperitTheme(
@@ -372,6 +744,16 @@ class _CatalogBridge extends OperitRuntimeBridge {
   bool installed = false;
   bool enabled = false;
   Object? disableError;
+  Object? deleteIssueError;
+  final loadIssues = <core_proxy.ToolPkgLoadIssue>[];
+  final deletedIssues = <core_proxy.ToolPkgLoadIssue>[];
+  final extraCandidates = <core_proxy.BundledExternalPackageCandidate>[];
+  final extraRuntimes = <Map<String, Object?>>[];
+  final installedContainers = <Map<String, Object?>>[];
+  final executablePackages = <String, core_proxy.ToolPackage>{};
+  final scopes = <String, String>{};
+  final imports = <String>[];
+  final scopeChanges = <Map<String, Object?>>[];
   final preferences = <String, String>{};
   final mutations = <String>[];
   int scans = 0;
@@ -395,11 +777,14 @@ class _CatalogBridge extends OperitRuntimeBridge {
         environmentCatalogReads++;
         return <String, Object?>{};
       case 'getExtensionScopes':
-        return installed
-            ? <String, Object?>{'demo_toolpkg': 'device'}
-            : <String, Object?>{};
+        return <String, Object?>{
+          if (installed) 'demo_toolpkg': 'device',
+          ...scopes,
+        };
       case 'getExecutableAvailablePackages':
-        return <String, Object?>{};
+        return executablePackages.map(
+          (name, package) => MapEntry(name, package.toJson()),
+        );
       case 'getToolPkgContainerRuntimes':
         catalogReads += 1;
         activeCatalogReads += 1;
@@ -407,7 +792,10 @@ class _CatalogBridge extends OperitRuntimeBridge {
           maxActiveCatalogReads,
           activeCatalogReads,
         );
-        final result = installed ? [_pluginRuntime().toJson()] : [];
+        final result = <Object?>[
+          if (installed) _pluginRuntime().toJson(),
+          ...installedContainers,
+        ];
         final started = catalogReadStarted;
         catalogReadStarted = null;
         started?.complete();
@@ -416,6 +804,11 @@ class _CatalogBridge extends OperitRuntimeBridge {
         return result;
       case 'getEnabledPackageNames':
         return installed && enabled ? ['demo_toolpkg'] : [];
+      case 'enableToolPkgContainer':
+        expect((request.args as Map)['containerPackageName'], 'demo_toolpkg');
+        enabled = true;
+        mutations.add('enable');
+        return 'Enabled';
       case 'disableToolPkgContainer':
         expect((request.args as Map)['containerPackageName'], 'demo_toolpkg');
         if (disableError case final Object error) throw error;
@@ -438,14 +831,51 @@ class _CatalogBridge extends OperitRuntimeBridge {
         );
         mutations.add('selection');
         return null;
-      case 'getToolPkgContainerOrder':
-      case 'getBundledExternalPackageCandidates':
-      case 'getBundledExternalToolPkgContainerRuntimes':
+      case 'deleteToolPkgLoadIssue':
+        if (deleteIssueError case final Object error) throw error;
+        final issue = core_proxy.ToolPkgLoadIssue.fromJson(
+          ((request.args as Map)['issue'] as Map).cast<String, Object?>(),
+        );
+        deletedIssues.add(issue);
+        loadIssues.clear();
+        return null;
       case 'getToolPkgLoadIssues':
+        return loadIssues.map((issue) => issue.toJson()).toList();
+      case 'getBundledExternalPackageCandidates':
+        return extraCandidates.map((candidate) => candidate.toJson()).toList();
+      case 'getBundledExternalToolPkgContainerRuntimes':
+        return extraRuntimes;
+      case 'importBundledExternalToolPkgContainer':
+        imports.add((request.args as Map)['containerPackageName'] as String);
+        extraCandidates.clear();
+        extraRuntimes.clear();
+        return 'Successfully imported package';
+      case 'setExtensionScope':
+        scopeChanges.add((request.args as Map).cast<String, Object?>());
+        return null;
+      case 'getToolPkgContainerOrder':
         return [];
     }
     throw StateError('Unexpected catalog call: ${request.methodName}');
   }
+}
+
+/// Creates a standalone script package shown on the package tab.
+core_proxy.ToolPackage _namedPackage(String name, String displayName) {
+  return core_proxy.ToolPackage(
+    name: name,
+    description: const core_proxy.LocalizedText(values: <String, String>{}),
+    displayName: core_proxy.LocalizedText(
+      values: <String, String>{'default': displayName},
+    ),
+    tools: const <core_proxy.PackageTool>[],
+    states: const <core_proxy.ToolPackageState>[],
+    env: const <core_proxy.EnvVar>[],
+    isBuiltIn: false,
+    enabledByDefault: true,
+    category: 'Other',
+    author: const <String>[],
+  );
 }
 
 /// Creates an installed plugin fixture for catalog refresh assertions.
@@ -545,3 +975,27 @@ core_proxy.ToolPkgContainerRuntime _pluginRuntime() {
     marketOrigin: null,
   );
 }
+
+/// Creates extra-package metadata with an optional manifest installation restriction.
+core_proxy.BundledExternalPackageCandidate _extraCandidate(
+  String name, {
+  String? requiredScope,
+}) => core_proxy.BundledExternalPackageCandidate(
+  packageName: name,
+  displayName: const core_proxy.LocalizedText(
+    values: {'default': 'Extra plugin'},
+  ),
+  description: const core_proxy.LocalizedText(
+    values: {'default': 'Extra plugin fixture'},
+  ),
+  author: const ['Operit'],
+  packageKind: 'toolpkg',
+  sourcePath: '$name.toolpkg',
+  sourceFileName: '$name.toolpkg',
+  isToolPkg: true,
+  version: '1.0.0',
+  category: 'ToolPkg',
+  toolCount: 0,
+  subpackageCount: 0,
+  requiredInstallationScope: requiredScope,
+);

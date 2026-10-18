@@ -29,6 +29,28 @@
 .memory-search-table tbody tr:last-child td{border-bottom:0}
 .memory-search-scores:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
 
+/* Batch role binding keeps target, search and selection actions visible above history. */
+.dialog.binding-dialog{width:min(720px,calc(100vw - 48px));height:min(720px,calc(100dvh - 48px))}
+.binding-dialog .dialog-layout{height:100%;min-height:0}
+.binding-dialog .dialog-body{display:flex;flex:1;flex-direction:column;gap:16px;min-height:0;overflow:hidden;padding-bottom:0}
+.binding-intro{display:flex;align-items:flex-start;gap:12px;flex:none;padding:14px 16px;border-radius:16px;background:var(--surfaceContainerHigh)}
+.binding-intro-icon{display:grid;place-items:center;flex:none;width:36px;height:36px;border-radius:12px;background:var(--primaryContainer);color:var(--onPrimaryContainer)}
+.binding-intro strong{font-size:14px;font-weight:600}.binding-intro p{margin:5px 0 0;font-size:12px;line-height:1.7;color:var(--onSurfaceVariant)}
+.binding-controls{display:grid;grid-template-columns:1fr 1fr;column-gap:12px;flex:none}.binding-controls .field{margin:0 0 12px;min-width:0}.binding-controls input,.binding-controls select{width:100%;min-width:0}
+.binding-list-toolbar{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:8px}.binding-list-toolbar .chips{margin:0;gap:6px}.binding-list-toolbar .button{flex:none}
+.binding-chat-list{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:2px 2px 12px;scrollbar-gutter:stable}
+.binding-chat{display:flex;align-items:center;gap:14px;margin-bottom:6px;padding:13px 14px;min-height:70px;border:1px solid transparent;border-radius:14px;cursor:pointer;transition:background .15s,border-color .15s}
+.binding-chat:hover{background:var(--surfaceContainerHigh)}.binding-chat.selected{border-color:var(--primary);background:color-mix(in srgb,var(--primaryContainer) 28%,var(--surface))}
+.binding-chat:focus-within{outline:2px solid var(--primary);outline-offset:1px}.binding-chat.already-bound{cursor:default}
+.binding-chat input{flex:none;width:18px;height:18px;margin:0;accent-color:var(--primary);cursor:inherit}.binding-chat-copy{display:flex;flex-direction:column;gap:7px;flex:1;min-width:0}
+.binding-chat-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap;overflow-wrap:anywhere;font-size:14px;font-weight:500;line-height:1.5}
+.binding-current{flex:none;font-size:10px;font-weight:400;border-radius:5px;padding:1px 5px;background:var(--surfaceContainerHigh);color:var(--onSurfaceVariant)}
+.binding-chat-meta{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px 12px;color:var(--onSurfaceVariant);font-size:11px;line-height:1.5}
+.binding-owner{display:inline-flex;align-items:center;gap:4px;overflow-wrap:anywhere}.binding-owner .icon{width:13px;height:13px;flex:none}.binding-owner.bound{color:var(--primary)}
+.binding-chat-error{font-size:11px;color:var(--error);overflow-wrap:anywhere}.binding-empty{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;min-height:160px;padding:24px 12px;text-align:center;color:var(--onSurfaceVariant);font-size:12px}.binding-empty>.icon{width:32px;height:32px;opacity:.6}.binding-empty strong{font-size:14px;font-weight:500}
+.binding-dialog .dialog-footer{display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--outlineVariant);gap:12px}.binding-selection-count{font-size:12px;color:var(--onSurfaceVariant);font-variant-numeric:tabular-nums}.binding-footer-actions{display:flex;align-items:center;gap:4px;flex:none}
+@media(max-width:600px){.dialog.binding-dialog{width:calc(100vw - 24px);height:calc(100dvh - 24px)}.binding-dialog .dialog-body{gap:12px}.binding-intro{padding:12px}.binding-controls{grid-template-columns:1fr;gap:0}.binding-chat{padding:12px 10px;gap:12px}.binding-dialog .dialog-footer{flex-wrap:wrap;gap:6px}.binding-selection-count{width:100%;padding:0 8px}.binding-footer-actions{width:100%;justify-content:flex-end}}
+
 /* Presentation views reuse the manager's host-provided Material palette and offline icons. */
 .presentation-page{min-width:0;max-width:100%;background:var(--surface)}
 .selection-toolbar{flex:none;padding:8px 16px 0}.selection-toolbar .field{margin:4px 0 8px}
@@ -58,78 +80,6 @@
       /** Compares only complete declared field names. */
       (key) => value === key
     );
-  }
-
-  // web/bridge/transport.ts
-  function host() {
-    const bridge = window.CharacterMemoryHost;
-    if (bridge === void 0) throw new Error("CharacterMemoryHost \u5C1A\u672A\u6CE8\u518C");
-    const methods = ["loadScreen", "completeScreen", "cancelScreen", "request", "exportFile", "avatarImage", "openEntity"];
-    for (const method of methods) if (typeof bridge[method] !== "function") throw new Error(`CharacterMemoryHost.${method} \u5C1A\u672A\u6CE8\u518C`);
-    return bridge;
-  }
-  async function waitForHost() {
-    const deadline = performance.now() + 5e3;
-    while (window.CharacterMemoryHost === void 0) {
-      if (performance.now() >= deadline) throw new Error("CharacterMemoryHost \u5C1A\u672A\u6CE8\u518C\uFF0C\u8BF7\u4ECE\u5E94\u7528\u4E2D\u7684\u89D2\u8272\u5361\u63D2\u4EF6\u6253\u5F00\u6B64\u9875\u9762\u3002");
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    host();
-  }
-
-  // web/features/characters/data.ts
-  function getCard(snapshot, id) {
-    for (const card of snapshot.cards) if (card.id === id) return card;
-    throw new Error("\u89D2\u8272\u5361\u4E0D\u5B58\u5728");
-  }
-  function ownerFor(card) {
-    switch (card.memoryBindingMode) {
-      case "CHARACTER":
-        return `character:${card.id}`;
-      case "SHARED":
-        if (typeof card.sharedMemoryId !== "string" || card.sharedMemoryId === "") throw new Error("\u89D2\u8272\u7684\u5171\u4EAB\u8BB0\u5FC6\u7ED1\u5B9A\u4E0D\u5B8C\u6574");
-        return `shared:${card.sharedMemoryId}`;
-      default:
-        throw new Error("\u4E0D\u652F\u6301\u7684\u89D2\u8272\u8BB0\u5FC6\u7ED1\u5B9A\u7C7B\u578B");
-    }
-  }
-  function isActive(active, type, id) {
-    if (type === "card") return "CharacterCard" in active && active.CharacterCard.id === id;
-    if (type === "group") return "CharacterGroup" in active && active.CharacterGroup.id === id;
-    throw new Error("Invalid active profile type");
-  }
-
-  // web/features/characters/actions.ts
-  function createCharactersActionsFeature(context) {
-    const { snapshot, state, request, renderMain, toast, openUser, openGraph } = context;
-    async function handleAction(action, element) {
-      switch (action) {
-        case "create-card":
-          await host().openEntity("create", "card", "");
-          return;
-        case "edit-card":
-          await host().openEntity("edit", "card", getCard(snapshot(), dataValue(element, "id")).id);
-          return;
-        case "activate-card":
-          state.snapshot = await request({ action: "activate", type: "card", id: dataValue(element, "id") });
-          renderMain();
-          toast("\u5DF2\u5207\u6362\u89D2\u8272\u5361");
-          return;
-        case "card-user": {
-          const card = getCard(snapshot(), dataValue(element, "id"));
-          await openUser(ownerFor(card), card.name);
-          return;
-        }
-        case "card-graph": {
-          const card = getCard(snapshot(), dataValue(element, "id"));
-          await openGraph(ownerFor(card), card.name);
-          return;
-        }
-        default:
-          throw new Error(`Unknown characters action: ${action}`);
-      }
-    }
-    return { names: ["create-card", "edit-card", "activate-card", "card-user", "card-graph"], handleAction };
   }
 
   // web/shared/ui/icons.ts
@@ -205,6 +155,232 @@
     return JSON.parse(JSON.stringify(value));
   }
 
+  // web/features/characters/data.ts
+  function getCard(snapshot, id) {
+    for (const card of snapshot.cards) if (card.id === id) return card;
+    throw new Error("\u89D2\u8272\u5361\u4E0D\u5B58\u5728");
+  }
+  function ownerFor(card) {
+    switch (card.memoryBindingMode) {
+      case "CHARACTER":
+        return `character:${card.id}`;
+      case "SHARED":
+        if (typeof card.sharedMemoryId !== "string" || card.sharedMemoryId === "") throw new Error("\u89D2\u8272\u7684\u5171\u4EAB\u8BB0\u5FC6\u7ED1\u5B9A\u4E0D\u5B8C\u6574");
+        return `shared:${card.sharedMemoryId}`;
+      default:
+        throw new Error("\u4E0D\u652F\u6301\u7684\u89D2\u8272\u8BB0\u5FC6\u7ED1\u5B9A\u7C7B\u578B");
+    }
+  }
+  function isActive(active, type, id) {
+    if (type === "card") return "CharacterCard" in active && active.CharacterCard.id === id;
+    if (type === "group") return "CharacterGroup" in active && active.CharacterGroup.id === id;
+    throw new Error("Invalid active profile type");
+  }
+
+  // web/features/characters/chat-binding.ts
+  function bindingLabel(selection2, snapshot) {
+    if (selection2 === null) return "\u672A\u7ED1\u5B9A\u89D2\u8272";
+    if (selection2 === "model:chat") return "\u4EC5\u4F7F\u7528\u6A21\u578B";
+    for (const card of snapshot.cards) if (selection2 === "card:" + card.id) return card.name;
+    for (const group of snapshot.groups) if (selection2 === "group:" + group.id) return "\u7FA4\u7EC4 \xB7 " + group.name;
+    return "\u539F\u89D2\u8272\u5DF2\u5931\u6548";
+  }
+  function filteredBindingChats(dialog, snapshot) {
+    const query = dialog.query.trim().toLocaleLowerCase();
+    return dialog.chats.filter((chat) => (dialog.filter !== "unbound" || chat.selection === null) && (query === "" || [chat.title, bindingLabel(chat.selection, snapshot)].some((value) => value.toLocaleLowerCase().includes(query))));
+  }
+  function selectableBindingChats(dialog, snapshot) {
+    return filteredBindingChats(dialog, snapshot).filter((chat) => chat.selection !== "card:" + dialog.cardId);
+  }
+  function chatDate(value) {
+    const date = new Date(/^\d+$/.test(value) ? Number(value) : value);
+    return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
+  }
+  function chatBindingSpec(dialog, snapshot) {
+    const visible = filteredBindingChats(dialog, snapshot), selectable = selectableBindingChats(dialog, snapshot);
+    const allSelected = selectable.length > 0 && selectable.every((chat) => dialog.selectedIds.includes(chat.id));
+    let rows = "";
+    for (const chat of visible) {
+      const bound = chat.selection === "card:" + dialog.cardId, selected = dialog.selectedIds.includes(chat.id);
+      const failure = dialog.failures[chat.id];
+      rows += `<label class="binding-chat ${selected ? "selected" : ""} ${bound ? "already-bound" : ""}"><input type="checkbox" data-binding-chat="${escapeHtml(chat.id)}" aria-label="\u9009\u62E9\u5BF9\u8BDD ${escapeHtml(chat.title)}" ${selected ? "checked" : ""} ${bound || dialog.busy || dialog.cardId === "" ? "disabled" : ""}><span class="binding-chat-copy"><span class="binding-chat-title">${escapeHtml(chat.title || "\u672A\u547D\u540D\u5BF9\u8BDD")}${chat.isCurrent ? '<span class="binding-current">\u5F53\u524D\u5BF9\u8BDD</span>' : ""}</span><span class="binding-chat-meta"><span class="binding-owner ${bound ? "bound" : ""}">${bound ? icon("check") : icon("person")}${escapeHtml(bound ? "\u5DF2\u7ED1\u5B9A" : bindingLabel(chat.selection, snapshot))}</span><span>${chat.messageCount} \u6761\u6D88\u606F${chatDate(chat.updatedAt) === "" ? "" : " \xB7 " + escapeHtml(chatDate(chat.updatedAt))}</span></span>${failure === void 0 ? "" : `<span class="binding-chat-error">${escapeHtml(failure)}</span>`}</span></label>`;
+    }
+    const target = selectField("\u7ED1\u5B9A\u5230\u89D2\u8272\u5361", "bindingCard", dialog.cardId, snapshot.cards.map((card) => ({ id: card.id, label: card.name })), dialog.loading || dialog.busy);
+    const filter = (value, label) => `<button type="button" class="chip ${dialog.filter === value ? "selected" : ""}" data-action="binding-filter" data-filter="${value}" aria-pressed="${dialog.filter === value}" ${dialog.busy || dialog.loading ? "disabled" : ""}>${label}</button>`;
+    const body = `<div class="binding-intro"><span class="binding-intro-icon">${icon("chat")}</span><div><strong>\u4E3A\u5DF2\u6709\u5BF9\u8BDD\u6307\u5B9A\u89D2\u8272</strong><p>\u7ED1\u5B9A\u540E\uFF0C\u5BF9\u8BDD\u5C06\u4F7F\u7528\u6240\u9009\u89D2\u8272\u7684\u8BBE\u5B9A\u7EE7\u7EED\u4EA4\u6D41\u3002\u5DF2\u6709\u89D2\u8272\u7ED1\u5B9A\u4F1A\u88AB\u66FF\u6362\u3002</p></div></div><div class="binding-controls">${target}<label class="field binding-search"><span class="field-label">\u641C\u7D22\u5BF9\u8BDD\u6216\u5F53\u524D\u89D2\u8272</span><input data-binding-query aria-label="\u641C\u7D22\u5BF9\u8BDD\u6216\u5F53\u524D\u89D2\u8272" value="${escapeHtml(dialog.query)}" ${dialog.busy || dialog.loading ? "disabled" : ""}></label><div class="binding-list-toolbar"><div class="chips">${filter("all", "\u5168\u90E8\u5BF9\u8BDD")}${filter("unbound", "\u672A\u7ED1\u5B9A")}</div>${button("binding-select-visible", allSelected ? "\u53D6\u6D88\u5168\u9009" : "\u5168\u9009\u7ED3\u679C", "", selectable.length === 0 || dialog.loading || dialog.busy || dialog.cardId === "" ? "disabled" : "", "small")}</div></div><div class="binding-chat-list" aria-label="\u9009\u62E9\u8981\u7ED1\u5B9A\u7684\u5BF9\u8BDD" aria-busy="${dialog.loading}">${dialog.loading ? '<div class="binding-empty" role="status">\u6B63\u5728\u8BFB\u53D6\u5BF9\u8BDD\u2026</div>' : visible.length === 0 ? `<div class="binding-empty">${icon("chat")}<strong>${dialog.chats.length === 0 ? "\u8FD8\u6CA1\u6709\u5BF9\u8BDD" : "\u6CA1\u6709\u7B26\u5408\u6761\u4EF6\u7684\u5BF9\u8BDD"}</strong><span>${dialog.chats.length === 0 ? "\u5F00\u59CB\u4E00\u6BB5\u5BF9\u8BDD\u540E\uFF0C\u5373\u53EF\u5728\u8FD9\u91CC\u7ED1\u5B9A\u89D2\u8272\u3002" : "\u8BD5\u8BD5\u5176\u4ED6\u5173\u952E\u8BCD\uFF0C\u6216\u5207\u6362\u5230\u5168\u90E8\u5BF9\u8BDD\u3002"}</span></div>` : rows}</div>`;
+    const status = dialog.busy ? `\u6B63\u5728\u7ED1\u5B9A ${dialog.completed} / ${dialog.total}` : `\u5DF2\u9009\u62E9 ${dialog.selectedIds.length} \u6761${dialog.query !== "" || dialog.filter !== "all" ? ` \xB7 \u7B5B\u9009\u51FA ${visible.length} \u6761` : ` \xB7 \u5171 ${dialog.chats.length} \u6761`}`;
+    return {
+      title: "\u6279\u91CF\u7ED1\u5B9A\u5BF9\u8BDD",
+      style: "binding-dialog",
+      tabs: [],
+      body,
+      footer: `<span class="binding-selection-count" role="status" aria-live="polite">${status}</span><div class="binding-footer-actions">${button("close-dialog", "\u53D6\u6D88", "", dialog.busy ? "disabled" : "")}${button("binding-submit", dialog.busy ? "\u7ED1\u5B9A\u4E2D\u2026" : `\u7ED1\u5B9A${dialog.selectedIds.length > 0 ? " " + dialog.selectedIds.length + " \u6761\u5BF9\u8BDD" : "\u5BF9\u8BDD"}`, "chat", dialog.loading || dialog.busy || dialog.selectedIds.length === 0 || dialog.cardId === "" ? "disabled" : "", "filled")}</div>`
+    };
+  }
+  function createChatBindingFeature(context) {
+    const { snapshot, pushDialog, topDialog, request, renderDialogs, popDialog, toast } = context;
+    async function handleAction(action, element) {
+      if (action === "bind-chats" || action === "bind-card-chats") {
+        const cardId = action === "bind-card-chats" ? getCard(snapshot(), dataValue(element, "id")).id : "";
+        const dialog2 = pushDialog({ type: "chat-binding", cardId, query: "", filter: "all", loading: true, chats: [], selectedIds: [], failures: {}, completed: 0, total: 0 });
+        try {
+          dialog2.chats = await request({ action: "listBindableChats" }, { background: true });
+        } finally {
+          dialog2.loading = false;
+          renderDialogs();
+        }
+        return;
+      }
+      const dialog = topDialog("chat-binding");
+      if (dialog.busy || dialog.loading) return;
+      switch (action) {
+        case "binding-filter": {
+          const filter = dataValue(element, "filter");
+          if (filter !== "all" && filter !== "unbound") throw new Error("\u65E0\u6548\u7684\u5BF9\u8BDD\u7B5B\u9009\u6761\u4EF6");
+          dialog.filter = filter;
+          return;
+        }
+        case "binding-select-visible": {
+          if (dialog.cardId === "") return;
+          const ids = selectableBindingChats(dialog, snapshot()).map((chat) => chat.id);
+          const selected = new Set(dialog.selectedIds), allSelected = ids.length > 0 && ids.every((id) => selected.has(id));
+          for (const id of ids) {
+            if (allSelected) selected.delete(id);
+            else selected.add(id);
+          }
+          dialog.selectedIds = [...selected];
+          return;
+        }
+        case "binding-submit": {
+          getCard(snapshot(), dialog.cardId);
+          const selection2 = "card:" + dialog.cardId;
+          const ids = dialog.selectedIds.filter((id) => dialog.chats.some((chat) => chat.id === id && chat.selection !== selection2));
+          if (ids.length === 0) return;
+          dialog.busy = true;
+          dialog.total = ids.length;
+          dialog.completed = 0;
+          dialog.failures = {};
+          renderDialogs();
+          let succeeded = 0;
+          try {
+            for (const chatId of ids) {
+              try {
+                const binding = await request({ action: "writeChatBinding", chatId, selection: selection2 }, { background: true });
+                if (binding.chatId !== chatId || binding.selection !== selection2) throw new Error("\u7ED1\u5B9A\u7ED3\u679C\u4E0D\u4E00\u81F4\uFF0C\u8BF7\u5237\u65B0\u540E\u91CD\u8BD5");
+                const chat = dialog.chats.find((value) => value.id === chatId);
+                chat.selection = selection2;
+                dialog.selectedIds = dialog.selectedIds.filter((id) => id !== chatId);
+                succeeded++;
+              } catch (error) {
+                dialog.failures[chatId] = String(error);
+              }
+              dialog.completed++;
+              renderDialogs();
+            }
+          } finally {
+            dialog.busy = false;
+          }
+          if (succeeded === ids.length) {
+            popDialog();
+            toast(`\u5DF2\u5C06 ${succeeded} \u6761\u5BF9\u8BDD\u7ED1\u5B9A\u5230\u300C${getCard(snapshot(), dialog.cardId).name}\u300D`);
+          } else {
+            dialog.error = `\u5DF2\u7ED1\u5B9A ${succeeded} \u6761\uFF0C${ids.length - succeeded} \u6761\u672A\u5B8C\u6210\u3002\u4FDD\u7559\u4E86\u672A\u5B8C\u6210\u7684\u9009\u62E9\uFF0C\u53EF\u91CD\u8BD5\u3002`;
+            renderDialogs();
+          }
+          return;
+        }
+        default:
+          throw new Error("Unknown chat binding action: " + action);
+      }
+    }
+    return { names: ["bind-chats", "bind-card-chats", "binding-filter", "binding-select-visible", "binding-submit"], handleAction };
+  }
+  function inputChatBinding(context, element) {
+    if (!element.hasAttribute("data-binding-query") && element.dataset.field !== "bindingCard") return false;
+    const dialog = context.topDialog("chat-binding");
+    if (context.state.busy || dialog.busy || dialog.loading) return true;
+    if (element.hasAttribute("data-binding-query") && element instanceof HTMLInputElement) {
+      const start = element.selectionStart, end = element.selectionEnd;
+      dialog.query = element.value;
+      context.renderDialogs();
+      const next = context.dialogsRoot.querySelector("[data-binding-query]");
+      if (next !== null) {
+        next.focus();
+        next.setSelectionRange(start, end);
+      }
+    } else {
+      dialog.cardId = element.value;
+      dialog.selectedIds = dialog.selectedIds.filter((id) => dialog.chats.some((chat) => chat.id === id && chat.selection !== "card:" + dialog.cardId));
+      dialog.failures = {};
+      dialog.error = "";
+      context.renderDialogs();
+      context.dialogsRoot.querySelector('[data-field="bindingCard"]')?.focus();
+    }
+    return true;
+  }
+  function changeChatBinding(context, element) {
+    if (!(element instanceof HTMLInputElement) || !element.hasAttribute("data-binding-chat")) return false;
+    const dialog = context.topDialog("chat-binding"), id = dataValue(element, "bindingChat");
+    if (context.state.busy || dialog.busy || dialog.loading || dialog.cardId === "") return true;
+    if (!dialog.chats.some((chat) => chat.id === id && chat.selection !== "card:" + dialog.cardId)) return true;
+    dialog.selectedIds = element.checked ? [.../* @__PURE__ */ new Set([...dialog.selectedIds, id])] : dialog.selectedIds.filter((value) => value !== id);
+    context.renderDialogs();
+    context.dialogsRoot.querySelectorAll("[data-binding-chat]").forEach((input) => {
+      if (input.dataset.bindingChat === id) input.focus();
+    });
+    return true;
+  }
+
+  // web/bridge/transport.ts
+  function host() {
+    const bridge = window.CharacterMemoryHost;
+    if (bridge === void 0) throw new Error("CharacterMemoryHost \u5C1A\u672A\u6CE8\u518C");
+    const methods = ["loadScreen", "completeScreen", "cancelScreen", "request", "exportFile", "avatarImage", "openEntity"];
+    for (const method of methods) if (typeof bridge[method] !== "function") throw new Error(`CharacterMemoryHost.${method} \u5C1A\u672A\u6CE8\u518C`);
+    return bridge;
+  }
+  async function waitForHost() {
+    const deadline = performance.now() + 5e3;
+    while (window.CharacterMemoryHost === void 0) {
+      if (performance.now() >= deadline) throw new Error("CharacterMemoryHost \u5C1A\u672A\u6CE8\u518C\uFF0C\u8BF7\u4ECE\u5E94\u7528\u4E2D\u7684\u89D2\u8272\u5361\u63D2\u4EF6\u6253\u5F00\u6B64\u9875\u9762\u3002");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    host();
+  }
+
+  // web/features/characters/actions.ts
+  function createCharactersActionsFeature(context) {
+    const { snapshot, state, request, renderMain, toast, openUser, openGraph } = context;
+    async function handleAction(action, element) {
+      switch (action) {
+        case "create-card":
+          await host().openEntity("create", "card", "");
+          return;
+        case "edit-card":
+          await host().openEntity("edit", "card", getCard(snapshot(), dataValue(element, "id")).id);
+          return;
+        case "activate-card":
+          state.snapshot = await request({ action: "activate", type: "card", id: dataValue(element, "id") });
+          renderMain();
+          toast("\u5DF2\u5207\u6362\u89D2\u8272\u5361");
+          return;
+        case "card-user": {
+          const card = getCard(snapshot(), dataValue(element, "id"));
+          await openUser(ownerFor(card), card.name);
+          return;
+        }
+        case "card-graph": {
+          const card = getCard(snapshot(), dataValue(element, "id"));
+          await openGraph(ownerFor(card), card.name);
+          return;
+        }
+        default:
+          throw new Error(`Unknown characters action: ${action}`);
+      }
+    }
+    return { names: ["create-card", "edit-card", "activate-card", "card-user", "card-graph"], handleAction };
+  }
+
   // web/features/groups/tiles.ts
   function groupTile(group, snapshot) {
     let names = "";
@@ -219,7 +395,7 @@
     for (const id of card.attachedTagIds) for (const tag of snapshot.tags) if (tag.id === id) tags += `<span class="badge">${escapeHtml(tag.name)}</span>`;
     const active = isActive(snapshot.active, "card", card.id);
     const binding = card.memoryBindingMode === "SHARED" ? "\u5171\u4EAB\u8BB0\u5FC6" : "\u89D2\u8272\u8BB0\u5FC6";
-    return `<article class="entity ${active ? "active" : ""}"><button type="button" class="entity-main" data-action="edit-card" data-id="${escapeHtml(card.id)}" aria-label="\u7F16\u8F91 ${escapeHtml(card.name)}"><span class="avatar" data-avatar-uri="${escapeHtml(card.avatarUri ?? "")}">${avatarSources.has(card.avatarUri ?? "") ? `<img src="${escapeHtml(avatarSources.get(card.avatarUri ?? ""))}" alt="">` : icon("person")}${active ? `<span class="avatar-check">${icon("check")}</span>` : ""}</span><span class="entity-copy"><span class="entity-title">${escapeHtml(card.name)}</span>${card.description === "" ? "" : `<div class="entity-subtitle">${escapeHtml(card.description)}</div>`}<span class="badges"><span class="badge">${card.chatModelBindingMode === "FIXED_MODEL" ? "\u56FA\u5B9A\u6A21\u578B\u914D\u7F6E" : "\u8DDF\u968F\u5168\u5C40\u6A21\u578B"}</span><span class="badge">${binding}</span>${tags}</span></span></button><div class="entity-actions">${iconButton("card-graph", "\u6253\u5F00\u8BB0\u5FC6\u56FE\u8C31", "graph", `data-id="${escapeHtml(card.id)}"`)}${iconButton("card-user", "\u7F16\u8F91\u7528\u6237\u8D44\u6599", "profile", `data-id="${escapeHtml(card.id)}"`)}${active ? '<span class="active-pill">\u5F53\u524D\u4F7F\u7528</span>' : button("activate-card", "\u4F7F\u7528", "", `data-id="${escapeHtml(card.id)}"`, "small")}</div></article>`;
+    return `<article class="entity ${active ? "active" : ""}"><button type="button" class="entity-main" data-action="edit-card" data-id="${escapeHtml(card.id)}" aria-label="\u7F16\u8F91 ${escapeHtml(card.name)}"><span class="avatar" data-avatar-uri="${escapeHtml(card.avatarUri ?? "")}">${avatarSources.has(card.avatarUri ?? "") ? `<img src="${escapeHtml(avatarSources.get(card.avatarUri ?? ""))}" alt="">` : icon("person")}${active ? `<span class="avatar-check">${icon("check")}</span>` : ""}</span><span class="entity-copy"><span class="entity-title">${escapeHtml(card.name)}</span>${card.description === "" ? "" : `<div class="entity-subtitle">${escapeHtml(card.description)}</div>`}<span class="badges"><span class="badge">${card.chatModelBindingMode === "FIXED_MODEL" ? "\u56FA\u5B9A\u6A21\u578B\u914D\u7F6E" : "\u8DDF\u968F\u5168\u5C40\u6A21\u578B"}</span><span class="badge">${binding}</span>${tags}</span></span></button><div class="entity-actions">${iconButton("bind-card-chats", "\u7ED1\u5B9A\u5BF9\u8BDD", "chat", `data-id="${escapeHtml(card.id)}"`)}${iconButton("card-graph", "\u6253\u5F00\u8BB0\u5FC6\u56FE\u8C31", "graph", `data-id="${escapeHtml(card.id)}"`)}${iconButton("card-user", "\u7F16\u8F91\u7528\u6237\u8D44\u6599", "profile", `data-id="${escapeHtml(card.id)}"`)}${active ? '<span class="active-pill">\u5F53\u524D\u4F7F\u7528</span>' : button("activate-card", "\u4F7F\u7528", "", `data-id="${escapeHtml(card.id)}"`, "small")}</div></article>`;
   }
 
   // web/features/memory/library-view.ts
@@ -254,7 +430,7 @@
       let cards = "", groups = "";
       for (const card of snapshot().cards) cards += cardTile(card, snapshot(), state.avatarSources);
       for (const group of snapshot().groups) groups += groupTile(group, snapshot());
-      app.innerHTML = `<div class="page"><div class="scroll">${state.error === "" ? "" : `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>`}<section class="section"><div class="section-head"><span class="section-icon">${icon("badge")}</span><h2>\u89D2\u8272\u5361</h2><div class="actions">${button("import-card", "\u5BFC\u5165", "upload", "", "small")}${button("create-card", "\u521B\u5EFA", "add", "", "small")}</div></div>${cards === "" ? '<div class="empty">\u8FD8\u6CA1\u6709\u89D2\u8272\u5361\uFF0C\u70B9\u51FB\u521B\u5EFA\u6DFB\u52A0\u89D2\u8272\u3002</div>' : cards}</section><section class="section"><div class="section-head"><span class="section-icon">${icon("groups")}</span><h2>\u7FA4\u7EC4</h2><div class="actions">${button("import-group", "\u5BFC\u5165 JSON", "upload", "", "small")}${button("create-group", "\u521B\u5EFA", "add", "", "small")}</div></div>${groups === "" ? '<div class="empty">\u8FD8\u6CA1\u6709\u7FA4\u7EC4\uFF0C\u521B\u5EFA\u540E\u53EF\u7F16\u6392\u591A\u4E2A\u89D2\u8272\u53C2\u4E0E\u5BF9\u8BDD\u3002</div>' : groups}</section></div></div>`;
+      app.innerHTML = `<div class="page"><div class="scroll">${state.error === "" ? "" : `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>`}<section class="section"><div class="section-head"><span class="section-icon">${icon("badge")}</span><h2>\u89D2\u8272\u5361</h2><div class="actions">${button("bind-chats", "\u7ED1\u5B9A\u5BF9\u8BDD", "chat", snapshot().cards.length === 0 ? "disabled" : "", "small")}${button("import-card", "\u5BFC\u5165", "upload", "", "small")}${button("create-card", "\u521B\u5EFA", "add", "", "small")}</div></div>${cards === "" ? '<div class="empty">\u8FD8\u6CA1\u6709\u89D2\u8272\u5361\uFF0C\u70B9\u51FB\u521B\u5EFA\u6DFB\u52A0\u89D2\u8272\u3002</div>' : cards}</section><section class="section"><div class="section-head"><span class="section-icon">${icon("groups")}</span><h2>\u7FA4\u7EC4</h2><div class="actions">${button("import-group", "\u5BFC\u5165 JSON", "upload", "", "small")}${button("create-group", "\u521B\u5EFA", "add", "", "small")}</div></div>${groups === "" ? '<div class="empty">\u8FD8\u6CA1\u6709\u7FA4\u7EC4\uFF0C\u521B\u5EFA\u540E\u53EF\u7F16\u6392\u591A\u4E2A\u89D2\u8272\u53C2\u4E0E\u5BF9\u8BDD\u3002</div>' : groups}</section></div></div>`;
     }
     return { renderMain };
   }
@@ -1555,6 +1731,8 @@
     );
     function dialogSpec(dialog) {
       switch (dialog.type) {
+        case "chat-binding":
+          return chatBindingSpec(dialog, context.snapshot());
         case "owner-settings":
           return { title: "\u8BB0\u5FC6\u8BBE\u7F6E", style: "large", tabs: ["\u81EA\u52A8\u63D0\u53D6", "\u68C0\u7D22", "\u5386\u53F2\u91CD\u5EFA"], body: ownerSettingsBody(dialog), footer: ownerSettingsFooter(dialog) };
         case "store":
@@ -1722,6 +1900,8 @@
       if (!(event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement)) return;
       const element = event.target;
       if (element.disabled) return;
+      if (element.hasAttribute("data-binding-query") && event instanceof InputEvent && event.isComposing) return;
+      if (inputChatBinding(context, element)) return;
       if (element instanceof HTMLInputElement && context.onScreenInput(element)) return;
       if (element instanceof HTMLInputElement && element.type === "checkbox") return;
       if (element.hasAttribute("data-graph-search")) {
@@ -1747,6 +1927,7 @@
       if (!(event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement)) return;
       const element = event.target;
       if (element.disabled) return;
+      if (changeChatBinding(context, element)) return;
       if (element.hasAttribute("data-graph-folder")) {
         topDialog("graph").folder = element.value;
         updateGraphSurface2(topDialog("graph"));
@@ -2485,7 +2666,7 @@ ${sections.join("\n\n")}`;
     const page = createPageRenderer(context), dialogs = createDialogRenderer(context);
     const screens = createScreenController(context, page);
     const graph = createGraphActionsFeature(context), profile = createProfileFeature(context), transfers = createCharactersTransfersFeature(context);
-    const events = createEditorEvents(context, [...screens.features, createPreviewFeature(context), createDialogActions(context), createCharactersActionsFeature(context), createGroupsActionsFeature(context), createMemoryLibraryActionsFeature(context), createMemoryItemActionsFeature(context), createMemoryLinkActionsFeature(context), transfers, graph, profile, createMemoryControlsFeature(context)]);
+    const events = createEditorEvents(context, [...screens.features, createPreviewFeature(context), createDialogActions(context), createCharactersActionsFeature(context), createChatBindingFeature(context), createGroupsActionsFeature(context), createMemoryLibraryActionsFeature(context), createMemoryItemActionsFeature(context), createMemoryLinkActionsFeature(context), transfers, graph, profile, createMemoryControlsFeature(context)]);
     const gestures = createGraphGestures(context);
     function mount() {
       window.addEventListener("character-entity-closed", () => {
@@ -2501,6 +2682,9 @@ ${sections.join("\n\n")}`;
       });
       document.addEventListener("click", events.onClick);
       document.addEventListener("input", events.onInput);
+      document.addEventListener("compositionend", (event) => {
+        if (event.target instanceof HTMLInputElement && event.target.hasAttribute("data-binding-query")) events.onInput(event);
+      });
       document.addEventListener("change", events.onChange);
       document.addEventListener("keydown", screens.onKeyDown);
       dialogsRoot.addEventListener("cancel", events.onCancel, true);

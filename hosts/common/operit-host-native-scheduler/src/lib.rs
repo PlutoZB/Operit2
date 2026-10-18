@@ -1,6 +1,8 @@
 #![allow(non_snake_case)]
 
 #[cfg(feature = "javascript")]
+mod javascript_allocator;
+#[cfg(feature = "javascript")]
 mod javascript_runtime;
 #[cfg(feature = "javascript")]
 mod javascript_values;

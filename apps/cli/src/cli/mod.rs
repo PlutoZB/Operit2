@@ -40,7 +40,6 @@ use operit_util::stream::Stream::Stream;
 use operit_util::GithubReleaseUtil::{
     FullUpdateProgressEvent, FullUpdateStatus, FullUpdateTarget, GithubReleaseUtil,
 };
-use sha2::{Digest, Sha256};
 use tar::Archive;
 use zip::ZipArchive;
 
@@ -126,6 +125,12 @@ async fn run_cli_root_inner(args: &[String]) -> Result<(), String> {
     if args.len() >= 2 && matches!(args[1].as_str(), "help" | "-h" | "--help") {
         return print_cli_help(Some(&args[0])).await;
     }
+    // Version reporting is local metadata; do not claim a Core owner for it.
+    if args.len() == 1 && args[0].as_str() == "version" {
+        print_local_version();
+        return Ok(());
+    }
+
     if args[0].as_str() == "link" {
         return run_link_command(&args[1..]).await;
     }
@@ -147,6 +152,10 @@ async fn run_cli_root_inner(args: &[String]) -> Result<(), String> {
     }
 
     let localArgs = scope_cli_storage_command_args(args)?;
+    #[cfg(unix)]
+    if let Some(result) = crate::daemon::try_run_cli_command(&localArgs, cli_json_mode()).await {
+        return result;
+    }
     let mut core = local_cli_core().await?;
     let pluginCommands = read_cli_plugin_commands(&mut core).await?;
 
@@ -155,7 +164,6 @@ async fn run_cli_root_inner(args: &[String]) -> Result<(), String> {
             run_codex_login_command(&mut core, &localArgs[2..]).await
         }
         "model" => run_core_command_and_print(&mut core, &localArgs).await,
-        "version" => run_version_core_command(&mut core).await,
         "prefs" => run_core_command_and_print(&mut core, &args).await,
         "host" => run_core_command_and_print(&mut core, &args).await,
         "log" => run_core_command_and_print(&mut core, &args).await,
@@ -1729,7 +1737,7 @@ async fn run_local_core_command_and_print(
     Ok(())
 }
 
-fn rewrite_core_command_usage_message(message: String) -> String {
+pub(crate) fn rewrite_core_command_usage_message(message: String) -> String {
     let ends_with_newline = message.ends_with('\n');
     let lines = message
         .lines()
@@ -1762,23 +1770,18 @@ fn core_command_error_message(error: CoreLinkError) -> String {
     }
 }
 
-async fn run_version_core_command(core: &mut crate::core_proxy::CliCore) -> Result<(), String> {
-    let core_version = core
-        .application()
-        .coreVersion()
-        .await
-        .map_err(|error| error.to_string())?;
+fn print_local_version() {
     if cli_json_mode() {
         emit_cli_json(serde_json::json!({
             "cliVersion": env!("CARGO_PKG_VERSION"),
-            "coreVersion": core_version,
+            "coreVersion": operit_runtime::CORE_VERSION,
             "linkVersion": operit_link::LINK_VERSION,
             "targetOs": std::env::consts::OS,
             "targetArch": std::env::consts::ARCH,
         }));
     } else {
         println!("CLI version: {}", env!("CARGO_PKG_VERSION"));
-        println!("Core version: {core_version}");
+        println!("Core version: {}", operit_runtime::CORE_VERSION);
         println!("Link version: {}", operit_link::LINK_VERSION);
         println!(
             "Target: {} {}",
@@ -1786,17 +1789,19 @@ async fn run_version_core_command(core: &mut crate::core_proxy::CliCore) -> Resu
             std::env::consts::ARCH
         );
     }
-    Ok(())
 }
 
 pub(crate) fn print_root_usage() {
     if cli_json_mode() {
-        emit_cli_json(serde_json::json!({ "usage": "operit2 [tui|cli|install|uninstall]" }));
+        emit_cli_json(
+            serde_json::json!({ "usage": "operit2 [tui|cli|daemon|install|uninstall]" }),
+        );
         return;
     }
     println!("operit2                       Start the interactive TUI");
     println!("operit2 tui [options]         Start the TUI ('operit2 tui --help' for options)");
     println!("operit2 cli <command> [args]  Run a CLI command");
+    println!("operit2 daemon <command>      Run or control the headless Core daemon");
     println!("operit2 rescue <command>      Export, inspect, import, or resume data rescue");
     println!("operit2 install [--source <path>]");
     println!("operit2 uninstall");

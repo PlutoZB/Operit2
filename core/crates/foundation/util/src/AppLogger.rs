@@ -1,5 +1,6 @@
 #[cfg(not(target_os = "espidf"))]
 use std::backtrace::Backtrace;
+use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, Once, OnceLock};
 
@@ -20,17 +21,17 @@ pub const ERROR: i32 = 6;
 /// Android-compatible assert log priority.
 pub const ASSERT: i32 = 7;
 
-/// First Verbose detail level.
+/// Process and configuration lifecycle diagnostics (V1).
 pub const VERBOSE_LEVEL_1: i32 = 1;
-/// Second Verbose detail level.
+/// User-operation stages and aggregate timings (V2).
 pub const VERBOSE_LEVEL_2: i32 = 2;
-/// Third Verbose detail level.
+/// Service, provider, plugin, and tool invocation boundaries (V3).
 pub const VERBOSE_LEVEL_3: i32 = 3;
-/// Fourth Verbose detail level.
+/// Component, session, and resource lifecycle diagnostics (V4).
 pub const VERBOSE_LEVEL_4: i32 = 4;
-/// Fifth Verbose detail level.
+/// Routing, scheduling, persistence, and state propagation internals (V5).
 pub const VERBOSE_LEVEL_5: i32 = 5;
-/// Sixth Verbose detail level.
+/// Per-item, per-chunk, repeated-loop, and payload diagnostics (V6).
 pub const VERBOSE_LEVEL_6: i32 = 6;
 
 const TOOLPKG_LOG_TAG: &str = "ToolPkg";
@@ -56,6 +57,42 @@ struct LoggerState {
     package_log_file: Option<String>,
     entries: Vec<LogEntry>,
     retain_entries: bool,
+}
+
+/// Retains formatted file records only for the current synchronous execution step.
+struct BatchedLogFileWrite {
+    host: Arc<dyn FileSystemHost>,
+    path: String,
+    content: String,
+}
+
+#[derive(Default)]
+struct LogFileWriteBatchState {
+    depth: usize,
+    writes: Vec<BatchedLogFileWrite>,
+}
+
+thread_local! {
+    static FILE_WRITE_BATCH: RefCell<LogFileWriteBatchState> = RefCell::new(LogFileWriteBatchState::default());
+}
+
+/// Flushes each file once when the owning thread leaves its outermost synchronous batch.
+pub struct LogFileWriteBatch {
+    owner_thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl Drop for LogFileWriteBatch {
+    /// Flushes after releasing the thread-local borrow, including during error unwinding.
+    fn drop(&mut self) {
+        let writes = FILE_WRITE_BATCH.with(|batch| {
+            let mut batch = batch.borrow_mut();
+            batch.depth -= 1;
+            if batch.depth == 0 { std::mem::take(&mut batch.writes) } else { Vec::new() }
+        });
+        for write in writes {
+            let _ = write.host.writeFile(&write.path, &write.content, true);
+        }
+    }
 }
 
 static STATE: OnceLock<Mutex<LoggerState>> = OnceLock::new();
@@ -90,6 +127,21 @@ fn install_host_log_sink_once() {
 pub struct AppLogger;
 
 impl AppLogger {
+    /// Coalesces file writes for a synchronous scope while preserving individual records and timestamps.
+    pub fn batch_file_writes() -> LogFileWriteBatch {
+        FILE_WRITE_BATCH.with(|batch| batch.borrow_mut().depth += 1);
+        LogFileWriteBatch { owner_thread: std::marker::PhantomData }
+    }
+
+    /// Batches only each synchronous poll and flushes before a future yields or changes threads.
+    pub async fn batch_future_file_writes<F: std::future::Future>(future: F) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        std::future::poll_fn(|context| {
+            let _batch = Self::batch_file_writes();
+            future.as_mut().poll(context)
+        }).await
+    }
+
     /// Controls in-memory history independently of console/file sinks.
     /// Constrained apps may disable retention without changing other hosts.
     pub fn set_retain_entries(enabled: bool) {
@@ -264,24 +316,24 @@ impl AppLogger {
             .map_err(|error| error.message)
     }
 
-    /// Writes a verbose log message.
+    /// Writes process or configuration lifecycle diagnostics at Verbose level one.
     pub fn v(tag: &str, msg: &str) -> i32 {
         Self::v_with_level(tag, msg, VERBOSE_LEVEL_1)
     }
 
-    /// Writes a verbose log message with an explicit detail level.
+    /// Writes diagnostics at an explicit depth from lifecycle (V1) through per-item detail (V6).
     pub fn v_with_level(tag: &str, msg: &str, verbose_level: i32) -> i32 {
         assert!((VERBOSE_LEVEL_1..=VERBOSE_LEVEL_6).contains(&verbose_level));
         write_entry(VERBOSE, Some(verbose_level), tag, msg, None);
         0
     }
 
-    /// Writes a flow trace at Verbose detail level five.
+    /// Writes routing, scheduling, persistence, or state propagation diagnostics at V5.
     pub fn trace(tag: &str, msg: &str) -> i32 {
         Self::v_with_level(tag, msg, VERBOSE_LEVEL_5)
     }
 
-    /// Writes a high-frequency flow trace at Verbose detail level six.
+    /// Writes per-item, per-chunk, or repeated-loop diagnostics at V6.
     pub fn trace_detail(tag: &str, msg: &str) -> i32 {
         Self::v_with_level(tag, msg, VERBOSE_LEVEL_6)
     }
@@ -428,7 +480,20 @@ fn write_entry(
 
 /// Appends one formatted log line through the configured file-system host.
 fn append_line(file_system_host: &Arc<dyn FileSystemHost>, path: &str, line: &str) {
-    let _ = file_system_host.writeFile(path, line, true);
+    let batched = FILE_WRITE_BATCH.with(|batch| {
+        let mut batch = batch.borrow_mut();
+        if batch.depth == 0 { return false; }
+        match batch.writes.iter_mut().find(|write| write.path == path && Arc::ptr_eq(&write.host, file_system_host)) {
+            Some(write) => write.content.push_str(line),
+            None => batch.writes.push(BatchedLogFileWrite {
+                host: file_system_host.clone(), path: path.to_string(), content: line.to_string(),
+            }),
+        }
+        true
+    });
+    if !batched {
+        let _ = file_system_host.writeFile(path, line, true);
+    }
 }
 
 /// Creates an empty log file through the host when the path is absent.

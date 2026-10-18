@@ -86,7 +86,7 @@ impl SummaryGenerateHook for SummaryGenerateBridge {
                     );
                     break;
                 };
-                ChainLogger::info(
+                ChainLogger::verbose_with_level(
                     PLUGIN_CHAIN,
                     "plugin.toolpkg.summary.run.start",
                     &[
@@ -95,6 +95,7 @@ impl SummaryGenerateHook for SummaryGenerateBridge {
                         ("hookId", hook.hookId.clone()),
                         ("function", hook.functionName.clone()),
                     ],
+                    operit_util::AppLogger::VERBOSE_LEVEL_3,
                 );
                 let raw = manager
                     .runToolPkgMainHookWithTimeoutMillis(
@@ -148,7 +149,7 @@ impl SummaryGenerateHook for SummaryGenerateBridge {
                 if let Some(Value::Object(object)) = result {
                     let hookChanged = apply_summary_object_result(&mut mutation, object);
                     changed |= hookChanged;
-                    ChainLogger::info(
+                    ChainLogger::verbose_with_level(
                         PLUGIN_CHAIN,
                         "plugin.toolpkg.summary.run.done",
                         &[
@@ -157,9 +158,10 @@ impl SummaryGenerateHook for SummaryGenerateBridge {
                             ("hookId", hook.hookId.clone()),
                             ("changed", ChainLogger::boolField(hookChanged)),
                         ],
+                        operit_util::AppLogger::VERBOSE_LEVEL_3,
                     );
                 } else {
-                    ChainLogger::info(
+                    ChainLogger::verbose_with_level(
                         PLUGIN_CHAIN,
                         "plugin.toolpkg.summary.run.done",
                         &[
@@ -168,6 +170,7 @@ impl SummaryGenerateHook for SummaryGenerateBridge {
                             ("hookId", hook.hookId.clone()),
                             ("changed", ChainLogger::boolField(false)),
                         ],
+                        operit_util::AppLogger::VERBOSE_LEVEL_3,
                     );
                 }
             }

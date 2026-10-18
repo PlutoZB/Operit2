@@ -149,6 +149,13 @@
         }]);
     }
 
+    // Web owns its request snapshot in the engine; native hosts own the same
+    // request as a Rust tree behind an opaque transport capsule.
+    defineProperty(globalThis, '__operitHostSnapshotJsonObject', {
+        value: function(value) { return globalThis.__operitSnapshotJsonObject(value); },
+        writable: false, configurable: false, enumerable: false
+    });
+
     defineProperty(globalThis, '__operitHostPromiseRegistry', {
         value: Object.freeze({ binding: binding, syncBinding: syncBinding, snapshotResult: snapshotResult, settle: settle, cancel: cancel }),
         writable: false, configurable: false, enumerable: false

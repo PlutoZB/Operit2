@@ -755,7 +755,7 @@ impl ChatServiceCore {
         chatId: String,
         resumeContext: CoreRouteResumeContext,
     ) -> Result<(), String> {
-        AppLogger::i(
+        AppLogger::v_with_level(
             "ChatServiceCore",
             &format!(
                 "route resume context chatId={} historyMessages={} participantId={} extensionOwner={}",
@@ -764,6 +764,7 @@ impl ChatServiceCore {
                 resumeContext.participantId,
                 resumeContext.extensionOwner
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
         let Some(mut service) = self.newEnhancedAiServiceForChat(&chatId) else {
             return Err(format!(
@@ -784,10 +785,9 @@ impl ChatServiceCore {
             .beginChatExecution(&chatId)
             .map_err(|error| error.to_string())?;
         let api = ChatConfigurationApi::ready(&service.tool_handler).await?;
-        let api = if resumeContext.extensionOwner == crate::services::ProviderRuntimeSupportService::MODEL_CONFIGURATION_OWNER { api.forModelSnapshot() } else { api };
         if api.extensionOwner() != resumeContext.extensionOwner {
             return Err(
-                "Routed message snapshot owner differs from the registered configuration owner"
+                "Routed message configuration owner differs from the registered configuration owner"
                     .to_string(),
             );
         }
@@ -797,7 +797,6 @@ impl ChatServiceCore {
                 purpose: ChatConfigurationPurpose::Execution,
                 chatId: Some(chatId.clone()),
                 chatExtension: None,
-                messageExtension: Some(resumeContext.messageExtension.clone()),
                 participantId: Some(resumeContext.participantId.clone()),
                 promptFunctionType: resumeContext.promptFunctionType.clone(),
                 defaultModelBinding: support
@@ -1077,7 +1076,6 @@ impl ChatServiceCore {
             purpose: ChatConfigurationPurpose::Display,
             chatId: Some(chatId.clone()),
             chatExtension: None,
-            messageExtension: None,
             participantId: None,
             promptFunctionType: PromptFunctionType::CHAT,
             defaultModelBinding: support.modelBindingForFunction(support.dataDir()?,FunctionType::CHAT)?,
@@ -1088,7 +1086,7 @@ impl ChatServiceCore {
         Ok(configuration)
     }
 
-    /// Resolves the exact persisted message revision snapshot for identity, model and voice playback.
+    /// Resolves the message author through the current chat configuration for model and voice playback.
     #[operit_route_macros::operit_core_route(binding = chatId)]
     pub async fn chatConfigurationForMessage(
         &self,
@@ -1106,23 +1104,18 @@ impl ChatServiceCore {
             messageTimestamp,
             variantIndex,
         };
-        let savedExtensions = self.chatHistoryDelegate.chatHistoryManager.readPluginExtensions(&target).map_err(|error| error.to_string())?;
-        let api = if savedExtensions.contains_key(crate::services::ProviderRuntimeSupportService::MODEL_CONFIGURATION_OWNER) { api.forModelSnapshot() } else { api };
-        let extension = self.chatHistoryDelegate.chatHistoryManager.readPluginExtension(api.extensionOwner(), &target).map_err(|error| error.to_string())?.ok_or_else(|| format!("Message revision has no configuration owner snapshot: {chatId}:{messageTimestamp}:{variantIndex}"))?;
-        let reference = extension
-            .as_object()
-            .ok_or_else(|| {
-                "Persisted message configuration extension must be an object".to_string()
-            })?
-            .clone();
-        let snapshot = api.readSnapshot(reference).await?;
+        let extensions = self.chatHistoryDelegate.chatHistoryManager.readPluginExtensions(&target).map_err(|error| error.to_string())?;
+        let participantId = extensions.get(api.extensionOwner())
+            .and_then(|identity| identity.get("participantId"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_string);
         let support = service.provider_runtime_context.support();
         api.resolve(ChatConfigurationRequest {
             purpose: ChatConfigurationPurpose::Execution,
             chatId: Some(chatId),
             chatExtension: None,
-            messageExtension: Some(snapshot),
-            participantId: None,
+            participantId,
             promptFunctionType: PromptFunctionType::CHAT,
             defaultModelBinding: support
                 .modelBindingForFunction(support.dataDir()?, FunctionType::CHAT)?,

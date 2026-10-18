@@ -1,6 +1,5 @@
-use operit_store::PreferenceMerge::{
-    PreferenceMergeCatalog, PreferenceMergeReference, PreferenceMergeStore,
-};
+use operit_host_api::PluginStorage::{StoragePreferencesMergeCatalog, StoragePreferencesMergeDescriptor, StoragePreferencesMergeKey, StoragePreferencesMergeReference, StoragePreferencesMergeProjection};
+use operit_store::PreferenceMerge::PreferenceMergeStore;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -48,44 +47,35 @@ pub struct ThemeConfigManager {
 }
 
 impl ThemeConfigManager {
-    /// Declares this owner's entity identity, name and content metadata for Core merging.
-    pub(crate) fn spaceMergeCatalog() -> PreferenceMergeCatalog {
-        PreferenceMergeCatalog {
-            store: PreferenceMergeStore {
-                path: operit_util::RuntimeStorageLayout::USER_PREFERENCES_PATH,
-                encrypted: false,
+    /// Declares this owner's catalog and references using the shared merge contract.
+    pub(crate) fn spaceMergeStore() -> PreferenceMergeStore {
+        let path = operit_util::RuntimeStorageLayout::USER_PREFERENCES_PATH;
+        PreferenceMergeStore {
+            path: path.to_string(),
+            encrypted: false,
+            merge: StoragePreferencesMergeDescriptor {
+                version: 1,
+                catalog: Some(StoragePreferencesMergeCatalog {
+                    key_prefix: THEME_CONFIG_PREFIX.to_string(),
+                    key_suffix: "".to_string(),
+                    identity_field: "id".to_string(),
+                    name_field: "name".to_string(),
+                    ignored_fields: vec!["createdAt".to_string(), "updatedAt".to_string()],
+                    retired_keys: vec![],
+                }),
+                references: vec![StoragePreferencesMergeReference {
+                    key: StoragePreferencesMergeKey::Exact { key: ACTIVE_THEME_CONFIG_ID_KEY.to_string() },
+                    path: vec![],
+                    target: path.to_string(),
+                }],
+                projection: Some(StoragePreferencesMergeProjection {
+                    selection_key: ACTIVE_THEME_CONFIG_ID_KEY.to_string(),
+                    source_field: "snapshot".to_string(),
+                    fields: super::ThemePreferenceSnapshot::snapshotFields()
+                        .map(|field| (field.json_key.to_string(), field.preference_key.to_string())).collect(),
+                    retired_keys: vec!["use_system_theme".to_string()],
+                }),
             },
-            keyPrefix: THEME_CONFIG_PREFIX,
-            keySuffix: "",
-            identityField: "id",
-            nameField: "name",
-            ignoredFields: &["createdAt", "updatedAt"],
-            retiredKeys: &[],
-        }
-    }
-
-    /// Declares the current selection as a scalar reference into this owner's catalog.
-    pub(crate) fn spaceMergeReference() -> PreferenceMergeReference {
-        let catalog = Self::spaceMergeCatalog();
-        PreferenceMergeReference {
-            store: catalog.store,
-            key: ACTIVE_THEME_CONFIG_ID_KEY,
-            path: &[],
-            target: catalog.store.path,
-        }
-    }
-
-    /// Declares how the active saved appearance materializes ordinary owner preferences.
-    pub(crate) fn spaceMergeProjection() -> operit_store::PreferenceMerge::PreferenceMergeProjection
-    {
-        operit_store::PreferenceMerge::PreferenceMergeProjection {
-            store: Self::spaceMergeCatalog().store,
-            selectionKey: ACTIVE_THEME_CONFIG_ID_KEY,
-            sourceField: "snapshot",
-            fields: super::ThemePreferenceSnapshot::snapshotFields()
-                .map(|field| (field.json_key, field.preference_key))
-                .collect(),
-            retiredKeys: &["use_system_theme"],
         }
     }
 

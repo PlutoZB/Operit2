@@ -1128,14 +1128,11 @@ fn synchronized_themes_preserve_independent_identity_records() {
     let history = targetJournal.preferenceHistory().unwrap();
     operit_store::PreferenceMerge::applyOperations(
         target.host.clone(),
-        &operit_store::PreferenceMerge::PreferenceMergeSchema {
-            projections: vec![],
-            catalogs: vec![],
-            references: vec![],
-        },
+        &operit_store::PreferenceMerge::PreferenceMergeSchema::default(),
         &history,
         &operations,
         |_, _| true,
+        true,
     )
     .unwrap();
     let manager = target.manager();

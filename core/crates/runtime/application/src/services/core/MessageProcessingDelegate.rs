@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::core::chat::AIMessageManager::{
     logMessageTiming, messageTimingNow, AIMessageManager, BuildUserMessageContentRequest,
-    SendMessageRequest as AIMessageSendRequest, StableContextWindowRequest,
+    SendMessageRequest as AIMessageSendRequest,
 };
 use crate::data::preferences::ApiPreferences::ApiPreferences;
 use crate::data::preferences::FunctionalConfigManager::FunctionalConfigManager;
@@ -36,9 +36,7 @@ use operit_model::MessagePartCodec::{AssistantMarkupStreamState, MessagePartCode
 use operit_model::PromptFunctionType::PromptFunctionType;
 use operit_model::PromptTurn::PromptTurn;
 use operit_providers::chat::llmprovider::AIService::SharedAiResponseStream;
-use operit_providers::chat::EnhancedAIService::{
-    EnhancedAIService, SendMessageCallbacks, SendMessageOptions,
-};
+use operit_providers::chat::EnhancedAIService::{EnhancedAIService, SendMessageCallbacks};
 use operit_providers::runtime_support::ChatConfigurationResult;
 use operit_plugin_sdk::js_sdk::results::{ChatCommittedMessage, JsOptional, MessageSendOutcome, MessageSendResultData, MessageSendStatus};
 use tokio::sync::oneshot;
@@ -126,7 +124,7 @@ fn openCoreResponseStream(
                             let markdownEvent = match event.event_type {
                                 operit_util::stream::RevisableTextStream::TextStreamEventType::Savepoint => {
                                     textRevisions.savepoint(&event.id);
-                                    AppLogger::trace(
+                                    AppLogger::trace_detail(
                                         "CoreStreamTrace",
                                         &format!(
                                             "response.revision.savepoint streamKey={} id={}",
@@ -140,7 +138,7 @@ fn openCoreResponseStream(
                                         "markdown rollback must reference an active savepoint",
                                     );
                                     markdownStream.restoreContent(content);
-                                    AppLogger::trace(
+                                    AppLogger::trace_detail(
                                         "CoreStreamTrace",
                                         &format!(
                                             "response.revision.rollback streamKey={} id={}",
@@ -254,7 +252,7 @@ impl ChatTurnReceiptState {
     fn deliver(&mut self, result: Result<MessageSendResultData, String>) {
         if let Some(sender) = self.sender.take() {
             if sender.send(result).is_err() {
-                AppLogger::trace("ChatTurnReceipt", "Originating UI observer detached from the accepted turn");
+                AppLogger::v_with_level("ChatTurnReceipt", "Originating UI observer detached from the accepted turn", operit_util::AppLogger::VERBOSE_LEVEL_4);
             }
         }
     }
@@ -1329,12 +1327,13 @@ impl MessageProcessingDelegate {
             })
             .unwrap_or(false);
         if cancelled {
-            AppLogger::trace(
+            AppLogger::v_with_level(
                 "ResponseExecutionTrace",
                 &format!(
                     "response_cancelled chatId={} turnId={}",
                     chatId, cancelledTurnId
                 ),
+                operit_util::AppLogger::VERBOSE_LEVEL_2,
             );
             self.finishChatExecution(chatId, InputProcessingState::Idle);
         }
@@ -1480,16 +1479,7 @@ impl MessageProcessingDelegate {
             Some(configuration.profile.modelBinding.providerId.clone());
         request.chatModelIdOverride = Some(configuration.profile.modelBinding.modelId.clone());
         let originalMessageText = request.messageText.trim().to_string();
-        AppLogger::i(
-            "CoreSend",
-            &format!(
-                "processing start chatId={} messageChars={} attachments={}",
-                chatId,
-                originalMessageText.chars().count(),
-                request.attachments.len()
-            ),
-        );
-        ChainLogger::info(
+        ChainLogger::verbose_with_level(
             SEND_CHAIN,
             "send.processing.start",
             &[
@@ -1502,6 +1492,7 @@ impl MessageProcessingDelegate {
                 ),
 
             ],
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
         self.resetCurrentTurnToolInvocationCount(chatId.clone());
         let turnId = self.beginChatTurn(
@@ -1610,9 +1601,7 @@ impl MessageProcessingDelegate {
                     error.to_string(),
                 )
             })?;
-        AIMessageManager::applyConfigurationSnapshot(&mut userMessage, &configuration, &request.enhancedAiService.tool_handler).await.map_err(
-            operit_providers::chat::llmprovider::AIService::AiServiceError::RequestFailed,
-        )?;
+        AIMessageManager::applyConfigurationIdentity(&mut userMessage, &configuration);
         }
         let mut workspaceToolHookSession = None;
         let mut workspaceToolHookHandler = request.enhancedAiService.tool_handler.clone();
@@ -1689,10 +1678,6 @@ impl MessageProcessingDelegate {
 
         let participantName = configuration.profile.name.clone();
         let requestMessageContent = finalMessageContent;
-        AppLogger::i(
-            "CoreSend",
-            &format!("response stream create start chatId={}", chatId),
-        );
         let assistantMessageTimestamp = ChatMessageTimestampAllocator::next();
         let completionStream = match AIMessageManager::sendMessage(AIMessageSendRequest {
             chatConfiguration: configuration.clone(),
@@ -1721,14 +1706,11 @@ impl MessageProcessingDelegate {
         .await
         {
             Ok(stream) => {
-                AppLogger::i(
-                    "CoreSend",
-                    &format!("response stream created chatId={}", chatId),
-                );
-                ChainLogger::info(
+                ChainLogger::verbose_with_level(
                     RECEIVE_CHAIN,
                     "receive.stream.created",
                     &[("chatId", chatId.clone())],
+                    operit_util::AppLogger::VERBOSE_LEVEL_2,
                 );
                 stream
             }
@@ -1789,9 +1771,7 @@ impl MessageProcessingDelegate {
                     error.to_string(),
                 )
             })?;
-        AIMessageManager::applyConfigurationSnapshot(&mut aiMessage, &configuration, &request.enhancedAiService.tool_handler).await.map_err(
-            operit_providers::chat::llmprovider::AIService::AiServiceError::RequestFailed,
-        )?;
+        AIMessageManager::applyConfigurationIdentity(&mut aiMessage, &configuration);
         let streamKey = format!("chat-message-stream:{}:{}", chatId, aiMessage.timestamp);
         let segmentSource = coreResponseStreamSource(sharedResponseStream.clone(), streamKey);
         aiMessage.contentStream = Some(CoreStream::fromSourceWithId(
@@ -1809,12 +1789,13 @@ impl MessageProcessingDelegate {
         self.withExistingRuntime(Some(chatId.clone()), |runtime| {
             runtime.activeStreamingAiMessage = Some(aiMessage.clone());
         });
-        AppLogger::trace(
+        AppLogger::v_with_level(
             "ResponseExecutionTrace",
             &format!(
                 "response_started chatId={} timestamp={}",
                 chatId, aiMessage.timestamp,
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
         let workerChatId = chatId.clone();
         let workerTurnId = turnId;
@@ -1828,9 +1809,7 @@ impl MessageProcessingDelegate {
             Arc::new(Mutex::new(request.chatHistoryDelegate.clone_for_core()));
         let workerMessageProcessingDelegate = Arc::new(Mutex::new(self.clone_for_core()));
         let completionContextWorkspacePath = request.workspacePath.clone();
-        let completionContextWorkspaceFolders = request.workspaceFolders.clone();
         let completionContextPromptFunctionType = request.promptFunctionType.clone();
-        let completionContextParticipantId = configuration.profile.id.clone();
         let completionContextConfiguration = configuration.clone();
         let completionContextEnableThinking = request.enableThinking;
         let completionContextProxySenderName = request.proxySenderNameOverride.clone();
@@ -1966,18 +1945,11 @@ impl MessageProcessingDelegate {
                                 if firstResponseElapsed.is_none() {
                                     *firstResponseElapsed =
                                         Some(messageTimingNow().startedAtMs as i64);
-                                    AppLogger::i(
-                                        "CoreSend",
-                                        &format!(
-                                            "response first chunk delivered chatId={} chars={}",
-                                            chunkChatId,
-                                            chunk.chars().count()
-                                        ),
-                                    );
-                                    ChainLogger::info(
+                                    ChainLogger::verbose_with_level(
                                         RECEIVE_CHAIN,
                                         "receive.first_chunk",
                                         &[("chatId", chunkChatId.clone())],
+                                        operit_util::AppLogger::VERBOSE_LEVEL_2,
                                     );
                                 }
                                 drop(firstResponseElapsed);
@@ -2000,10 +1972,6 @@ impl MessageProcessingDelegate {
                                 persistStreamingSnapshot(&snapshot);
                             })
                             .await;
-                        AppLogger::i(
-                            "CoreSend",
-                            &format!("response stream closed chatId={}", completionChatId),
-                        );
                         let workspaceToolHookSession = completionWorkspaceToolHookSession
                             .lock()
                             .expect("workspace tool hook session mutex poisoned")
@@ -2121,68 +2089,38 @@ impl MessageProcessingDelegate {
                                 ],
                             );
                         }
-                        let mut completionChatHistory = {
-                            let workerChatHistoryDelegate = completionChatHistoryDelegate
-                                .lock()
-                                .expect("worker chat history mutex poisoned");
-                            workerChatHistoryDelegate
-                                .getRuntimeChatHistory(completionChatId.clone())
-                        };
-                        if workerTurnOptions.persistTurn {
-                            let persistedAssistant = completionChatHistory
-                                .iter_mut()
-                                .find(|message| message.timestamp == finalMessage.timestamp)
-                                .expect("persisted assistant placeholder must remain in chat history");
-                            *persistedAssistant = finalMessage.clone();
-                        }
                         let pendingRouteChange = workerService.takePendingRouteChange();
                         let routeResumeContext =
-                            pendingRouteChange.as_ref().map(|_| CoreRouteResumeContext {
-                                runtimeChatHistory: completionChatHistory.clone(),
-                                workspacePath: completionContextWorkspacePath.clone(),
-                                promptFunctionType: completionContextPromptFunctionType.clone(),
-                                enableThinking: completionContextEnableThinking,
-                                participantId: completionContextConfiguration.profile.id.clone(),
-                                extensionOwner: completionContextConfiguration.extensionOwner.clone(),
-                                messageExtension: completionContextConfiguration.messageExtension.clone(),
-                                proxySenderName: completionContextProxySenderName.clone(),
-                                notifyReplyOverride: completionTurnOptions.notifyReply,
-                                chatProviderIdOverride: completionContextProviderIdOverride.clone(),
-                                chatModelIdOverride: completionContextModelIdOverride.clone(),
-                                turnOptions: completionTurnOptions.clone(),
+                            pendingRouteChange.as_ref().map(|_| {
+                                let mut completionChatHistory = {
+                                    let delegate = completionChatHistoryDelegate
+                                        .lock().expect("worker chat history mutex poisoned");
+                                    delegate.getRuntimeChatHistory(completionChatId.clone())
+                                };
+                                if workerTurnOptions.persistTurn {
+                                    let persistedAssistant = completionChatHistory.iter_mut()
+                                        .find(|message| message.timestamp == finalMessage.timestamp)
+                                        .expect("persisted assistant placeholder must remain in chat history");
+                                    *persistedAssistant = finalMessage.clone();
+                                }
+                                CoreRouteResumeContext {
+                                    runtimeChatHistory: completionChatHistory,
+                                    workspacePath: completionContextWorkspacePath.clone(),
+                                    promptFunctionType: completionContextPromptFunctionType.clone(),
+                                    enableThinking: completionContextEnableThinking,
+                                    participantId: completionContextConfiguration.profile.id.clone(),
+                                    extensionOwner: completionContextConfiguration.extensionOwner.clone(),
+                                    proxySenderName: completionContextProxySenderName.clone(),
+                                    notifyReplyOverride: completionTurnOptions.notifyReply,
+                                    chatProviderIdOverride: completionContextProviderIdOverride.clone(),
+                                    chatModelIdOverride: completionContextModelIdOverride.clone(),
+                                    turnOptions: completionTurnOptions.clone(),
+                                }
                             });
-                        let nextWindowSize = async {
-                            let runtimeOptions = SendMessageOptions {
-                                executionParticipantId: Some(completionContextParticipantId.clone()),
-                                promptFunctionType: completionContextPromptFunctionType.clone(),
-                                chatProviderIdOverride: completionContextProviderIdOverride.clone(),
-                                chatModelIdOverride: completionContextModelIdOverride.clone(),
-                                ..SendMessageOptions::new()
-                            };
-                            let runtime = workerService
-                                .createSendMessageRuntime(&runtimeOptions, completionContextConfiguration)
-                                .map_err(|_| ())?;
-                            AIMessageManager::calculateStableContextWindow(
-                                StableContextWindowRequest {
-                                    enhancedAiService: &mut workerService,
-                                    chatId: Some(completionChatId.clone()),
-                                    messageContent: String::new(),
-                                    chatHistory: completionChatHistory,
-                                    workspacePath: completionContextWorkspacePath,
-                                    workspaceFolders: completionContextWorkspaceFolders,
-                                    promptFunctionType: completionContextPromptFunctionType,
-                                    proxySenderName: completionContextProxySenderName,
-                                    chatProviderIdOverride: completionContextProviderIdOverride,
-                                    chatModelIdOverride: completionContextModelIdOverride,
-                                    publishEstimate: true,
-                                    runtime,
-                                },
-                            )
-                            .await
-                            .map_err(|_| ())
-                        }
-                        .await
-                        .ok();
+                        // The provider completed this estimate from the actual prepared
+                        // request and final reply before closing the response stream.
+                        // Completion must not rebuild a send runtime or invoke plugins.
+                        let nextWindowSize = workerService.getLastTurnContextWindow();
                         if !completionMessageProcessingDelegate
                             .lock()
                             .expect("worker message processing delegate mutex poisoned")
@@ -2254,13 +2192,14 @@ impl MessageProcessingDelegate {
                         }
                         drop(workerChatHistoryDelegate);
                         if let Some(routeChange) = pendingRouteChange {
-                            ChainLogger::info(
+                            ChainLogger::verbose_with_level(
                                 SEND_CHAIN,
                                 "send.route_change.request",
                                 &[
                                     ("chatId", completionChatId.clone()),
                                     ("targetNodeId", routeChange.targetNodeId.clone()),
                                 ],
+                                operit_util::AppLogger::VERBOSE_LEVEL_2,
                             );
                             if let Err(error) = workerService
                                 .requestCoreRouteChange(

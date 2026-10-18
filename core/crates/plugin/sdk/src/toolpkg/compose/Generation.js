@@ -3,6 +3,7 @@ var OperitComposeGeneration = function () {
   var contexts = new WeakMap();
   var nodes = new WeakMap();
   var actionBinding = false;
+  var callbackCells = new WeakMap();
 
   /// Identifies nodes whose construction inputs are owned by the generation registry.
   function owns(node) {
@@ -98,102 +99,227 @@ var OperitComposeGeneration = function () {
     nodes.set(root, { value: node, listeners: new Set() });
     return root;
   }
-  function ownedContext(ctx) {
+  function contextState(ctx) {
     var state = contexts.get(ctx);
     if (!state) throw new TypeError('Compose expressions require the original SDK context');
     return state;
   }
-
-  /// Creates generation state owned by exactly one public DSL context.
-  function attach(ctx) {
-    contexts.set(ctx, {
-      scopes: new Map(),
-      counts: new Map(),
-      live: new Set()
+  function ownedContext(ctx) {
+    var context = contextState(ctx);
+    return context.active || context.root;
+  }
+  function region() {
+    return { scopes: new Map(), pass: 0,
+      memos: new Map(), liveMemos: new Set(), hasNodes: false };
+  }
+  function beginRegion(state) {
+    state.pass += 1;
+    state.liveMemos.clear();
+    state.hasNodes = false;
+  }
+  function endRegion(state) {
+    state.scopes.forEach(function (siteState, site) {
+      if (siteState.pass !== state.pass) state.scopes.delete(site);
+      else siteState.entries.length = siteState.count;
+    });
+    state.memos.forEach(function (value, key) {
+      if (!state.liveMemos.has(key)) state.memos.delete(key);
     });
   }
 
+  /// Creates generation state owned by exactly one public DSL context.
+  function attach(ctx) {
+    contexts.set(ctx, { root: region(), active: null, entry: null, epoch: 0 });
+  }
+
   /// Starts one render traversal without discarding retained expression results.
-  function begin(ctx) {
-    var state = ownedContext(ctx);
-    state.counts.clear();
-    state.live.clear();
+  function begin(ctx, entry) {
+    var context = contextState(ctx);
+    if (entry !== undefined && context.entry !== entry) {
+      context.entry = entry;
+      context.epoch += 1;
+    }
+    context.active = context.root;
+    beginRegion(context.root);
   }
 
   /// Releases scopes belonging to branches and loop entries that left the current composition.
   function end(ctx) {
-    var state = ownedContext(ctx);
-    state.scopes.forEach(function (value, key) {
-      if (!state.live.has(key)) state.scopes.delete(key);
+    var context = contextState(ctx);
+    endRegion(context.root);
+    context.active = null;
+  }
+
+  /// Gives a memo factory its own occurrence counters, so skipped UI cannot rebind a sibling's callbacks.
+  function memo(ctx, key, previous, changed, factory) {
+    var context = contextState(ctx);
+    var parent = ownedContext(ctx);
+    parent.liveMemos.add(key);
+    var child = parent.memos.get(key);
+    if (!child) {
+      child = region();
+      parent.memos.set(key, child);
+    }
+    var reusable = !changed && previous && (!previous.hasNodes || previous.epoch === context.epoch);
+    var result = OperitComposeReactive.memo(ctx, key, reusable, function () {
+      // Plain data keeps its public keyed identity after branch removal or source reload.
+      if (reusable && !previous.hasNodes) return previous;
+      var active = context.active;
+      context.active = child;
+      beginRegion(child);
+      try {
+        var value = factory();
+        return { value: value, hasNodes: child.hasNodes, epoch: context.epoch };
+      } finally {
+        endRegion(child);
+        context.active = active;
+      }
     });
+    child.hasNodes = result.hasNodes;
+    parent.hasNodes = parent.hasNodes || child.hasNodes;
+    return result;
+  }
+
+  /// Retains a lazy item's generation inside its window; disposal uses the existing memo region.
+  function memoItem(ctx, key, version, factory) {
+    var parent = ownedContext(ctx);
+    var child = parent.memos.get(key);
+    var cached = child && child.cachedItem;
+    var result = memo(ctx, key, cached && cached.generated,
+      !cached || cached.version !== version, factory);
+    parent.memos.get(key).cachedItem = { version: version, generated: result };
+    return result.value;
+  }
+
+  /// Tags node-producing memos for source reload without invalidating ordinary memoized data.
+  function created(ctx) {
+    if (contexts.has(ctx)) ownedContext(ctx).hasNodes = true;
   }
 
   /// Selects a call-site occurrence while preserving independent loop instances.
   function scope(ctx, site) {
     var state = ownedContext(ctx);
-    var index = state.counts.get(site) || 0;
-    state.counts.set(site, index + 1);
-    var key = site + '/' + index;
-    state.live.add(key);
-    if (!state.scopes.has(key)) state.scopes.set(key, {
-      callbacks: new Map(),
-      initialized: false
-    });
-    return state.scopes.get(key);
+    state.hasNodes = true;
+    var siteState = state.scopes.get(site);
+    if (!siteState) {
+      siteState = { entries: [], count: 0, pass: state.pass };
+      state.scopes.set(site, siteState);
+    } else if (siteState.pass !== state.pass) {
+      siteState.count = 0;
+      siteState.pass = state.pass;
+    }
+    var index = siteState.count++;
+    if (!siteState.entries[index]) siteState.entries[index] = { initialized: false };
+    return siteState.entries[index];
   }
 
   /// Retains immutable argument snapshots and action trampolines with replaceable captured closures.
-  function snapshot(value, slot, callbacks, seen) {
+  function snapshot(value, seen, previous) {
     if (typeof value === 'function') {
-      if (!callbacks.has(slot)) {
-        var cell = {
-          handler: value
-        };
-        /// Invokes the latest closure while keeping the public callback identity stable.
+      var cell = typeof previous === 'function' ? callbackCells.get(previous) : null;
+      if (!cell) {
+        cell = { handler: value };
+        /// Keeps the callback in its existing snapshot slot while replacing the closure.
         cell.invoke = function () {
           return cell.handler.apply(this, arguments);
         };
-        callbacks.set(slot, cell);
+        callbackCells.set(cell.invoke, cell);
       }
-      var current = callbacks.get(slot);
-      current.handler = value;
-      return current.invoke;
+      cell.handler = value;
+      OperitComposeActions.forward(cell.invoke, value);
+      return cell.invoke;
     }
     if (value === null || typeof value !== 'object') return value;
     if (value.__composeNode === true) return value;
     if (seen.has(value)) throw new TypeError('Compose arguments must not contain cycles');
     seen.add(value);
-    var result = Array.isArray(value) ? [] : {};
+    var array = Array.isArray(value);
     var keys = Object.keys(value);
+    var reusable = previous !== null && typeof previous === 'object' &&
+      Array.isArray(previous) === array && Object.keys(previous).length === keys.length;
+    var result = reusable ? null : array ? [] : {};
     for (var index = 0; index < keys.length; index += 1) {
       var key = keys[index];
+      var hadKey = reusable && Object.prototype.hasOwnProperty.call(previous, key);
+      var before = hadKey ? previous[key] : undefined;
       var child = value[key];
-      result[key] = child === null || typeof child !== 'object' && typeof child !== 'function'
-        ? child : snapshot(child, slot + '/' + key.length + ':' + key, callbacks, seen);
+      var next = child === null || typeof child !== 'object' && typeof child !== 'function'
+        ? child : snapshot(child, seen, before);
+      if (result === null && (!hadKey || !Object.is(before, next))) {
+        result = array ? [] : {};
+        // Earlier entries are already equal to their detached snapshots.
+        for (var copied = 0; copied < index; copied += 1) {
+          var copiedKey = keys[copied];
+          result[copiedKey] = previous[copiedKey];
+        }
+      }
+      if (result !== null) result[key] = next;
     }
     seen.delete(value);
-    return result;
+    return result === null ? previous : result;
+  }
+
+  /// Applies changed construction inputs without replacing the mounted node handle.
+  function reconcile(entry, next) {
+    var nextValue = read(next);
+    var previous = entry.initialized ? read(entry.value) : null;
+    if (previous && previous.type === nextValue.type && previous.props.key === nextValue.props.key) {
+      if (!OperitComposeRetained.equal(previous.props, nextValue.props)) entry.value.props = nextValue.props;
+      if (!OperitComposeRetained.equal(previous.children, nextValue.children)) entry.value.children = nextValue.children;
+      if (!OperitComposeRetained.equal(previous.slots, nextValue.slots)) {
+        if (Object.prototype.hasOwnProperty.call(nextValue, 'slots')) entry.value.slots = nextValue.slots;else delete entry.value.slots;
+      }
+    } else entry.value = next;
+    entry.initialized = true;
+    return entry.value;
   }
 
   /// Builds a node only when its normalized construction inputs actually changed.
   function evaluate(entry, args, factory) {
-    var values = snapshot(args, '', entry.callbacks, new Set());
-    if (!entry.initialized || !OperitComposeRetained.equal(entry.args, values)) {
-      var next = factory.apply(undefined, values);
-      var nextValue = read(next);
-      var previous = entry.initialized ? read(entry.value) : null;
-      if (previous && previous.type === nextValue.type && previous.props.key === nextValue.props.key) {
-        // Assign raw construction containers through the public observer once, avoiding nested proxies.
-        if (!OperitComposeRetained.equal(previous.props, nextValue.props)) entry.value.props = nextValue.props;
-        if (!OperitComposeRetained.equal(previous.children, nextValue.children)) entry.value.children = nextValue.children;
-        if (!OperitComposeRetained.equal(previous.slots, nextValue.slots)) {
-          if (Object.prototype.hasOwnProperty.call(nextValue, 'slots')) entry.value.slots = nextValue.slots;else delete entry.value.slots;
-        }
-      } else entry.value = next;
+    var values = snapshot(args, new Set(), entry.templateFactory ? undefined : entry.args);
+    if (!entry.initialized || entry.templateFactory || entry.args !== values) {
+      reconcile(entry, factory.apply(undefined, values));
       entry.args = values;
-      entry.initialized = true;
+      entry.templateFactory = null;
     }
     return entry.value;
+  }
+
+  /// Compares a compiler-owned flat vector without enumerating fixed property names.
+  function templateValues(values, previous) {
+    var reusable = previous && previous.length === values.length;
+    var result = reusable ? null : new Array(values.length);
+    var seen;
+    for (var index = 0; index < values.length; index += 1) {
+      var value = values[index];
+      var before = reusable ? previous[index] : undefined;
+      var next = value;
+      if (typeof value === 'function') next = snapshot(value, undefined, before);
+      else if (value !== null && typeof value === 'object' && !nodes.has(value)) {
+        if (!seen) seen = new Set();
+        next = snapshot(value, seen, before);
+      }
+      if (result === null && !Object.is(next, before)) result = previous.slice();
+      if (result !== null) result[index] = next;
+    }
+    return result === null ? previous : result;
+  }
+  var emptyTemplateValues = [];
+
+  /// Keeps fixed UI structure in its compiled factory and snapshots only dynamic values.
+  function evaluateTemplate(entry, ctx, values, factory) {
+    var next = templateValues(values || emptyTemplateValues, entry.templateFactory === factory ? entry.args : undefined);
+    if (!entry.initialized || entry.templateFactory !== factory || entry.args !== next) {
+      reconcile(entry, factory(ctx, next));
+      entry.args = next;
+      entry.templateFactory = factory;
+    }
+    return entry.value;
+  }
+
+  /// Retains one compiled template for each call-site occurrence in an opaque root.
+  function template(ctx, site, values, factory) {
+    return evaluateTemplate(scope(ctx, site), ctx, values, factory);
   }
 
   /// Evaluates effectful arguments in source order while retaining unchanged node construction.
@@ -208,11 +334,18 @@ var OperitComposeGeneration = function () {
       return value === null || typeof value !== 'object' && typeof value !== 'function';
     });
     if (primitiveInputs && entry.initialized && OperitComposeRetained.equal(entry.deps, deps)) return entry.value;
-    entry.deps = primitiveInputs ? deps.slice() : snapshot(deps, 'deps', new Map(), new Set());
+    // Object dependencies cannot take this fast path: read actual arguments
+    // below instead of allocating an unused deep snapshot of their contents.
+    entry.deps = primitiveInputs ? deps.slice() : null;
     return evaluate(entry, argumentsFactory(), factory);
   }
   return {
+    memo: memo,
+    memoItem: memoItem,
+    created: created,
     evaluate: evaluate,
+    evaluateTemplate: evaluateTemplate,
+    template: template,
     observeNode: observeNode,
     read: read,
     watch: watch,

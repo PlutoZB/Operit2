@@ -165,8 +165,8 @@ export class MemoryTools {
       }
     }
     return [...scores.values()].sort(
-      /** Preserves original RRF ordering and lossless numeric identity ties. */
-      (left, right) => right.score - left.score || (BigInt(left.chunk.id) < BigInt(right.chunk.id) ? -1 : BigInt(left.chunk.id) > BigInt(right.chunk.id) ? 1 : 0),
+      /** Preserves original RRF ordering and stable identity ties. */
+      (left, right) => right.score - left.score || (left.chunk.id < right.chunk.id ? -1 : left.chunk.id > right.chunk.id ? 1 : 0),
     ).slice(0, count).map(
       /** Returns complete original chunk records rather than a synthetic projection. */
       item => item.chunk,

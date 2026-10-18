@@ -1,3 +1,4 @@
+import { chatBindingSpec } from "../features/characters/chat-binding";
 import { exportSpec, importSpec } from "../features/characters/import-export-view";
 import { setGraphViewport } from "../features/graph/canvas";
 import { cancelGraphCameraAnimation } from "../features/graph/camera";
@@ -30,6 +31,7 @@ export function createDialogRenderer(context: EditorContext) {
   /** Renders finite dialog types with their real independent theme choices. */
   function dialogSpec(dialog: Dialog): DialogSpec {
     switch (dialog.type) {
+      case "chat-binding": return chatBindingSpec(dialog, context.snapshot());
       case "owner-settings": return { title: "记忆设置", style: "large", tabs: ["自动提取", "检索", "历史重建"], body: ownerSettingsBody(dialog), footer: ownerSettingsFooter(dialog) };
       case "store": return { title: dialog.create ? "创建共享记忆库" : "编辑共享记忆库", style: "compact", tabs: [], body: field("名称 *", "name", dialog.store.name), footer: button("close-dialog", "取消", "") + button("save-store", "保存", "", "", "filled") };
       case "user": return { title: `${dialog.name} 的用户资料`, style: "large", tabs: [], body: dialog.loading ? '<div class="loading">正在读取 USER.md…</div>' : `<div class="muted">${escapeHtml(dialog.ownerKey)} · USER.md</div>${field("用户资料", "content", dialog.content, 18)}${notice("保存会更新当前绑定记忆库的 USER.md。")}`, footer: button("close-dialog", "取消", "") + button("save-user", "保存", "", !dialog.loaded ? "disabled" : "", "filled") };

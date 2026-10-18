@@ -27,16 +27,23 @@ class _ComposeLazyWindow {
   ({int firstIndex, int lastIndex})? rangeToRequest(
     int first,
     int last,
-    int loadedCount,
-  ) {
-    final neededFirst = math.max(0, first - _composeLazyRefillItems);
-    final neededLast = math.min(itemCount, last + _composeLazyRefillItems);
+    int loadedCount, {
+    bool rangeIncludesCache = false,
+  }) {
+    // SliverConstraints already include the viewport's cache. Buffering that
+    // interval again requests rows that Flutter will not instantiate yet.
+    final refill = rangeIncludesCache ? 0 : _composeLazyRefillItems;
+    final prefetch = rangeIncludesCache
+        ? _composeLazyRefillItems
+        : _composeLazyPrefetchItems;
+    final neededFirst = math.max(0, first - refill);
+    final neededLast = math.min(itemCount, last + refill);
     if (neededFirst >= firstIndex && neededLast <= firstIndex + loadedCount) {
       return null;
     }
     return (
-      firstIndex: math.max(0, first - _composeLazyPrefetchItems),
-      lastIndex: math.min(itemCount, last + _composeLazyPrefetchItems),
+      firstIndex: math.max(0, first - prefetch),
+      lastIndex: math.min(itemCount, last + prefetch),
     );
   }
 

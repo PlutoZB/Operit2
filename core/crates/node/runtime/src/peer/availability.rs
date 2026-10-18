@@ -49,7 +49,7 @@ impl HostRuntimePeerService {
                                 if let Some(state) = state.upgrade() {
                                     HostRuntimePeerService { state }.refreshPeerAvailability(&node);
                                 }
-                                operit_util::AppLogger::AppLogger::trace("RuntimePeerService", &format!("Peer connection attempt failed peer={node} error={error}"));
+                                operit_util::AppLogger::AppLogger::v_with_level("RuntimePeerService", &format!("Peer connection attempt failed peer={node} error={error}"), operit_util::AppLogger::VERBOSE_LEVEL_3);
                             }
                         }
                     }

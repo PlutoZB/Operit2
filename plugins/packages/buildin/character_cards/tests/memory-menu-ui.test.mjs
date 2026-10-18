@@ -19,6 +19,7 @@ function texts(tree) { return composeNodes(tree, node => node.type === "Text").m
 // Compare the actual registered plugin tree with main's group geometry, labels and persisted preferences.
 test("plugin memory section retains main's exact collapsed and expanded controls and four summaries", async t => {
   const clock = timers(), runtime = await selectorEnvironment(t, {}, clock.globals);
+  await runtime.seedBinding("selector-chat", { version: 1, selection: "card:default" });
   const entries = runtime.navigation.filter(entry => entry.surface === "chat_input_menu_sections");
   assert.equal(entries.length, 1); assert.equal(entries[0].route, "toolpkg:com.operit.character_cards:ui:chat-input-memory");
   const ui = menu(runtime, "selector-chat"); await ui.load(); let tree = ui.render().tree;
@@ -95,7 +96,9 @@ test("new-session memory menu keeps the original disabled manual action and no q
 });
 
 test("memory section refuses retained actions and status reads after host chat ownership changes", async t => {
-  const clock = timers(), runtime = await selectorEnvironment(t, {}, clock.globals), ui = menu(runtime, "selector-chat"); await ui.load();
+  const clock = timers(), runtime = await selectorEnvironment(t, {}, clock.globals);
+  await runtime.seedBinding("selector-chat", { version: 1, selection: "card:default" });
+  const ui = menu(runtime, "selector-chat"); await ui.load();
   const action = keyedNode(ui.render().tree, "memory-section-header").props.onClick;
   const info = keyedNode(ui.render().tree, "memory-info").props.onClick;
   assert.throws(() => ui.updateHostState({ chatId: "another-chat" }), /Memory menu chat owner changed/);

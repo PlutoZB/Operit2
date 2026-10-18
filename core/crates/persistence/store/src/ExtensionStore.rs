@@ -507,6 +507,23 @@ impl ExtensionStore {
         Ok(())
     }
 
+    /// Removes every persisted installation of a failed package, including conflicting owners.
+    /// Each record keeps its own scope so shared removals still publish file tombstones.
+    pub fn deleteFailedPackageInstallations(&self, id: &str) -> Result<bool, String> {
+        let records = self
+            .records("package")?
+            .into_iter()
+            .filter(|record| record.id == id)
+            .collect::<Vec<_>>();
+        for record in &records {
+            self.remove(record)?;
+        }
+        if !records.is_empty() {
+            notifyCatalogChanged();
+        }
+        Ok(!records.is_empty())
+    }
+
     /// Resolves a known package scope before registration without requiring an installation record.
     pub fn configPathForScope(id: &str, scope: &str) -> Result<String, String> {
         Self::root("package", scope)?;

@@ -39,8 +39,6 @@ exports.characterCards = {
         setActive: (payload) => call("character.setActive", payload),
         /** Combines the character prompt and selected tags. */
         combine: (payload) => call("character.combine", payload),
-        /** Resets the built-in character. */
-        resetDefault: () => call("character.resetDefault", {}),
         /** Exports an explicitly selected character format. */
         export: (payload) => call("character.export", payload),
         /** Imports an explicitly selected character format. */

@@ -1,8 +1,18 @@
 import { normalizePlanText, openPlanDatabase } from "./plan_mode_plan_file.js";
 
-/** Encodes a chat and a normalized plan without ambiguous separator collisions. */
+/** Preserves existing valid identities and hashes plans that exceed storage key limits. */
 function handoffKey(chatId: string, content: string): string {
-  return chatId.length + ":" + chatId + normalizePlanText(content);
+  const identity = chatId.length + ":" + chatId + normalizePlanText(content);
+  let byteLength = 0;
+  for (const character of identity) {
+    const code = character.codePointAt(0)!;
+    byteLength += code <= 0x7f ? 1 : code <= 0x7ff ? 2 : code <= 0xffff ? 3 : 4;
+    if (code <= 0x1f || (code >= 0x7f && code <= 0x9f) || byteLength > 1024) {
+      // The prefix cannot collide with legacy identities, which always start with a chat-id length.
+      return "hashed:" + CryptoJS.MD5(identity).toString();
+    }
+  }
+  return identity;
 }
 
 /** Reads the durable handoff marker shared by all devices and UI runtimes. */

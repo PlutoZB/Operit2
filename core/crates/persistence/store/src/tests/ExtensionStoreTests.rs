@@ -768,3 +768,43 @@ fn fixed_package_installation_scope_rejects_registration_and_moves_atomically() 
         assert!(!storage.exists(&format!("{}/fixed.toolpkg", ExtensionStore::root("package", other).unwrap())).unwrap());
     }
 }
+
+/// Failed packages can be removed even when device and space both claim the same ID.
+#[test]
+fn deleting_failed_package_removes_conflicting_owners_and_preserves_other_packages() {
+    let storage = host();
+    let store = ExtensionStore::new(storage.clone());
+    register_package_owner(&store, "broken", &["broken"]);
+    register_package_owner(&store, "healthy", &["healthy"]);
+    let mut shared = store.record("package", "broken").unwrap();
+    shared.scope = "space".into();
+    store.write(&shared).unwrap();
+    for scope in ["device", "space"] {
+        storage
+            .writeBytes(
+                &format!("runtime/extensions/{scope}/packages/broken.toolpkg"),
+                b"broken",
+            )
+            .unwrap();
+    }
+    assert!(store
+        .record("package", "broken")
+        .unwrap_err()
+        .contains("ownership conflict"));
+    let before = clock(&storage);
+    assert!(store.deleteFailedPackageInstallations("broken").unwrap());
+    assert!(!store.deleteFailedPackageInstallations("broken").unwrap());
+    assert_eq!(store.records("package").unwrap().len(), 1);
+    assert_eq!(store.record("package", "healthy").unwrap().id, "healthy");
+    for scope in ["device", "space"] {
+        assert!(!storage
+            .exists(&format!(
+                "runtime/extensions/{scope}/packages/broken.toolpkg"
+            ))
+            .unwrap());
+    }
+    assert!(operations(&storage, &before)
+        .iter()
+        .any(|operation| operation.operation == "delete"
+            && operation.entityId.ends_with("broken.toolpkg")));
+}

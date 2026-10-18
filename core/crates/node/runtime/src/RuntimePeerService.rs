@@ -20,6 +20,10 @@ pub trait RuntimePeerService: Send + Sync {
     /// Selects an admitted entry together with its volatile identity for UI reconnection.
     fn spaceConnection(&self) -> Option<super::NodeServices::SpaceClientConnection> { None }
 
+    /// Largest encoded Link message this endpoint accepts or sends on one
+    /// connection. Callers that assemble their own payloads must stay below it.
+    fn maxMessageBytes(&self) -> usize { operit_peer_link::DEFAULT_MAX_PEER_MESSAGE_BYTES }
+
     /// Returns unpaired local-discovery candidates for every application using this Core.
     /// Excludes local and paired node IDs in either authorization direction, including offline peers.
     /// Discovery is not authentication or Space membership proof; candidates still require pairing.

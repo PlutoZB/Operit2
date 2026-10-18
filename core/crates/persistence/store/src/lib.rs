@@ -1,3 +1,5 @@
+#[path = "MergeRules.rs"]
+mod MergeRules;
 #[path = "SyncAppliedChanges.rs"]
 pub mod SyncAppliedChanges;
 #[cfg(feature = "full")]

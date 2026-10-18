@@ -65,7 +65,6 @@ export interface ChatConfigurationRequest {
   purpose: "display" | "execution";
   chatId: string | null;
   chatExtension: JsonObject | null;
-  messageExtension: JsonObject | null;
   participantId: string | null;
   promptFunctionType: "CHAT" | "VOICE";
   defaultModelBinding: ChatModelBinding;
@@ -93,7 +92,7 @@ export interface ChatConfigurationExecutionResult {
   contextKey: string;
   profile: ChatParticipantProfile;
   participants: ChatParticipantProfile[];
-  messageExtension: JsonObject;
+  executionData: JsonObject;
 }
 
 /** Describes presentation identity without resolving a model, speech voice or memory owner. */
@@ -101,7 +100,7 @@ export interface ChatDisplayIdentity { title: string; avatarUri: string | null }
 /** Preserves the plugin-declared presentation order and real participant identity. */
 export interface ChatDisplayParticipant { id: string; name: string; avatarUri: string | null }
 /** Supplies an explicitly authored initial message and its complete immutable participant snapshot. */
-export interface ChatInitialMessage { content: string; displayName: string; messageExtension: JsonObject }
+export interface ChatInitialMessage { content: string; displayName: string; participantId: string }
 /** Returns presentation data only; an empty initial-message array does not select an executor. */
 export interface ChatConfigurationDisplayResult {
   contextKey: string | null;
@@ -120,7 +119,7 @@ export interface CharacterRecord {
   ttsConfigId: string | null; themeConfigId: string | null; memoryBindingMode: string; sharedMemoryId: string | null;
   sharedMemoryMounts: { sharedMemoryId: string; readable: boolean; writable: boolean }[];
   toolAccessConfig: { enabled: boolean; allowedBuiltinTools: string[]; allowedPackages: string[]; allowedSkills: string[]; allowedMcpServers: string[] };
-  isDefault: boolean; createdAt: number; updatedAt: number;
+  createdAt: number; updatedAt: number;
 }
 /** Defines the complete stored group record. */
 export interface GroupRecord { id: string; name: string; description: string; themeConfigId: string | null; members: { characterCardId: string; orderIndex: number }[]; createdAt: number; updatedAt: number }
@@ -237,7 +236,6 @@ export interface DomainOperations {
   "character.delete": { input: IdParams; output: { id: string; deleted: boolean } };
   "character.setActive": { input: IdParams; output: ActivationResult };
   "character.combine": { input: { id: string; promptFunctionType?: "CHAT" | "VOICE"; additionalTagIds?: string[] }; output: { id: string; promptFunctionType: "CHAT" | "VOICE"; additionalTagIds: string[]; prompt: string } };
-  "character.resetDefault": { input: EmptyParams; output: { defaultCharacterReset: boolean } };
   "character.export": { input: { id: string; format: CharacterFormat }; output: { id: string; format: CharacterFormat; content: string } };
   "character.import": { input: { format: CharacterFormat; content: string }; output: CharacterRecord };
   "character.exportBackup": { input: EmptyParams; output: { content: string } };
@@ -337,8 +335,6 @@ export const characterCards = {
     setActive: (payload: IdParams): Promise<ActivationResult> => call("character.setActive", payload),
     /** Combines the character prompt and selected tags. */
     combine: (payload: DomainInput<"character.combine">): Promise<DomainOutput<"character.combine">> => call("character.combine", payload),
-    /** Resets the built-in character. */
-    resetDefault: (): Promise<DomainOutput<"character.resetDefault">> => call("character.resetDefault", {}),
     /** Exports an explicitly selected character format. */
     export: (payload: DomainInput<"character.export">): Promise<DomainOutput<"character.export">> => call("character.export", payload),
     /** Imports an explicitly selected character format. */

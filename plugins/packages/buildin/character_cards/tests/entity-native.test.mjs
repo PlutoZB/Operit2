@@ -54,7 +54,7 @@ test("native preview reads saved content in one page and expands named configura
     characterSetting: "你是一位可靠、温和的助手。\n认真倾听，给出清楚、具体的回答；遇到不确定的事情，坦诚说明。",
     openingStatement: "你好，今天有什么想一起聊聊的？", otherContentChat: "保持自然的交流节奏，用简洁的语言表达。",
     otherContentVoice: "", advancedCustomPrompt: "", marks: "记录每次对话中值得记住的细节。", attachedTagIds: [tag.id],
-    chatModelBindingMode: "FIXED_MODEL", chatModelId: "qwen-plus", chatProviderId: "provider-one", ttsConfigId: "tts-one", memoryBindingMode: "SHARED", sharedMemoryId: store.id,
+    chatModelBindingMode: "FIXED_MODEL", chatModelId: "qwen-plus", chatProviderId: "dashscope", ttsConfigId: "tts-one", memoryBindingMode: "SHARED", sharedMemoryId: store.id,
     sharedMemoryMounts: [{ sharedMemoryId: store.id, readable: true, writable: false }],
     toolAccessConfig: { enabled: true, allowedBuiltinTools: ["fixture-builtin"], allowedPackages: [], allowedSkills: [], allowedMcpServers: [] },
   } });
@@ -390,7 +390,7 @@ test("the sole native editor retains model TTS shared-memory and four-category t
   };
   const store = await plugin.api("memory.shared.create", { name: "原生共享库" });
   const ui = management(plugin); await ui.load(); await ui.open("edit", "card", card.id); await loadManagementModal(ui);
-  await click(ui, "entity-model-switch", "onCheckedChange", true); await click(ui, "entity-model-picker"); await click(ui, "entity-picker-qwen-plus");
+  await click(ui, "entity-model-switch", "onCheckedChange", true); await click(ui, "entity-model-picker"); await click(ui, "entity-picker-" + JSON.stringify(["dashscope", "qwen-plus"]));
   await click(ui, "entity-tts-switch", "onCheckedChange", true); await click(ui, "entity-picker-tts-one");
   await click(ui, "entity-memory-switch", "onCheckedChange", true); await click(ui, "entity-store-picker"); await click(ui, "entity-picker-" + store.id);
   await click(ui, "entity-tool-switch", "onCheckedChange", true); await click(ui, "entity-tool-configure");
@@ -408,7 +408,7 @@ test("the sole native editor retains model TTS shared-memory and four-category t
   await click(ui, "entity-primary");
   assert.equal(composeNodes(ui.render().tree, node => node.props.key === "entity-error").map(node => node.props.text).join(" "), "");
   const saved = plain(await plugin.api("character.get", { id: card.id }));
-  assert.equal(saved.chatModelBindingMode, "FIXED_MODEL"); assert.equal(saved.chatModelId, "qwen-plus"); assert.equal(saved.ttsConfigId, "tts-one");
+  assert.equal(saved.chatModelBindingMode, "FIXED_MODEL"); assert.equal(saved.chatModelId, "qwen-plus"); assert.equal(saved.chatProviderId, "dashscope"); assert.equal(saved.ttsConfigId, "tts-one");
   assert.equal(saved.memoryBindingMode, "SHARED"); assert.equal(saved.sharedMemoryId, store.id); assert.equal(saved.toolAccessConfig.enabled, true);
   for (let tab = 0; tab < 4; tab++) assert.deepEqual(saved.toolAccessConfig[keys[tab]], tab === 0 ? [names[tab], "use_package"] : [names[tab]]);
 });

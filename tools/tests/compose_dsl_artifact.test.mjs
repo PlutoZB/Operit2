@@ -20,7 +20,7 @@ const source = `module.exports.default = function(ctx) {
 
 test('build artifact is deterministic, portable, idempotent and loads without parser or lowering', () => {
   const artifact = compileComposeModule(source, 'test:screen.js');
-  assert.match(artifact, /^\/\/ @operit-compose-artifact 1\n/);
+  assert.match(artifact, /^\/\/ @operit-compose-artifact 2\n/);
   assert.match(artifact, /OperitComposeReactive\.frame/);
   assert.equal(artifact, compileComposeModule(source, 'test:screen.js'));
   assert.equal(artifact, compileComposeModule(artifact, 'test:screen.js'));

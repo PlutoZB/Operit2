@@ -660,12 +660,13 @@ impl OpenAIProvider {
         let provider_model = self.provider_model();
         let endpoint = self.diagnosticEndpoint()?;
         let started_at = currentTimeMillis();
-        AppLogger::i(
+        AppLogger::v_with_level(
             PROVIDER_TRANSPORT_LOG_TAG,
             &format!(
                 "provider.http.request.start providerModel={} endpoint={}",
                 provider_model, endpoint
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_3,
         );
         let receiver = self.cancel_receiver();
         let observedGeneration = *receiver.borrow();
@@ -677,7 +678,7 @@ impl OpenAIProvider {
             _ = Self::waitForCancellation(receiver, observedGeneration) => Err(AiServiceError::RequestCancelled),
         };
         match &result {
-            Ok(response) => AppLogger::i(
+            Ok(response) => AppLogger::v_with_level(
                 PROVIDER_TRANSPORT_LOG_TAG,
                 &format!(
                     "provider.http.response.headers providerModel={} endpoint={} status={} elapsedMs={}",
@@ -686,6 +687,7 @@ impl OpenAIProvider {
                     response.status(),
                     currentTimeMillis().saturating_sub(started_at),
                 ),
+                operit_util::AppLogger::VERBOSE_LEVEL_3,
             ),
             Err(error) => AppLogger::e(
                 PROVIDER_TRANSPORT_LOG_TAG,
@@ -1295,13 +1297,14 @@ impl OpenAIProvider {
                 received_byte_count += bytes.len();
                 if !received_first_byte {
                     received_first_byte = true;
-                    AppLogger::i(
+                    AppLogger::v_with_level(
                         PROVIDER_TRANSPORT_LOG_TAG,
                         &format!(
                             "provider.http.response.firstByte providerModel={} elapsedMs={}",
                             provider_model,
                             currentTimeMillis().saturating_sub(stream_started_at),
                         ),
+                        operit_util::AppLogger::VERBOSE_LEVEL_3,
                     );
                 }
                 state.pending_bytes.extend_from_slice(&bytes);
@@ -1343,7 +1346,7 @@ impl OpenAIProvider {
 
             self.set_estimated_output_tokens(&emitter.received_content);
             self.apply_token_counts(state.usage.clone());
-            AppLogger::i(
+            AppLogger::v_with_level(
                 PROVIDER_TRANSPORT_LOG_TAG,
                 &format!(
                     "provider.http.response.stream.done providerModel={} elapsedMs={} bytes={} chunks={} contentDeltas={} contentBytes={} nativeToolCallDeltas={}",
@@ -1355,6 +1358,7 @@ impl OpenAIProvider {
                     state.regularContentBytes,
                     state.nativeToolCallDeltaCount,
                 ),
+                operit_util::AppLogger::VERBOSE_LEVEL_3,
             );
             Ok(())
         }
@@ -1472,7 +1476,7 @@ impl OpenAIProvider {
                 accumulated["function"]["name"] = json!(name);
             }
             if state.toolCallState.nameEmitted.get(&index).copied() != Some(true) {
-                AppLogger::d(
+                AppLogger::v_with_level(
                     PROVIDER_TRANSPORT_LOG_TAG,
                     &format!(
                         "provider.stream.tool_call.start providerModel={} index={} tool={} precedingContentDeltas={} precedingContentBytes={}",
@@ -1482,6 +1486,7 @@ impl OpenAIProvider {
                         state.regularContentDeltaCount,
                         state.regularContentBytes,
                     ),
+                    operit_util::AppLogger::VERBOSE_LEVEL_3,
                 );
                 if let Some(callback) = on_tool_invocation {
                     callback(name.to_string());
@@ -2544,13 +2549,14 @@ impl OpenAIProvider {
                         let mut retryCount = 0;
                         let result = loop {
                             let attempt = retryCount + 1;
-                            AppLogger::i(
+                            AppLogger::v_with_level(
                                 PROVIDER_TRANSPORT_LOG_TAG,
                                 &format!(
                                     "provider.stream.attempt.start providerModel={} attempt={}",
                                     provider.provider_model(),
                                     attempt,
                                 ),
+                                operit_util::AppLogger::VERBOSE_LEVEL_3,
                             );
                             let response = provider
                                 .sendHttpRequest(

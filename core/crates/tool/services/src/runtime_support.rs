@@ -25,10 +25,8 @@ pub struct CoreRouteResumeContext {
     pub enableThinking: bool,
     /// Identifies the participant selected by the authenticated configuration descriptor.
     pub participantId: String,
-    /// Identifies the registered snapshot owner, injected solely by the runtime.
+    /// Identifies the registered configuration owner, injected solely by the runtime.
     pub extensionOwner: String,
-    /// Preserves the opaque actor, voice, and profile snapshot for this continuation.
-    pub messageExtension: serde_json::Map<String, serde_json::Value>,
     pub proxySenderName: Option<String>,
     pub notifyReplyOverride: Option<bool>,
     pub chatProviderIdOverride: Option<String>,

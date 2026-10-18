@@ -130,7 +130,14 @@ impl Channel {
         let sequence = cipher.next;
         cipher.seal(&mut bytes)?;
         self.raw.send(PeerMessage::Request(CoreLinkRequest::Call(CoreCallRequest::new(
-            sequence.to_string(), "$peer.session", "data", CoreValue::Bytes(bytes.into()))))).await.map_err(error)
+            sequence.to_string(), "$peer.session", "data", CoreValue::Bytes(bytes.into()))))).await.map_err(|message| {
+            // One encoded message above the connection ceiling is a capacity
+            // limit, not a peer-authentication failure. Keep the transport text
+            // so callers can size their own pages.
+            if message == operit_peer_link::MESSAGE_TOO_LARGE_ERROR {
+                CoreLinkError::new("PEER_MESSAGE_TOO_LARGE", message)
+            } else { error(message) }
+        })
     }
     pub fn setDuplex(&self, duplex: Arc<super::duplex::Duplex>) { *self.duplex.lock().unwrap() = Some(duplex); }
     pub fn duplex(&self) -> Option<Arc<super::duplex::Duplex>> { self.duplex.lock().unwrap().clone() }

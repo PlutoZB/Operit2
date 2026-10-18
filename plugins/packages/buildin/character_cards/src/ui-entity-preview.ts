@@ -34,7 +34,7 @@ export function renderEntityPreview(ctx: ComposeDslContext, input: PreviewConten
           contentScale: "crop", contentDescription: card.name, modifier: ctx.Modifier.clip({ cornerRadius: 20 }) }),
       ctx.UI.Column({ weight: 1, spacing: 6 }, [
         ctx.UI.Text({ key: "entity-preview-name", text: entity.name, style: "headlineSmall", fontSize: 24, fontWeight: "700", fillMaxWidth: true }),
-        ...(card === null || card.isDefault ? [ctx.UI.Text({ text: card === null ? input.group!.members.length + " 位角色" : "默认角色卡", style: "labelMedium", color: colors.onSurfaceVariant })] : []),
+        ...(card === null ? [ctx.UI.Text({ text: input.group!.members.length + " 位角色", style: "labelMedium", color: colors.onSurfaceVariant })] : []),
       ]),
     ]),
     ...(entity.description.trim() === "" ? [] : [selectable("entity-preview-description", entity.description, true)]),

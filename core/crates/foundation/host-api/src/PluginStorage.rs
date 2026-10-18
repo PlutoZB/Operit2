@@ -45,8 +45,6 @@ pub enum StorageKind {
     Sqlite,
     #[serde(rename = "objects")]
     Objects,
-    #[serde(rename = "data_store")]
-    DataStore,
 }
 
 /// Declares a synchronized collection column.
@@ -114,6 +112,26 @@ pub enum StorageRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         merge: Option<StorageMergeDescriptor>,
     },
+    #[serde(rename = "open_preferences")]
+    OpenPreferences {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        merge: Option<StoragePreferencesMergeDescriptor>,
+    },
+    #[serde(rename = "preferences_data")]
+    PreferencesData { handle: String },
+    #[serde(rename = "preferences_begin_edit")]
+    PreferencesBeginEdit { handle: String },
+    #[serde(rename = "preferences_finish_edit")]
+    PreferencesFinishEdit {
+        handle: String,
+        token: String,
+        edits: Vec<StoragePreferenceEdit>,
+        #[serde(rename = "schemaVersion")]
+        schema_version: u32,
+    },
+    #[serde(rename = "preferences_cancel_edit")]
+    PreferencesCancelEdit { handle: String, token: String },
     #[serde(rename = "close")]
     Close { handle: String },
     #[serde(rename = "query")]
@@ -140,6 +158,12 @@ pub enum StorageRequest {
         handle: String,
         collection: String,
         key: String,
+    },
+    #[serde(rename = "get_many")]
+    GetMany {
+        handle: String,
+        collection: String,
+        keys: Vec<String>,
     },
     #[serde(rename = "list")]
     List {
@@ -187,7 +211,7 @@ pub enum StorageMergeMatchMode {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct StorageMergeKeyReference {
-    pub collection: String,
+    pub target: StorageMergeTarget,
     #[serde(default)]
     pub prefix: String,
 }
@@ -318,18 +342,145 @@ pub struct StorageCommitResult {
     pub version: String,
 }
 
+/// Declares one complete-record catalog using the native preference merge executor.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct StoragePreferencesMergeCatalog {
+    #[serde(rename = "keyPrefix")]
+    pub key_prefix: String,
+    #[serde(rename = "keySuffix")]
+    pub key_suffix: String,
+    #[serde(rename = "identityField")]
+    pub identity_field: String,
+    #[serde(rename = "nameField")]
+    pub name_field: String,
+    #[serde(rename = "ignoredFields")]
+    pub ignored_fields: Vec<String>,
+    #[serde(rename = "retiredKeys")]
+    pub retired_keys: Vec<String>,
+}
+
+/// Selects an exact preference or complete records with explicit key boundaries.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields, rename_all = "snake_case")]
+pub enum StoragePreferencesMergeKey {
+    #[serde(rename = "exact")]
+    Exact { key: String },
+    #[serde(rename = "records")]
+    Records { prefix: String, suffix: String },
+}
+
+/// Selects nested reference fields without interpreting application-specific JSON.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields, rename_all = "snake_case")]
+pub enum StoragePreferencesMergePathSegment {
+    #[serde(rename = "field")]
+    Field { name: String },
+    #[serde(rename = "object_values")]
+    ObjectValues,
+    #[serde(rename = "array_values")]
+    ArrayValues,
+    #[serde(rename = "variant")]
+    Variant { name: String },
+    #[serde(rename = "identity")]
+    Identity { prefix: String, suffix: String },
+}
+
+/// Declares a native preference reference targeting an explicit catalog file.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoragePreferencesMergeReference {
+    pub key: StoragePreferencesMergeKey,
+    pub path: Vec<StoragePreferencesMergePathSegment>,
+    pub target: String,
+}
+
+/// Projects selected entity fields through the native preference merge executor.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct StoragePreferencesMergeProjection {
+    #[serde(rename = "selectionKey")]
+    pub selection_key: String,
+    #[serde(rename = "sourceField")]
+    pub source_field: String,
+    pub fields: std::collections::BTreeMap<String, String>,
+    #[serde(rename = "retiredKeys")]
+    pub retired_keys: Vec<String>,
+}
+
+/// Carries the native merge capabilities as bounded data alongside preference journal entries.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoragePreferencesMergeDescriptor {
+    pub version: u32,
+    pub catalog: Option<StoragePreferencesMergeCatalog>,
+    pub references: Vec<StoragePreferencesMergeReference>,
+    pub projection: Option<StoragePreferencesMergeProjection>,
+}
+
+/// Identifies immutable merge declarations in the native preference journal.
+pub const PLUGIN_MERGE_DECLARATION_KEY: &str = "__operit_preferences_merge";
+
+impl StoragePreferencesMergeKey {
+    /// Matches only the explicitly declared preference key namespace.
+    pub fn matches(&self, candidate: &str) -> bool {
+        match self {
+            Self::Exact { key } => candidate == key,
+            Self::Records { prefix, suffix } => candidate.strip_prefix(prefix.as_str())
+                .and_then(|key| key.strip_suffix(suffix.as_str()))
+                .is_some_and(|identity| !identity.is_empty()),
+        }
+    }
+}
+
+/// Preserves native preference edit intentions across the callback transport boundary.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "op", deny_unknown_fields, rename_all = "snake_case")]
+pub enum StoragePreferenceEdit {
+    #[serde(rename = "set")]
+    Set { key: String, value: Value },
+    #[serde(rename = "remove")]
+    Remove { key: String },
+    #[serde(rename = "increment_integer")]
+    IncrementInteger { key: String, delta: i64 },
+    #[serde(rename = "set_object_field")]
+    SetObjectField { key: String, field: String, value: Value },
+}
+
+/// Carries a complete typed preference snapshot independently of object collection versions.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct StoragePreferencesSnapshot {
+    pub values: std::collections::BTreeMap<String, Value>,
+    #[serde(rename = "schemaVersion")]
+    pub schema_version: u32,
+}
+
+/// Identifies a single callback invocation whose publication must match its original snapshot.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoragePreferencesEdit {
+    pub token: String,
+    pub snapshot: StoragePreferencesSnapshot,
+}
+
 /// Returns each storage operation's concrete business result.
 /// Serialization preserves the database API payload; tool results add their own operation discriminator.
 #[derive(Clone, Debug, Serialize)]
 #[serde(untagged)]
 pub enum StorageResponse {
     Open(StorageOpenResult),
+    PreferencesData(StoragePreferencesSnapshot),
+    PreferencesBeginEdit(StoragePreferencesEdit),
+    PreferencesFinishEdit(StoragePreferencesSnapshot),
+    PreferencesCancelEdit,
     Close,
     Query(Vec<StorageSqlRow>),
     Execute(Vec<StorageSqlExecutionResult>),
     Transaction(Vec<StorageSqlExecutionResult>),
     DefineTable(StorageTableDefinitionResult),
     Get(Option<StorageValueEntry>),
+    GetMany(Vec<Option<StorageValueEntry>>),
     List(Vec<StorageKeyValueEntry>),
     Commit(StorageCommitResult),
 }

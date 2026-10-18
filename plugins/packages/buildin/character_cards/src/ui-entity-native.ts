@@ -406,7 +406,7 @@ function renderNativeEntity(ctx: ComposeDslContext, input: NativeEntityInput, li
     const title = state.editing ? input.mode === "create" ? input.entity === "card" ? "创建角色卡" : "创建群组" : input.entity === "card" ? "编辑角色卡" : "编辑群组" : input.entity === "card" ? "角色卡" : "角色群组";
     panel = shell(title, page, [
       ...(state.editing && input.mode !== "create" ? [
-        ...(state.card?.isDefault ? [] : [standardButton("entity-delete", "删除", () => { assertOwner(); update({ deleting: true }); })]),
+        standardButton("entity-delete", "删除", () => { assertOwner(); update({ deleting: true }); }),
         standardButton("entity-export", "导出", () => { assertOwner(); update({ exporting: true }); }),
       ] : []),
       standardButton("entity-cancel", state.editing ? "取消" : "关闭", close),

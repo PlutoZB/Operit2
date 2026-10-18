@@ -26,8 +26,8 @@ test("independent repositories allocate UUIDs for all named records", async () =
     const tag = await session.createTag({ ...plain(createTagDraft()), name: "Same tag" });
     const store = await session.createStore("Same library");
     for (const record of [card, group, tag, store]) { assertUuid(record.id); identities.push(record.id); }
-    assert.equal(state.nextId, "1");
-    assert.equal(state.cards[0].id, "default");
+    assert.equal(state.version, 1);
+    assertUuid(state.cards[0].id); identities.push(state.cards[0].id);
     assert.ok(state.owners.some(owner => owner.ownerKey === "character:" + card.id));
     assert.ok(state.owners.some(owner => owner.ownerKey === "shared:" + store.id));
     const renamed = await session.updateCharacter({ ...card, name: "Renamed" });

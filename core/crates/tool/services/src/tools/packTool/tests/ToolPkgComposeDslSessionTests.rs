@@ -299,7 +299,7 @@ async fn native_compose_artifact_loads_without_parser_and_invalidates_changed_so
     engine.execute_script_function(install, "install", &options(), &BTreeMap::new(), None, false, 60, None).await.unwrap();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(4).unwrap();
     let source = std::fs::read_to_string(root.join("plugins/packages/buildin/character_cards/dist/ui/main/index.ui.js")).unwrap();
-    assert!(source.starts_with("// @operit-compose-artifact 1\n"));
+    assert!(source.starts_with("// @operit-compose-artifact 2\n"));
     session.execute(command("artifact", Some(source), None, None)).await;
     let events = drain(&mut stream);
     assert!(events.iter().all(|event| event.error.is_none()), "{events:?}");
@@ -322,6 +322,26 @@ async fn native_compose_artifact_loads_without_parser_and_invalidates_changed_so
     session.close(); engine.destroy();
 }
 
+/// Loads optional historical SDK sources only for explicitly invoked performance comparisons.
+fn lazy_baseline_install_script() -> Option<String> {
+    let mut declarations = String::new();
+    let mut assignments = String::new();
+    for (variable, global) in [
+        ("OPERIT_LAZY_BASELINE_SOURCE", "OperitComposeLazy"),
+        ("OPERIT_GENERATION_BASELINE_SOURCE", "OperitComposeGeneration"),
+        ("OPERIT_NODES_BASELINE_SOURCE", "OperitComposeNodes"),
+        ("OPERIT_RETAINED_BASELINE_SOURCE", "OperitComposeRetained"),
+    ] {
+        if let Some(path) = std::env::var_os(variable) {
+            declarations.push_str(&std::fs::read_to_string(path).unwrap());
+            declarations.push('\n');
+            assignments.push_str(&format!("globalThis.{global} = {global};"));
+        }
+    }
+    if assignments.is_empty() { return None; }
+    Some(format!("{declarations}\nexports.install = function() {{ {assignments} }};"))
+}
+
 /// Measures fresh native page engines separately from source lowering and warm retained refreshes.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "Run explicitly to inspect native editor cold-load stages without opening personal data"]
@@ -330,6 +350,7 @@ async fn native_character_editor_load_stage_performance_probe() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(4).unwrap();
     let source_dir = std::env::var_os("OPERIT_DSL_PROBE_SOURCE_DIR").map(std::path::PathBuf::from)
         .unwrap_or_else(|| root.join("plugins/packages/buildin/character_cards/dist/ui"));
+    let baseline_install = lazy_baseline_install_script();
     let install = r#"exports.install = function() {
         globalThis.__editorProbe = {prepareMs:0, prepareCalls:0, renderMs:0, commitMs:0};
         const prepare = __operitNativePrepareComposeModule;
@@ -373,6 +394,9 @@ async fn native_character_editor_load_stage_performance_probe() {
             let (session, engine) = native_session();
             let bootstrap_ms = bootstrap.elapsed().as_secs_f64() * 1000.0;
             let mut stream = session.updates().unwrap();
+            if let Some(baseline_install) = &baseline_install {
+                engine.execute_script_function(baseline_install, "install", &options(), &BTreeMap::new(), None, false, 60, None).await.unwrap();
+            }
             engine.execute_script_function(install, "install", &options(), &BTreeMap::new(), None, false, 60, None).await.unwrap();
             let render_start = std::time::Instant::now();
             let mut initial = command("render", Some(source.clone()), None, None);
@@ -419,14 +443,15 @@ async fn native_character_sidebar_reorder_keeps_every_retained_reference_mounted
     let setup = r#"exports.install = function() {
         ToolPkg.readResource = async function() { return '/fixture/avatar.png'; };
         Tools.Files.readBinary = async function(path) { return {path:path, size:12, contentBase64:'iVBORw0KGgo='}; };
-        ToolPkg.ipc.call = async function(name, request) {
-            if (name !== 'character-sidebar.catalog') throw new Error('Unexpected sidebar IPC: ' + name);
+        let catalogReads = 0;
+        ToolPkg.ipc.on('character-sidebar.catalog', async function(request, meta) {
+            if (meta.channel !== 'character-sidebar.catalog') throw new Error('Unexpected sidebar IPC channel');
             const chats = request.chatSidebar.chats;
-            return {view:'characters', sections:[{id:'card:travel', title:'Travel', avatarUri:null,
+            return {view:'characters', sections:[{id:'card:travel', title:'Travel ' + (++catalogReads), avatarUri:null,
                 kind:'card', selection:'card:travel', chats:chats,
                 conversationGroups:[{id:'1', name:'Group', pinned:true, displayOrder:0, chats:chats.slice(0,2)}],
                 ungroupedChats:chats.slice(2)}]};
-        };
+        });
         return true;
     };"#;
     engine.execute_script_function(setup, "install", &options(), &BTreeMap::new(), None, false, 60, None).await.unwrap();
@@ -469,12 +494,11 @@ async fn native_character_sidebar_reorder_keeps_every_retained_reference_mounted
         let updates = drain(&mut stream);
         for event in &updates { assert!(event.error.is_none(), "{event:?}"); if let Some(update) = &event.update { store.apply(update.clone()).unwrap(); } }
         events.extend(updates);
-        let action = store.root().unwrap().props["onInputsChanged"]["__actionId"].as_str().unwrap().to_string();
-        session.execute(command(&format!("sidebar-refresh-{sample}"), None, Some(action), None)).await;
-        let updates = drain(&mut stream);
-        for event in &updates { assert!(event.error.is_none(), "{event:?}"); if let Some(update) = &event.update { store.apply(update.clone()).unwrap(); } }
-        events.extend(updates);
         let snapshot = store.snapshot().unwrap();
+        assert!(snapshot.upserts.iter().any(|record|
+            record.props.get("text") == Some(&Value::String(format!("Travel {}", sample + 2)))
+        ), "Host input updates must run the sidebar lifecycle without another action command; sample={sample}, texts={:?}",
+            snapshot.upserts.iter().filter_map(|record| record.props.get("text")).collect::<Vec<_>>());
         let nodes: BTreeMap<_, _> = snapshot.upserts.iter().map(|record| (&record.id, record)).collect();
         for record in nodes.values() {
             for child in record.children.iter().chain(record.slots.values().flatten()) {
@@ -522,4 +546,159 @@ async fn native_restart_reopens_closed_cached_session_and_renders() {
     old.close();
     assert!(ToolPkgComposeDslSession::resolve(&id).is_ok(), "late old cleanup cannot close its replacement");
     reopened.close(); engine.destroy();
+}
+
+/// Measures overlap reuse through the native scheduler, QuickJS, retained graph and response stream.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "Run explicitly for native lazy window timing; optional OPERIT_LAZY_BASELINE_SOURCE loads an older SDK Lazy.js"]
+async fn native_lazy_window_overlap_performance_probe() {
+    let baseline = lazy_baseline_install_script();
+    let source = r#"exports.default = function(ctx) {
+        const [label, setLabel] = ctx.useState('label', 'Row');
+        return ctx.UI.LazyColumn({ rename:setLabel, ...ctx.lazyItems({key:'rows', itemCount:1000,
+            itemExtent:34, initialItemCount:24}, index => {
+                globalThis.builderRuns = (globalThis.builderRuns || 0) + 1;
+                return ctx.UI.Row({key:'item:' + index, onClick:() => index},
+                    Array.from({length:23}, (_, child) => ctx.UI.Text({text:label + ' ' + index + ':' + child})));
+            }) });
+    };"#;
+    let mut results = Vec::new();
+    for pair in 0..8 {
+        let variants: Vec<_> = if baseline.is_none() { vec![false] }
+            else if pair % 2 == 0 { vec![true, false] } else { vec![false, true] };
+        for is_baseline in variants {
+            let (session, engine) = native_session();
+            if is_baseline {
+                engine.execute_script_function(baseline.as_ref().unwrap(), "install", &options(), &BTreeMap::new(), None, false, 60, None).await.unwrap();
+            }
+            let mut stream = session.updates().unwrap();
+            let started = std::time::Instant::now();
+            session.execute(command("initial", Some(source.into()), None, None)).await;
+            let initial_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let mut events = drain(&mut stream);
+            assert!(events.iter().all(|event| event.error.is_none()), "{events:?}");
+            let root = events.iter().filter_map(|event| event.update.as_ref())
+                .flat_map(|update| &update.upserts).find(|node| node.nodeType == "LazyColumn").unwrap();
+            let range_action = root.props["viewport"]["onRangeChanged"]["__actionId"].as_str().unwrap().to_owned();
+            let rename_action = root.props["rename"]["__actionId"].as_str().unwrap().to_owned();
+            let initial_nodes: usize = events.iter().filter_map(|event| event.update.as_ref()).map(|update| update.upserts.len()).sum();
+            assert_eq!(initial_nodes, 577);
+            let mut shifts = Vec::new();
+            for shift in 1..=20 {
+                let first = shift * 2;
+                let started = std::time::Instant::now();
+                session.execute(command("shift", None, Some(range_action.clone()),
+                    Some(serde_json::json!({"firstIndex":first,"lastIndex":first+24})))).await;
+                let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+                let changed = drain(&mut stream);
+                assert!(changed.iter().all(|event| event.error.is_none()), "{changed:?}");
+                let upserts: usize = changed.iter().filter_map(|event| event.update.as_ref()).map(|update| update.upserts.len()).sum();
+                if is_baseline { assert_eq!(upserts, 555); }
+                else { assert_eq!(upserts, 49, "a shift changes only two entering rows and the list root"); }
+                shifts.push(serde_json::json!({"elapsedMs":elapsed_ms,"upserts":upserts}));
+                events.extend(changed);
+            }
+            let inspect = "exports.inspect = function() { return globalThis.builderRuns; };";
+            let builder_runs: usize = engine.execute_script_function(inspect, "inspect", &options(), &BTreeMap::new(), None, false, 60, None)
+                .await.unwrap().unwrap().parse().unwrap();
+            assert_eq!(builder_runs, if is_baseline { 24 * 21 } else { 24 + 2 * 20 });
+            let started = std::time::Instant::now();
+            session.execute(command("rename", None, Some(rename_action), Some(Value::from("Updated")))).await;
+            let rename_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let renamed = drain(&mut stream);
+            assert!(renamed.iter().all(|event| event.error.is_none()), "{renamed:?}");
+            assert!(renamed.iter().filter_map(|event| event.update.as_ref()).flat_map(|update| &update.upserts)
+                .any(|node| node.props.get("text") == Some(&Value::from("Updated 40:0"))));
+            events.extend(renamed);
+            assert_revisions(&events);
+            results.push(serde_json::json!({"pair":pair,"variant":if is_baseline {"baseline"} else {"candidate"},
+                "initialMs":initial_ms,"initialNodes":initial_nodes,"builderRuns":builder_runs,"shifts":shifts,"renameMs":rename_ms}));
+            session.close(); engine.destroy();
+        }
+    }
+    eprintln!("dsl_lazy_overlap_probe {}", serde_json::json!({"profile":if cfg!(debug_assertions) {"debug"} else {"release"},
+        "scope":"native scheduler + QuickJS + retained stream, synthetic 24 rows x 24 nodes, moves two rows; excludes Flutter, images and GPU", "samples":results}));
+}
+
+/// Replays the shipped sidebar with a prepared expanded catalog, without editing generated plugin code.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "Run explicitly for actual sidebar window timing; does not open the application or personal data"]
+async fn native_character_sidebar_window_performance_probe() {
+    use crate::tools::packTool::ToolPkgComposeDslNodeStore::ToolPkgComposeDslNodeStore;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(4).unwrap();
+    let source = std::fs::read_to_string(root.join("plugins/packages/buildin/character_cards/dist/ui/chat-sidebar/index.ui.js")).unwrap();
+    let baseline = lazy_baseline_install_script();
+    let baseline_source = std::env::var_os("OPERIT_SIDEBAR_BASELINE_SOURCE")
+        .map(|path| std::fs::read_to_string(path).unwrap()).unwrap_or_else(|| source.clone());
+    let chats: Vec<_> = (0..100).map(|index| serde_json::json!({"id":format!("chat-{index}"),"title":format!("Benchmark chat {index}"),
+        "updatedAt":"2026-10-18T00:00:00Z","displayOrder":index,"workspaceId":null,"workspaceName":null,"locked":false,"pinned":false,"group":null})).collect();
+    let input = serde_json::json!({"view":"characters"});
+    // Catalog keys use the validated JS record's field order, not serde's map order.
+    let context_chats = chats.iter().map(|chat| format!(
+        "{{\"id\":{},\"title\":{},\"updatedAt\":{},\"displayOrder\":{},\"workspaceId\":null,\"workspaceName\":null,\"locked\":false,\"pinned\":false,\"group\":null}}",
+        chat["id"], chat["title"], chat["updatedAt"], chat["displayOrder"])).collect::<Vec<_>>().join(",");
+    let context = format!("{{\"input\":{},\"chats\":[{}]}}", input, context_chats);
+    let data = serde_json::json!({"view":"characters","sections":[{"id":"card-1","title":"Benchmark Card","avatarUri":null,
+        "kind":"card","selection":"card:1","chats":chats}]});
+    let state = serde_json::json!({"input":input,"chatSidebar":{"chats":chats,"currentChatId":null,"activeStreamingChatIds":[]},
+        "chatSidebarPrepared":{"context":context,"data":data,"defaultAvatar":"/fixture/avatar.png"},
+        "native-sidebar-state":{"data":data,"defaultAvatar":"/fixture/avatar.png","context":context,"loading":false,"busy":false,
+            "error":"","query":"","search":false,"collapsed":[],"expandedGroups":["preview:ungrouped:card-1"],"dialog":null}});
+    let mut results = Vec::new();
+    for pair in 0..8 {
+        let variants: Vec<_> = if baseline.is_none() { vec![false] }
+            else if pair % 2 == 0 { vec![true, false] } else { vec![false, true] };
+        for is_baseline in variants {
+            let (session, engine) = native_session();
+            if is_baseline {
+                engine.execute_script_function(baseline.as_ref().unwrap(), "install", &options(), &BTreeMap::new(), None, false, 60, None).await.unwrap();
+            }
+            let mut stream = session.updates().unwrap();
+            let mut initial = command("initial", Some(if is_baseline { baseline_source.clone() } else { source.clone() }), None, None);
+            initial.runtimeOptions.insert("state".into(), state.clone());
+            let started = std::time::Instant::now();
+            session.execute(initial).await;
+            let initial_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let mut events = drain(&mut stream);
+            assert!(events.iter().all(|event| event.error.is_none()), "{events:?}");
+            let mut store = ToolPkgComposeDslNodeStore::default();
+            for event in &events { if let Some(update) = &event.update { store.apply(update.clone()).unwrap(); } }
+            let inspect = "exports.inspect = function() { const b = globalThis.__operit_compose_bundle; const c = b.memoStore['native-sidebar-current'].current; return b.stateStore['native-sidebar-state'].context === JSON.stringify({input:c.input,chats:c.chatSidebar.chats}); };";
+            assert_eq!(engine.execute_script_function(inspect, "inspect", &options(), &BTreeMap::new(), None, false, 60, None).await.unwrap().unwrap(), "true",
+                "prepared catalog must match the validated input, without fallback reconciliation");
+            let list = store.root().unwrap();
+            assert_eq!(list.props["viewport"]["itemCount"], Value::from(103), "the fixture must contain an expanded catalog");
+            let action = list.props["viewport"]["onRangeChanged"]["__actionId"].as_str().unwrap().to_owned();
+            let initial_nodes = store.snapshot().unwrap().upserts.len();
+            let mut shifts = Vec::new();
+            for shift in 1..=20 {
+                let first = shift * 2;
+                let started = std::time::Instant::now();
+                session.execute(command("shift", None, Some(action.clone()),
+                    Some(serde_json::json!({"firstIndex":first,"lastIndex":first+24})))).await;
+                let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+                let changed = drain(&mut stream);
+                assert!(changed.iter().all(|event| event.error.is_none()), "{changed:?}");
+                let upserts: usize = changed.iter().filter_map(|event| event.update.as_ref()).map(|update| update.upserts.len()).sum();
+                for event in &changed { if let Some(update) = &event.update { store.apply(update.clone()).unwrap(); } }
+                let snapshot = store.snapshot().unwrap();
+                for index in first-2..first+22 {
+                    assert!(snapshot.upserts.iter().any(|node| node.props.get("key") == Some(&Value::from(format!("sidebar-chat-title-chat-{index}")))
+                        && node.props.get("text") == Some(&Value::from(format!("Benchmark chat {index}")))), "missing or stale chat {index}");
+                }
+                let records: BTreeMap<_, _> = snapshot.upserts.iter().map(|node| (&node.id, node)).collect();
+                for node in records.values() {
+                    for child in node.children.iter().chain(node.slots.values().flatten()) { assert!(records.contains_key(child)); }
+                }
+                shifts.push(serde_json::json!({"elapsedMs":elapsed_ms,"upserts":upserts}));
+                events.extend(changed);
+            }
+            assert_revisions(&events);
+            results.push(serde_json::json!({"pair":pair,"variant":if is_baseline {"baseline"} else {"candidate"},
+                "initialMs":initial_ms,"initialNodes":initial_nodes,"shifts":shifts}));
+            session.close(); engine.destroy();
+        }
+    }
+    eprintln!("dsl_sidebar_window_probe {}", serde_json::json!({"profile":if cfg!(debug_assertions) {"debug"} else {"release"},
+        "scope":"shipped character sidebar, 100 fixture chats, 24-row window moves two rows; native scheduler + QuickJS + retained stream; excludes catalog IPC, Flutter, image IO and GPU", "samples":results}));
 }

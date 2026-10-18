@@ -63,12 +63,22 @@ test("storage open accepts only paths and rejects the removed sync parameter",as
   }
 });
 
-/** Keeps stored nulls, key removals and exact absence checks distinct in one batch. */
-test("DataStore creates an atomic key mutation batch and rejects unsupported structured values",async()=>{
-  const f=fixture();const opening=f.run("Tools.Storage.dataStore.open({path:'runtime/owned/keys.db'}).then(value=>{globalThis.db=value;})");f.reply({handle:"keys",path:"runtime/owned/keys.db"});await opening;
-  const commit=f.run("db.commit({set:{nullable:null,count:3},remove:['old'],expectedVersions:{nullable:null,old:'v1'}})");
-  assert.deepEqual(f.request().mutations,[{collection:"keys",key:"nullable",value:null,deleted:false,checkVersion:true,expectedVersion:null},{collection:"keys",key:"count",value:3,deleted:false,checkVersion:false,expectedVersion:null},{collection:"keys",key:"old",value:null,deleted:true,checkVersion:true,expectedVersion:"v1"}]);f.reply({version:"v2"});assert.equal((await commit).version,"v2");
-  for(const code of ["db.put('x',undefined)","db.put('x',NaN)","db.put('x',new Date())","db.put('x',Array(1))","db.put('x',Object.defineProperty({},'x',{get(){return 1;},enumerable:true}))","(()=>{const x={};x.self=x;return db.put('x',x)})()"]){assert.throws(()=>f.run(code),/Storage/);assert.equal(f.pending.length,0);}
+/** Transports one native preference callback without exposing the retired collection/CAS facade. */
+test("DataStore edits native typed preferences through the structured Host bridge", async () => {
+  const f = fixture();
+  const opening = f.run("Tools.Storage.dataStore.open({path:'runtime/owned/settings.preferences.json'}).then(value=>{globalThis.db=value;})");
+  f.reply({handle:"preferences",path:"runtime/owned/settings.preferences.json"}); await opening;
+  assert.equal(f.run("typeof db.commit"), "undefined");
+  assert.equal(f.run("typeof db.get"), "undefined");
+  const editing = f.run("db.edit(preferences=>{preferences.set('nullable',null);preferences.set('count',3);preferences.remove('old')})");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.request(), {op:"preferences_begin_edit",handle:"preferences"});
+  f.reply({token:"callback",snapshot:{values:{old:"retired"},schemaVersion:0}});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.request(), {op:"preferences_finish_edit",handle:"preferences",token:"callback",schemaVersion:0,edits:[{op:"set",key:"nullable",value:null},{op:"set",key:"count",value:3},{op:"remove",key:"old"}]});
+  f.reply({values:{nullable:null,count:3},schemaVersion:0});
+  const snapshot = await editing;
+  assert.equal(snapshot.get("nullable"), null); assert.equal(snapshot.get("count"), 3); assert.equal(snapshot.get("old"), undefined);
 });
 
 /** Exercises nested proxy mutations and retries the same CAS version only after an explicit failed save. */
@@ -134,15 +144,39 @@ test("record watch return before next allocates no resources", async()=>{
   assert.equal((await f.run("stream.next()")).done,true);assert.equal(f.pending.length,0);
 });
 
-/** Gives DataStore the same exact-key observation protocol and honors AbortSignal. */
-test("DataStore watch abort closes its exact retained handle",async()=>{
+/** Observes native preference snapshots and cancels the collector's retained handle. */
+test("DataStore flow abort closes its exact retained handle",async()=>{
   const f=fixture();const registry=f.sandbox.__operitHostPromiseRegistry;const waits=[];const listeners=new Set();
   f.sandbox.signal={aborted:false,addEventListener(name,listener){assert.equal(name,"abort");listeners.add(listener);},removeEventListener(name,listener){listeners.delete(listener);}};
   f.sandbox.__operitNativeWaitPluginStorageRecord=registry.binding((id,handle,collection,key,after)=>waits.push({id,handle,collection,key,after}));
-  const opening=f.run("Tools.Storage.dataStore.open({path:'runtime/owned/keys.sqlite'}).then(value=>{globalThis.db=value})");f.reply({handle:"parent",path:"runtime/owned/keys.sqlite"});await opening;
-  f.run("globalThis.stream=db.watch('theme',{signal})");const pending=f.run("stream.next()");f.reply({handle:"watcher",path:"runtime/owned/keys.sqlite"});await new Promise(resolve=>setImmediate(resolve));
-  assert.equal(waits[0].collection,"keys");assert.equal(waits[0].key,"theme");f.sandbox.signal.aborted=true;
+  const opening=f.run("Tools.Storage.dataStore.open({path:'runtime/owned/settings.preferences.json'}).then(value=>{globalThis.db=value})");f.reply({handle:"parent",path:"runtime/owned/settings.preferences.json"});await opening;
+  f.run("globalThis.stream=db.dataFlow({signal})");const pending=f.run("stream.next()");
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.request().op,"preferences_data");f.reply({values:{theme:"dark"},schemaVersion:0});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.request().op,"open_preferences");f.reply({handle:"watcher",path:"runtime/owned/settings.preferences.json"});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(waits[0].collection,"__preferences");assert.equal(waits[0].key,"snapshot");f.sandbox.signal.aborted=true;
   for(const listener of [...listeners])listener();await new Promise(resolve=>setImmediate(resolve));
   assert.deepEqual(f.request(),{op:"close",handle:"watcher"});f.reply(null);registry.settle(waits.shift().id,"closed",true);
   assert.equal((await pending).done,true);assert.equal(listeners.size,0);assert.equal(f.sandbox.refs,0);
+});
+
+/** Exercises the real facade's ordered atomic reads, absence semantics, bounds and disposal. */
+test("object getMany preserves ordered null records and rejects invalid batches", async () => {
+  const f = fixture();
+  const opening = f.run("Tools.Storage.objects.open({path:'runtime/owned/objects.db'}).then(value=>{globalThis.db=value;})");
+  f.reply({handle:"objects",path:"runtime/owned/objects.db"}); await opening;
+  const reading = f.run("db.collection('memories').getMany(['present','missing','nullable','present'])");
+  assert.deepEqual(f.request(), {op:"get_many",handle:"objects",collection:"memories",keys:["present","missing","nullable","present"]});
+  const values = [{value:{id:"present",tags:["one"]},version:"v1"},null,{value:null,version:"v2"},{value:{id:"present",tags:["one"]},version:"v1"}];
+  f.reply(values);
+  assert.deepEqual(structuredClone(await reading), values);
+  assert.deepEqual(structuredClone(await f.run("db.collection('memories').getMany([])")), []);
+  for (const batch of ["null", "[1]", "Array(1001).fill('key')"]) {
+    await assert.rejects(f.run("db.collection('memories').getMany(" + batch + ")"), /1000 string keys/);
+    assert.equal(f.pending.length, 0);
+  }
+  const closing = f.run("db.close()"); f.reply(null); await closing;
+  await assert.rejects(f.run("db.collection('memories').getMany([])"), /closed/);
 });

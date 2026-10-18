@@ -2,8 +2,7 @@ import type { CharacterRepository, CharacterRepositoryOwner } from "../canonical
 import type { MemoryCandidate, MemoryRebuild, MemoryRebuildProgress, MemoryRebuildTask } from "../model";
 import { assertInteger, assertObject, assertStrings, requireId } from "../validation";
 import { extractMessages } from "./analysis";
-import { chatParticipants, planWindows, primaryOwner, readMessages, requireChat, requireChatOwner, requireMessageOwner, requireMessagesOwner } from "./chat";
-import { readMessageSnapshot } from "../chat-storage";
+import { chatParticipants, planWindows, primaryOwner, readMessages, requireChat, requireChatOwner, requireMessageOwner, requireMessagesOwner, currentMessageMemoryAccess } from "./chat";
 
 export type CandidateSource = "reply_finalized_auto" | "selected_user_message";
 export interface CandidateRequest { chatId: string; timestamp: number; variantIndex: number; sourceType: CandidateSource; ownerKey: string | null }
@@ -50,13 +49,13 @@ export async function enqueueCandidate(input: CandidateRequest, repository: Char
   if (message.content.trim() === "") throw new Error("Memory candidate source is blank");
   const owners = new Set<string>();
   if (input.sourceType === "reply_finalized_auto") {
-    const marker = await readMessageSnapshot(input.chatId, message.timestamp, message.variantIndex);
-    const ownerKey = input.ownerKey === null ? marker.primaryOwnerKey : input.ownerKey;
+    const access = await currentMessageMemoryAccess(input.chatId, message, repository);
+    const ownerKey = input.ownerKey === null ? access.primaryOwnerKey : input.ownerKey;
     if (ownerKey === "") return { owners: [], candidateIds: [] };
-    if (!marker.profile.resources.some(
-      /** Authorizes only the exact submitted resource through the already-read historical snapshot. */
+    if (!access.resources.some(
+      /** Authorizes only the exact submitted resource through the already-read current author permissions. */
       resource => resource.key === ownerKey && resource.writable,
-    )) throw new Error("Saved candidate identity cannot write this memory owner: " + ownerKey);
+    )) throw new Error("Current message author cannot write this memory owner: " + ownerKey);
     await repository.readMemorySpace(ownerKey); owners.add(ownerKey);
   } else if (input.ownerKey !== null) {
     await requireChatOwner(input.chatId, input.ownerKey, repository); owners.add(input.ownerKey);

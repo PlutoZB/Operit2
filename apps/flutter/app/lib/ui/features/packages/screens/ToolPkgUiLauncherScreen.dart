@@ -115,11 +115,12 @@ class _ToolPkgUiLoadTiming {
            ? (Stopwatch()..start())
            : null {
     if (_watch != null && queueWaitMicros != null) {
-      ClientLogger.i(
+      ClientLogger.v(
         'event=compose_load_begin $label firstLoad=$firstLoad '
         'queueMs=${(queueWaitMicros / 1000).toStringAsFixed(3)} '
         'startedAfterMs=${(startedAfterMicros! / 1000).toStringAsFixed(3)}',
         tag: 'ToolPkgUiLauncher',
+        verboseLevel: VerboseLevel.level4,
       );
     }
   }
@@ -141,11 +142,12 @@ class _ToolPkgUiLoadTiming {
     final watch = _watch;
     if (watch == null) return;
     final elapsed = watch.elapsedMicroseconds;
-    ClientLogger.i(
+    ClientLogger.v(
       'event=compose_load_stage $label stage=$stage '
       'stepMs=${((elapsed - (startedMicros ?? _previousMicros)) / 1000).toStringAsFixed(1)} '
       'totalMs=${(elapsed / 1000).toStringAsFixed(1)}',
       tag: 'ToolPkgUiLauncher',
+      verboseLevel: VerboseLevel.level4,
     );
     _previousMicros = elapsed;
   }
@@ -302,21 +304,23 @@ class _ToolPkgUiLauncherScreenState extends State<ToolPkgUiLauncherScreen> {
       uiModuleId: uiModuleId,
       routeInstanceId: routeInstanceId,
     );
-    ClientLogger.i(
+    ClientLogger.v(
       'event=theme_dispatch_start package=${widget.plugin.packageName} '
       'context=$executionContextKey brightness=${scheme.brightness.name} '
       'primary=${scheme.primary.toARGB32().toRadixString(16)}',
       tag: _logTag,
+      verboseLevel: VerboseLevel.level4,
     );
     try {
       await _dispatchAction(
         '__operit_theme_changed',
         pluginThemeSnapshot(scheme),
       );
-      ClientLogger.i(
+      ClientLogger.v(
         'event=theme_dispatch_done package=${widget.plugin.packageName} '
         'context=$executionContextKey',
         tag: _logTag,
+        verboseLevel: VerboseLevel.level4,
       );
     } catch (error, stackTrace) {
       ClientLogger.e(
@@ -562,7 +566,7 @@ class _ToolPkgUiLauncherScreenState extends State<ToolPkgUiLauncherScreen> {
       }
       _firstTreeFrameReported = true;
       _firstTreeWatch.stop();
-      ClientLogger.i(
+      ClientLogger.v(
         'event=compose_first_tree_frame package=${widget.plugin.packageName} '
         'route=$_selectedRouteId context=${_activeExecutionContext?.contextKey} '
         'load=$_routeLoadGeneration elapsedMs=${_firstTreeWatch.elapsedMilliseconds} '
@@ -571,6 +575,7 @@ class _ToolPkgUiLauncherScreenState extends State<ToolPkgUiLauncherScreen> {
         'prepared=${widget.initialState['chatSidebarPrepared'] != null} '
         'tickerEnabled=${TickerMode.valuesOf(context).enabled}',
         tag: _logTag,
+        verboseLevel: VerboseLevel.level4,
       );
     });
   }

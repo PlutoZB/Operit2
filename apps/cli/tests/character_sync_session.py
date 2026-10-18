@@ -77,7 +77,7 @@ async def execute_profile(node, identity, provider, tts, error=False):
         'packageName': 'com.operit.character_cards', 'methodName': 'chat.configuration.resolve',
         'payload': {'purpose': 'execution', 'chatId': None,
                     'chatExtension': {'version': 1, 'selection': 'card:' + identity},
-                    'messageExtension': None, 'participantId': None, 'promptFunctionType': 'CHAT',
+                    'participantId': None, 'promptFunctionType': 'CHAT',
                     'defaultModelBinding': {'providerId': provider, 'modelId': 'sync-model'},
                     'defaultTtsConfigId': tts},
     }

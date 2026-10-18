@@ -268,10 +268,10 @@ impl SystemPromptConfig {
             )
             .replace("WORKSPACE_GUIDELINES_SECTION", &workspace_guidelines);
 
-        let available_tools_en =
+        let available_tools =
             if options.use_tool_call_api || options.tool_exposure_mode == ToolExposureMode::CLI {
                 String::new()
-            } else {
+            } else if options.use_english {
                 SystemToolPrompts::generateToolsPromptEnForHost(
                     options.chat_id.clone(),
                     options.has_image_recognition,
@@ -286,10 +286,6 @@ impl SystemPromptConfig {
                     options.hook_metadata.clone(),
                 )
                 .await?
-            };
-        let available_tools_cn =
-            if options.use_tool_call_api || options.tool_exposure_mode == ToolExposureMode::CLI {
-                String::new()
             } else {
                 SystemToolPrompts::generateToolsPromptCnForHost(
                     options.chat_id.clone(),
@@ -358,11 +354,7 @@ impl SystemPromptConfig {
                     )
                     .replace(
                         "AVAILABLE_TOOLS_SECTION",
-                        if options.use_english {
-                            &available_tools_en
-                        } else {
-                            &available_tools_cn
-                        },
+                        &available_tools,
                     );
             }
         } else {
@@ -883,4 +875,55 @@ mod tests {
         let prompt = SystemPromptConfig::getSystemPrompt(options).await.expect("Tool-prompt policies must succeed in this test");
         assert!(prompt.contains("Terminal absolute path: `D:/My Projects/main`"));
     }
+
+    struct LanguageHookProbe {
+        expected: bool,
+        events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl crate::chat::hooks::PromptHookRegistry::ToolPromptComposeHook for LanguageHookProbe {
+        /// Identifies the isolated language-selection regression hook.
+        fn id(&self) -> &str { "test.system-prompt.selected-language" }
+
+        /// Rejects construction in the unused language before the prompt can be returned.
+        fn on_event_async<'a>(
+            &'a self,
+            context: &'a crate::chat::hooks::PromptHookRegistry::PromptHookContext,
+        ) -> crate::chat::hooks::PromptHookRegistry::ToolPromptHookFuture<'a> {
+            Box::pin(async move {
+                if context.chat_id.as_deref() != Some("selected-language-test") {
+                    return Ok(None);
+                }
+                if context.use_english != Some(self.expected) {
+                    return Err("The unused tool-prompt language was dispatched".into());
+                }
+                self.events.lock().unwrap().push(context.stage.clone());
+                Ok(None)
+            })
+        }
+    }
+
+    /// Generates exactly one four-stage tool prompt and never invokes policies in the other language.
+    #[tokio::test(flavor = "current_thread")]
+    async fn get_system_prompt_dispatches_only_selected_language() {
+        use crate::chat::hooks::PromptHookRegistry::PromptHookRegistry;
+        for use_english in [false, true] {
+            let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            PromptHookRegistry::registerToolPromptComposeHook(std::sync::Arc::new(LanguageHookProbe {
+                expected: use_english, events: events.clone(),
+            }));
+            let result = SystemPromptConfig::getSystemPrompt(SystemPromptOptions {
+                chat_id: Some("selected-language-test".into()),
+                use_english,
+                ..SystemPromptOptions::default()
+            }).await;
+            PromptHookRegistry::unregisterToolPromptComposeHook("test.system-prompt.selected-language");
+            result.expect("Only the selected language may run tool-prompt policies");
+            assert_eq!(*events.lock().unwrap(), [
+                "build_tool_prompt", "before_compose_tool_prompt",
+                "filter_tool_prompt_items", "after_compose_tool_prompt",
+            ]);
+        }
+    }
+
 }

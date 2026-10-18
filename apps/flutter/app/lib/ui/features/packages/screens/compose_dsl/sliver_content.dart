@@ -78,6 +78,7 @@ class _ComposeDslSliverContentState extends State<_ComposeDslSliverContent> {
       (start / extent).floor(),
       (end / extent).ceil(),
       _windowItemCount,
+      rangeIncludesCache: true,
     );
     _scheduleRange();
   }

@@ -27,6 +27,15 @@ const SYNC_DOMAINS: [&str; 6] = [
 ];
 const SPACE_SYNC_PREPARATION_DELAY_MS: u64 = 0;
 const SYNC_BLOB_CHUNK_BYTES: i64 = 64 * 1024;
+/// Wire reservation for the Link request envelope, AEAD tag and frame prefix.
+/// One operation above this reservation cannot travel in any single message.
+const SYNC_PAGE_ENVELOPE_BYTES: usize = 4 * 1024;
+/// Slack kept below the connection ceiling so MessagePack container headers
+/// never push a measured page over the transport limit.
+const SYNC_PAGE_HEADROOM_BYTES: usize = 64 * 1024;
+/// Upper bound on pages one synchronization pass exchanges before yielding.
+/// A device that writes continuously must not hold one pass open forever.
+const MAX_SYNC_PAGES_PER_PASS: usize = 64;
 /// Delay before the first retry of a failed full synchronization pass with one peer.
 const PEER_FULL_SYNC_BACKOFF_BASE_MS: i64 = 2_000;
 /// Ceiling for the exponential retry delay of one peer's full synchronization pass.
@@ -138,7 +147,7 @@ impl SpacePersistenceSyncService {
         self.state.nodeRouter.nodeServices()?;
         self.state.spaceStore.initialize()?;
         let localNodeId = self.state.nodeRouter.localNodeId();
-        operit_util::AppLogger::AppLogger::i(
+        operit_util::AppLogger::AppLogger::v(
             "SpacePersistenceSyncService",
             &format!(
                 "space store initialize done elapsedMs={}",
@@ -181,7 +190,7 @@ impl SpacePersistenceSyncService {
             let _ = self.stop();
             return Err(error);
         }
-        operit_util::AppLogger::AppLogger::i(
+        operit_util::AppLogger::AppLogger::v(
             "SpacePersistenceSyncService",
             &format!(
                 "peer availability watcher started elapsedMs={}",
@@ -194,7 +203,7 @@ impl SpacePersistenceSyncService {
             let _ = self.stop();
             return Err(error);
         }
-        operit_util::AppLogger::AppLogger::i(
+        operit_util::AppLogger::AppLogger::v(
             "SpacePersistenceSyncService",
             &format!(
                 "space sync scheduling done elapsedMs={}",
@@ -333,7 +342,7 @@ impl SpacePersistenceSyncService {
                 operit_util::AppLogger::AppLogger::v_with_level(
                     "SpacePersistenceSyncService",
                     &format!("space_topology.published local={localNodeId}"),
-                    operit_util::AppLogger::VERBOSE_LEVEL_1,
+                    operit_util::AppLogger::VERBOSE_LEVEL_5,
                 );
             }
             Ok(false) => {}
@@ -671,6 +680,11 @@ impl SpacePersistenceSyncService {
             ));
         }
 
+        // Pages are bounded by bytes as well as by operation count, so a page
+        // can end before the backlog does. The pass therefore keeps paging until
+        // one exchange finds nothing left; the cap only stops a device that is
+        // writing continuously from holding this pass open forever.
+        let mut pages = 0usize;
         loop {
             if !self.storageReplicationAllowed(targetNodeId)? { return Ok(false); }
             let localClock: Value = self.callLocal("syncClock", Value::Null).await?;
@@ -712,12 +726,10 @@ impl SpacePersistenceSyncService {
             )
             .await?;
             if !self.storageReplicationAllowed(targetNodeId)? { return Ok(false); }
-            let complete = syncOperations(localOperations.clone())?.len() < limit
-                && syncOperations(remoteOperations.clone())?.len() < limit;
             let operations = mergeSyncOperations(localOperations, remoteOperations)?;
             if operations.is_empty() {
                 if !self
-                    .applySynchronizedOperationBatch(targetNodeId, &operations, true)
+                    .applySynchronizedOperationBatch(targetNodeId, &operations, &[], true)
                     .await?
                 {
                     return Ok(false);
@@ -725,22 +737,38 @@ impl SpacePersistenceSyncService {
                 operit_util::AppLogger::AppLogger::trace(
                     "CoreSyncTrace",
                     &format!(
-                        "sync_exchange.idle target={} reason=clocks_equal",
-                        targetNodeId
+                        "sync_exchange.idle target={} reason=clocks_equal pages={}",
+                        targetNodeId, pages
                     ),
                 );
                 break;
             }
+            if pages >= MAX_SYNC_PAGES_PER_PASS {
+                operit_util::AppLogger::AppLogger::trace(
+                    "CoreSyncTrace",
+                    &format!(
+                        "sync_exchange.pages_capped target={} pages={} remaining=unknown",
+                        targetNodeId, pages
+                    ),
+                );
+                break;
+            }
+            pages += 1;
+            // Measure once: the page is chunked by these sizes and the trace
+            // records the same number, so an oversized import stays diagnosable
+            // without replaying the encoding after the fact.
+            let sizes = syncOperationWireSizes(&operations)?;
             operit_util::AppLogger::AppLogger::trace(
                 "CoreSyncTrace",
                 &format!(
-                    "sync_exchange.batch target={} {}",
+                    "sync_exchange.batch target={} bytes={} {}",
                     targetNodeId,
+                    sizes.iter().sum::<usize>(),
                     summarizeSyncOperations(&operations)
                 ),
             );
             if !self
-                .applySynchronizedOperationBatch(targetNodeId, &operations, complete)
+                .applySynchronizedOperationBatch(targetNodeId, &operations, &sizes, false)
                 .await?
             {
                 return Ok(false);
@@ -753,41 +781,52 @@ impl SpacePersistenceSyncService {
                     summarizeSyncOperations(&operations)
                 ),
             );
-            if complete {
-                break;
-            }
         }
         Ok(true)
     }
 
-    /// Applies one transport page on both peers with an explicit current-history completion boundary.
+    /// Applies one transport page on both peers, split into messages that fit
+    /// the connection ceiling, with an explicit current-history completion boundary.
     #[allow(non_snake_case)]
     async fn applySynchronizedOperationBatch(
         &self,
         targetNodeId: &str,
         operations: &[Value],
+        sizes: &[usize],
         complete: bool,
     ) -> Result<bool, String> {
         self.synchronizeRequiredBlobs(targetNodeId, operations).await?;
         if !self.storageReplicationAllowed(targetNodeId)? {
             return Ok(false);
         }
-        let _: Value = callRemote(
-            &self.state.nodeRouter,
-            targetNodeId,
-            PeerSyncMethod::SyncApplyOperations,
-            json!({ "operations": operations, "complete": complete }),
-        )
-        .await?;
-        if !self.storageReplicationAllowed(targetNodeId)? {
-            return Ok(false);
-        }
-        let _: Value = self
-            .callLocal(
-                "syncApplyOperations",
-                json!({ "operations": operations, "complete": complete }),
+        // The empty page still travels: it is the explicit "clocks are equal"
+        // boundary that finalizes preference history on both peers.
+        let chunks = if operations.is_empty() {
+            vec![operations]
+        } else {
+            syncPageChunks(operations, sizes, self.state.nodeRouter.maxPeerMessageBytes())?
+        };
+        for (index, chunk) in chunks.iter().copied().enumerate() {
+            // A split page only closes the history boundary on its final
+            // message; an earlier one must not finalize the same history.
+            let chunkComplete = chunkCompletesPage(complete, index, chunks.len());
+            let _: Value = callRemote(
+                &self.state.nodeRouter,
+                targetNodeId,
+                PeerSyncMethod::SyncApplyOperations,
+                json!({ "operations": chunk, "complete": chunkComplete }),
             )
             .await?;
+            if !self.storageReplicationAllowed(targetNodeId)? {
+                return Ok(false);
+            }
+            let _: Value = self
+                .callLocal(
+                    "syncApplyOperations",
+                    json!({ "operations": chunk, "complete": chunkComplete }),
+                )
+                .await?;
+        }
         Ok(true)
     }
 
@@ -1046,7 +1085,7 @@ impl SpacePersistenceSyncService {
                             "sync_cycle.start local={} revision={}",
                             localNodeId, synchronizedRevision
                         ),
-                        operit_util::AppLogger::VERBOSE_LEVEL_1,
+                        operit_util::AppLogger::VERBOSE_LEVEL_5,
                     );
                     match service.synchronizeOnce().await {
                         Ok(()) => {
@@ -1058,7 +1097,7 @@ impl SpacePersistenceSyncService {
                                     synchronizedRevision,
                                     currentTimeMillis() - syncStartedAt
                                 ),
-                                operit_util::AppLogger::VERBOSE_LEVEL_1,
+                                operit_util::AppLogger::VERBOSE_LEVEL_5,
                             );
                         }
                         Err(error) => {
@@ -1314,6 +1353,32 @@ where
     fromCoreValue(value).map_err(|error| error.to_string())
 }
 
+/// Reads only the ordering fields of one encoded operation. Cloning each
+/// operation just to deserialize it would duplicate the whole page.
+fn syncOperationOrder(value: &Value) -> Result<SyncOperationOrder, String> {
+    let field = |name: &str| {
+        value
+            .get(name)
+            .ok_or_else(|| format!("invalid sync operation: missing {name}"))
+    };
+    Ok(SyncOperationOrder {
+        opId: field("opId")?
+            .as_str()
+            .ok_or("invalid sync operation: opId is not a string")?
+            .to_string(),
+        originDeviceId: field("originDeviceId")?
+            .as_str()
+            .ok_or("invalid sync operation: originDeviceId is not a string")?
+            .to_string(),
+        sequence: field("sequence")?
+            .as_i64()
+            .ok_or("invalid sync operation: sequence is not an integer")?,
+        createdAt: field("createdAt")?
+            .as_i64()
+            .ok_or("invalid sync operation: createdAt is not an integer")?,
+    })
+}
+
 /// Merges two operation pages into their deterministic application order.
 fn mergeSyncOperations(left: Value, right: Value) -> Result<Vec<Value>, String> {
     let mut byId = BTreeMap::new();
@@ -1321,8 +1386,7 @@ fn mergeSyncOperations(left: Value, right: Value) -> Result<Vec<Value>, String> 
         .into_iter()
         .chain(syncOperations(right)?)
     {
-        let key: SyncOperationOrder = serde_json::from_value(operation.clone())
-            .map_err(|error| format!("invalid sync operation: {error}"))?;
+        let key = syncOperationOrder(&operation)?;
         if let Some((_, existing)) = byId.get(&key.opId) {
             if existing != &operation {
                 return Err(format!("conflicting synchronization operation identity: {}", key.opId));
@@ -1357,6 +1421,76 @@ fn syncOperations(value: Value) -> Result<Vec<Value>, String> {
     serde_json::from_value(value).map_err(|error| format!("invalid sync operations: {error}"))
 }
 
+/// Encoded MessagePack size of every operation, measured once per page.
+/// The same sizes drive the chunking decision and the batch trace.
+#[allow(non_snake_case)]
+fn syncOperationWireSizes(operations: &[Value]) -> Result<Vec<usize>, String> {
+    operations
+        .iter()
+        .map(|operation| {
+            operit_link::encodeLink(operation)
+                .map(|bytes| bytes.len())
+                .map_err(|error| error.to_string())
+        })
+        .collect()
+}
+
+/// Largest single encoded operation the Link can carry with its request envelope.
+fn syncOperationCeiling(maxMessageBytes: usize) -> usize {
+    maxMessageBytes.saturating_sub(SYNC_PAGE_ENVELOPE_BYTES)
+}
+
+/// Wire budget for one synchronization page message under a connection ceiling.
+/// Slack stays well below the ceiling so the envelope and MessagePack container
+/// headers never push a measured page over the transport limit.
+fn syncPageBudget(maxMessageBytes: usize) -> usize {
+    (maxMessageBytes.saturating_mul(3) / 4).saturating_sub(SYNC_PAGE_HEADROOM_BYTES)
+}
+
+/// Only the final message of a page may close the history boundary.
+fn chunkCompletesPage(complete: bool, index: usize, chunks: usize) -> bool {
+    complete && index + 1 == chunks
+}
+
+/// Splits one ordered, deduplicated page into contiguous slices that each fit
+/// the Link ceiling. Operations stay whole, so a transaction is never divided.
+/// A single operation wider than the page budget still travels alone; one wider
+/// than the ceiling itself is reported here instead of failing at the socket.
+#[allow(non_snake_case)]
+fn syncPageChunks<'a>(
+    operations: &'a [Value],
+    sizes: &[usize],
+    maxMessageBytes: usize,
+) -> Result<Vec<&'a [Value]>, String> {
+    if operations.len() != sizes.len() {
+        return Err("synchronization page size table is incomplete".into());
+    }
+    let ceiling = syncOperationCeiling(maxMessageBytes);
+    let budget = syncPageBudget(maxMessageBytes);
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    let mut bytes = 0usize;
+    for (index, size) in sizes.iter().copied().enumerate() {
+        if size > ceiling {
+            let opId = operations[index].get("opId").and_then(Value::as_str).unwrap_or("unknown");
+            let domain = operations[index].get("domain").and_then(Value::as_str).unwrap_or("unknown");
+            return Err(format!(
+                "SYNC_OPERATION_TOO_LARGE opId={opId} domain={domain} bytes={size} limit={ceiling}"
+            ));
+        }
+        if index > start && bytes.saturating_add(size) > budget {
+            chunks.push(&operations[start..index]);
+            start = index;
+            bytes = 0;
+        }
+        bytes = bytes.saturating_add(size);
+    }
+    if start < operations.len() {
+        chunks.push(&operations[start..]);
+    }
+    Ok(chunks)
+}
+
 /// Summarizes one synchronization clock without logging the complete vector.
 #[allow(non_snake_case)]
 fn summarizeSyncClock(value: &Value) -> String {
@@ -1386,15 +1520,19 @@ fn summarizeSyncOperations(operations: &[Value]) -> String {
     let mut createdAt = Vec::new();
     let mut operationIds = Vec::new();
     for value in operations {
-        let Ok(operation) = serde_json::from_value::<SyncOperation>(value.clone()) else {
+        // Read the fields the summary needs directly: cloning each operation to
+        // deserialize it would copy the whole page once per trace line.
+        let Some(domain) = value.get("domain").and_then(Value::as_str) else {
             continue;
         };
-        *domainCounts.entry(operation.domain.clone()).or_default() += 1;
-        if operation.domain == "chat" {
-            chatEntities.insert(format!("{}/{}", operation.entityType, operation.entityId));
+        *domainCounts.entry(domain.to_string()).or_default() += 1;
+        if domain == "chat" {
+            let entityType = value.get("entityType").and_then(Value::as_str).unwrap_or_default();
+            let entityId = value.get("entityId").and_then(Value::as_str).unwrap_or_default();
+            chatEntities.insert(format!("{entityType}/{entityId}"));
         }
-        createdAt.push(operation.createdAt);
-        operationIds.push(operation.opId);
+        createdAt.push(value.get("createdAt").and_then(Value::as_i64).unwrap_or_default());
+        operationIds.push(value.get("opId").and_then(Value::as_str).unwrap_or_default().to_string());
     }
     createdAt.sort();
     operationIds.sort();
@@ -1420,4 +1558,113 @@ fn summarizeSyncOperations(operations: &[Value]) -> String {
             operationIds.join(",")
         }
     )
+}
+
+#[cfg(test)]
+mod page_budget_tests {
+    use super::*;
+
+    fn operation(opId: &str, payloadBytes: usize) -> Value {
+        json!({
+            "opId": opId,
+            "domain": "plugin_storage",
+            "payload": "x".repeat(payloadBytes),
+        })
+    }
+
+    fn ids(chunk: &[Value]) -> Vec<String> {
+        chunk
+            .iter()
+            .map(|value| value["opId"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn page_chunks_stay_within_the_budget_and_keep_order() {
+        let operations = (0..5)
+            .map(|index| operation(&format!("op-{index}"), 50_000))
+            .collect::<Vec<_>>();
+        let sizes = syncOperationWireSizes(&operations).unwrap();
+        let ceiling = 256 * 1024;
+        let chunks = syncPageChunks(&operations, &sizes, ceiling).unwrap();
+        assert!(chunks.len() > 1);
+        let ordered = chunks
+            .iter()
+            .flat_map(|chunk| ids(chunk))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordered,
+            vec!["op-0", "op-1", "op-2", "op-3", "op-4"]
+        );
+        for chunk in &chunks {
+            let bytes: usize = syncOperationWireSizes(chunk).unwrap().iter().sum();
+            // A chunk either holds several operations inside the page budget,
+            // or exactly one operation wider than the budget itself.
+            assert!(bytes <= syncPageBudget(ceiling) || chunk.len() == 1);
+        }
+    }
+
+    #[test]
+    fn single_operation_wider_than_the_budget_travels_alone() {
+        let operations = vec![
+            operation("small", 10_000),
+            operation("wide", 200_000),
+            operation("tail", 10_000),
+        ];
+        let sizes = syncOperationWireSizes(&operations).unwrap();
+        let chunks = syncPageChunks(&operations, &sizes, 256 * 1024).unwrap();
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| ids(chunk))
+                .collect::<Vec<_>>(),
+            vec![
+                vec!["small".to_string()],
+                vec!["wide".to_string()],
+                vec!["tail".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn operation_above_the_ceiling_is_reported_not_sent() {
+        let operations = vec![operation("huge", 5_000)];
+        let sizes = syncOperationWireSizes(&operations).unwrap();
+        let error = syncPageChunks(&operations, &sizes, 8 * 1024).unwrap_err();
+        assert!(error.starts_with("SYNC_OPERATION_TOO_LARGE"), "{error}");
+        assert!(error.contains("opId=huge"), "{error}");
+        assert!(error.contains("domain=plugin_storage"), "{error}");
+    }
+
+    #[test]
+    fn only_the_last_message_closes_the_history_boundary() {
+        assert!(chunkCompletesPage(true, 0, 1));
+        assert!(!chunkCompletesPage(false, 0, 1));
+        assert!(!chunkCompletesPage(true, 0, 3));
+        assert!(!chunkCompletesPage(true, 1, 3));
+        assert!(chunkCompletesPage(true, 2, 3));
+    }
+
+    #[test]
+    fn an_empty_page_has_no_chunks() {
+        assert!(syncPageChunks(&[], &[], 4 * 1024 * 1024).unwrap().is_empty());
+        assert!(syncOperationWireSizes(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn operation_order_is_read_without_cloning_the_payload() {
+        let value = json!({
+            "opId": "device:7",
+            "originDeviceId": "device",
+            "sequence": 7,
+            "createdAt": 1234,
+            "payload": "x".repeat(4096),
+        });
+        let order = syncOperationOrder(&value).unwrap();
+        assert_eq!(order.opId, "device:7");
+        assert_eq!(order.originDeviceId, "device");
+        assert_eq!(order.sequence, 7);
+        assert_eq!(order.createdAt, 1234);
+        assert!(syncOperationOrder(&json!({"opId": "device:7"})).is_err());
+    }
 }

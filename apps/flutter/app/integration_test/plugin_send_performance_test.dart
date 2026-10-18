@@ -9,6 +9,7 @@ import 'package:operit2/core/bridge/PlatformCoreProxy.dart';
 import 'package:operit2/core/bridge/ProxyCoreRuntimeBridge.dart';
 import 'package:operit2/core/host/RuntimeHostInteractionSubscriber.dart';
 import 'package:operit2/core/logging/ClientLogger.dart';
+import 'package:operit2/ui/common/ChatMessageIdentity.dart';
 import 'package:operit2/core/proxy/generated/CoreProxyClients.g.dart';
 import 'package:operit2/core/proxy/generated/CoreProxyModels.g.dart';
 
@@ -20,12 +21,13 @@ void main() {
   testWidgets(
     'container main realm survives repeated send preparation',
     (tester) async {
-      expect(Platform.isMacOS, isTrue);
       final support = await getApplicationSupportDirectory();
       final parent = await Directory(
         '${support.path}/plugin-send-performance',
       ).create(recursive: true);
       final directory = await parent.createTemp('run-');
+      // ignore: avoid_print
+      print('PLUGIN_SEND_RUNTIME ${directory.path}');
       await platformCoreProxy.setRuntimeStorageRoots(
         '${directory.path}/runtime',
         '${directory.path}/workspace',
@@ -54,7 +56,6 @@ void main() {
                   'purpose': 'execution',
                   'chatId': null,
                   'chatExtension': {'version': 1, 'selection': selection},
-                  'messageExtension': null,
                   'participantId': null,
                   'promptFunctionType': 'CHAT',
                   'defaultModelBinding': {
@@ -71,7 +72,7 @@ void main() {
           'sample': sample,
           'ms': watch.elapsedMicroseconds / 1000,
         });
-        expect(result['messageExtension'], isA<Map>());
+        expect(result['executionData'], isA<Map>());
         return result;
       }
 
@@ -92,31 +93,18 @@ void main() {
       );
       for (var sample = 0; sample < 6; sample++) {
         await resolve('model:chat', sample);
-        final result = await resolve('card:${card['id']}', sample);
-        final watch = Stopwatch()..start();
-        final reference = await manager.invokeToolPkgPublicApi(
-          packageName: package,
-          methodName: 'chat.configuration.snapshot.store',
-          payload: result['messageExtension'],
-        );
-        samples.add({
-          'stage': 'snapshot.store',
-          'sample': sample,
-          'ms': watch.elapsedMicroseconds / 1000,
-        });
-        final restored = await manager.invokeToolPkgPublicApi(
-          packageName: package,
-          methodName: 'chat.configuration.snapshot.read',
-          payload: reference,
-        );
-        expect(restored, result['messageExtension']);
+        await resolve('card:${card['id']}', sample);
       }
       // A local OpenAI protocol fixture measures the complete production send path
       // without credentials, network variance or a live model's generation time.
+      final runtimeTraceFile = File(
+        '${directory.path}/runtime/logs/operit.log',
+      );
       final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
       addTearDown(() => server.close(force: true));
       Stopwatch? sendWatch;
       Completer<double>? requestBoundary;
+      int? requestTraceEnd;
       server.listen((request) async {
         final body = await utf8.decoder.bind(request).join();
         final payload = jsonDecode(body) as Map<String, Object?>;
@@ -124,7 +112,9 @@ void main() {
             body.contains('isolated-send-probe-') &&
             requestBoundary != null &&
             !requestBoundary.isCompleted) {
-          requestBoundary.complete(sendWatch!.elapsedMicroseconds / 1000);
+          final receivedMs = sendWatch!.elapsedMicroseconds / 1000;
+          requestTraceEnd = await runtimeTraceFile.length();
+          requestBoundary.complete(receivedMs);
         }
         request.response.headers.contentType = ContentType(
           'text',
@@ -222,6 +212,8 @@ void main() {
               package: {'version': 1, 'selection': 'card:${card['id']}'},
             },
           );
+          final traceOffset = await runtimeTraceFile.length();
+          requestTraceEnd = null;
           requestBoundary = Completer<double>();
           sendWatch = Stopwatch()..start();
           await clients.chatRuntimeHolderMain.sendUserMessage(
@@ -246,7 +238,7 @@ void main() {
           final toHttp = await requestBoundary.future.timeout(
             const Duration(seconds: 30),
           );
-          await clients.chatRuntimeHolderMain
+          final completedMessages = await clients.chatRuntimeHolderMain
               .chatMessagesFlow(chatId: chatId)
               .firstWhere(
                 (messages) => messages.any(
@@ -259,12 +251,90 @@ void main() {
                 ),
               )
               .timeout(const Duration(seconds: 30));
+          final persistedMs = sendWatch.elapsedMicroseconds / 1000;
+          for (final message in completedMessages.where(
+            (m) => m.sender == 'user' || m.sender == 'ai',
+          )) {
+            expect(message.pluginExtensions[package], {
+              'participantId': card['id'],
+            });
+            expect(message.pluginExtensions['host.chat.identity'], {
+              'title': card['name'],
+              'avatarUri': card['avatarUri'],
+            });
+            expect(readChatMessageIdentity(message)?.title, card['name']);
+          }
+          final completionTrace = await _readTraceRange(
+            runtimeTraceFile,
+            requestTraceEnd!,
+            await runtimeTraceFile.length(),
+          );
+          final commitStart = completionTrace.indexOf(
+            'commit_assistant.start chatId=$chatId',
+          );
+          expect(commitStart, greaterThanOrEqualTo(0));
+          final beforeCommit = completionTrace.substring(0, commitStart);
+          expect(beforeCommit, isNot(contains('ToolPkgTiming: kind=hook ')));
+          expect(
+            beforeCommit,
+            isNot(contains('ToolPkgTiming: kind=public_api ')),
+          );
+          expect(beforeCommit, isNot(contains('tool.execute.request tool=')));
+          expect(
+            beforeCommit,
+            contains(
+              'completed request window from prepared state chatId=$chatId ',
+            ),
+          );
+          final histories = await clients.chatRuntimeHolderMain
+              .chatHistoriesFlow()
+              .firstWhere(
+                (items) => items.any(
+                  (item) => item.id == chatId && item.currentWindowSize > 0,
+                ),
+              )
+              .timeout(const Duration(seconds: 30));
+          final completedWindow = histories
+              .firstWhere((item) => item.id == chatId)
+              .currentWindowSize;
+          final preparationTrace = await _readTraceRange(
+            runtimeTraceFile,
+            traceOffset,
+            requestTraceEnd!,
+          );
+          expect(
+            preparationTrace,
+            isNot(contains('chatConfigurationSnapshotStoreApi')),
+          );
+          expect(
+            preparationTrace,
+            isNot(contains('chatConfigurationSnapshotReadApi')),
+          );
+          final policyTiming = _toolPolicyTiming(preparationTrace);
+          final toolRequests = <String, int>{};
+          for (final match in RegExp(
+            r'tool.execute.request tool=(\S+) policy=',
+          ).allMatches(preparationTrace)) {
+            final name = match.group(1)!;
+            toolRequests[name] = (toolRequests[name] ?? 0) + 1;
+          }
+          if (worldbookEnabled && sample > 0) {
+            // Retained owners initialize once; the real system/final hooks must
+            // share one variable/history snapshot for this send.
+            expect(toolRequests['make_directory'] ?? 0, 0);
+            expect(toolRequests['file_exists'] ?? 0, 0);
+            expect(toolRequests['get_chat_messages'], 1);
+          }
           samples.add({
             'stage': 'full-send-local-fixture',
+            'chatId': chatId,
             'sample': sample,
             'worldbookEnabled': worldbookEnabled,
             'toHttpReceivedMs': toHttp,
-            'toReplyPersistedMs': sendWatch.elapsedMicroseconds / 1000,
+            'toReplyPersistedMs': persistedMs,
+            'toolPromptPolicy': policyTiming,
+            'preparationToolRequests': toolRequests,
+            'completedContextWindow': completedWindow,
           });
         }
       }
@@ -273,10 +343,7 @@ void main() {
       ).readAsString();
       // A fast machine must not conceal repeated realm creation. Each of these
       // calls must reuse the realm compiled by the service initialization hook.
-      for (final function in [
-        'chatConfigurationResolveApi',
-        'chatConfigurationSnapshotStoreApi',
-      ]) {
+      for (final function in ['chatConfigurationResolveApi']) {
         expect(trace, contains('stage=reuse_main_script function=$function '));
         expect(
           trace,
@@ -291,7 +358,8 @@ void main() {
       );
       final report = <String, Object?>{
         'scope':
-            'macOS production QJS, CoreLink, tools and SQLite; isolated storage; first-use and retained-realm samples; full sends with/without real worldbook hooks (empty entries) use a local SSE fixture, no live model',
+            'production QJS, CoreLink, tools and SQLite; isolated storage; first-use and retained-realm samples; full sends with/without real worldbook hooks (empty entries) use a local SSE fixture, no live model',
+        'hostPlatform': Platform.operatingSystem,
         'runtimeRoot': directory.path,
         'samples': samples,
       };
@@ -302,4 +370,74 @@ void main() {
     },
     timeout: const Timeout(Duration(minutes: 3)),
   );
+}
+
+/// Reads the preparation interval ending before the fixture returns its first response.
+Future<String> _readTraceRange(File file, int offset, int end) async {
+  final reader = await file.open();
+  try {
+    await reader.setPosition(offset);
+    return utf8.decode(await reader.read(end - offset));
+  } finally {
+    await reader.close();
+  }
+}
+
+/// Reports all five real policy invocations and rejects changes to dispatch or source reuse.
+Map<String, Object?> _toolPolicyTiming(String trace) {
+  final hooks = RegExp(
+    r'ToolPkgTiming: kind=hook package=com\.operit\.character_cards function=toolPromptPolicy stage=(\S+) prepareMs=(\d+) executeMs=(\d+) totalMs=(\d+) success=(true|false)',
+  ).allMatches(trace).toList();
+  final entries = RegExp(
+    r'JsExecutionTiming: kind=js_start callId=(\S+) function=toolPromptPolicy scriptBytes=(\d+) sourceRegistered=(true|false) queueMs=(\d+) initializeMs=(\d+) invokeMs=(\d+)',
+  ).allMatches(trace).toList();
+  expect(hooks, hasLength(5));
+  expect(entries, hasLength(5));
+  expect(
+    hooks.map((match) => match.group(1)),
+    orderedEquals(const [
+      'build_tool_prompt',
+      'before_compose_tool_prompt',
+      'filter_tool_prompt_items',
+      'after_compose_tool_prompt',
+      'filter_tool_call_tools',
+    ]),
+  );
+  for (final match in hooks) {
+    expect(match.group(5), 'true');
+  }
+  for (final match in entries) {
+    expect(
+      match.group(3),
+      'false',
+      reason: 'Each call must reuse its registered main source',
+    );
+  }
+  return {
+    'calls': hooks.length,
+    'prepareMs': hooks.fold<int>(
+      0,
+      (sum, match) => sum + int.parse(match.group(2)!),
+    ),
+    'executeMs': hooks.fold<int>(
+      0,
+      (sum, match) => sum + int.parse(match.group(3)!),
+    ),
+    'totalMs': hooks.fold<int>(
+      0,
+      (sum, match) => sum + int.parse(match.group(4)!),
+    ),
+    'queueMs': entries.fold<int>(
+      0,
+      (sum, match) => sum + int.parse(match.group(4)!),
+    ),
+    'initializeMs': entries.fold<int>(
+      0,
+      (sum, match) => sum + int.parse(match.group(5)!),
+    ),
+    'entryMs': entries.fold<int>(
+      0,
+      (sum, match) => sum + int.parse(match.group(6)!),
+    ),
+  };
 }

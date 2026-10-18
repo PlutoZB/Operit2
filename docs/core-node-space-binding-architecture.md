@@ -216,6 +216,14 @@ execution completion records
 退避（2 秒起、60 秒封顶），成功后复位，避免版本不匹配或缺 blob 的节点按周期重付
 全量代价。
 
+同步页按字节与条数双重上限导出：单侧一页最多 `DEFAULT_SYNC_PAGE_BYTES`（4 MiB）；
+插件存储只物化被选中的载荷，所以一次导出不会随积压大小放大。一次
+`SyncApplyOperations` 的合并操作集仍可能超过连接的编码消息上限，发送前按操作边界再切成
+多条消息（事务不拆开）。一个同步回合持续换页直到某次交换为空，历史完成标记只由这条空页
+携带；单回合页数有上限，持续写入的设备不会把一回合无限拉长。单条操作自身超过上限时，
+本端直接以 `SYNC_OPERATION_TOO_LARGE` 报错；链路层把超限与鉴权失败分开报告为
+`PEER_MESSAGE_TOO_LARGE`，不再伪装成安全错误。
+
 Runtime 文件的归属由 `RuntimeStorageLayout` 中的路径定义直接声明：
 
 ```text

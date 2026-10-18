@@ -133,7 +133,7 @@ async fn renderXml(
     }
     let manager = runtime.package_manager();
     for hook in hooks {
-        ChainLogger::info(
+        ChainLogger::verbose_with_level(
             PLUGIN_CHAIN,
             "plugin.toolpkg.xml_render.run.start",
             &[
@@ -142,6 +142,7 @@ async fn renderXml(
                 ("hookId", hook.pluginId.clone()),
                 ("function", hook.functionName.clone()),
             ],
+            operit_util::AppLogger::VERBOSE_LEVEL_3,
         );
         let result = manager
             .runToolPkgMainHook(
@@ -181,7 +182,7 @@ async fn renderXml(
         let Some(rendered) = parseXmlRenderResult(decoded, &hook.containerPackageName) else {
             continue;
         };
-        ChainLogger::info(
+        ChainLogger::verbose_with_level(
             PLUGIN_CHAIN,
             "plugin.toolpkg.xml_render.run.done",
             &[
@@ -189,6 +190,7 @@ async fn renderXml(
                 ("package", hook.containerPackageName.clone()),
                 ("hookId", hook.pluginId.clone()),
             ],
+            operit_util::AppLogger::VERBOSE_LEVEL_3,
         );
         return rendered;
     }

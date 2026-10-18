@@ -12,9 +12,10 @@ use crate::PreferencesEncryption::tests::{
     loadOrCreateWithSecretStoreForTest, ENCRYPTION_HOST_SECRET_KEY_FOR_TEST,
 };
 use crate::SyncOperationStore::{SyncClock, SyncOperationStore};
+use crate::CoreNodeIdentityStore::CoreNodeIdentityStore;
 use operit_util::RuntimeStorageLayout::{
     CONFIG_PREFERENCES_DIR_PATH, GITHUB_AUTH_PREFERENCES_PATH, MODEL_CONFIGS_PREFERENCES_PATH,
-    PREFERENCES_ENCRYPTION_KEY_PATH, RUNTIME_SYNC_DIR_PATH,
+    PREFERENCES_ENCRYPTION_KEY_PATH, RUNTIME_LINK_ACCESS_IDENTITY_PATH, RUNTIME_SYNC_DIR_PATH,
 };
 
 use super::{
@@ -367,6 +368,64 @@ fn preferences_schema_runs_sequential_migrations_atomically() {
     );
     store.data().expect("current schema read");
     assert_eq!(host.writeCount(), 1);
+}
+
+#[test]
+/// Verifies version-one identity records migrate whether they were stored as
+/// a JSON string or as the object written by an intermediate build.
+fn core_node_identity_migration_accepts_legacy_string_and_object_records() {
+    let fixtures = [
+        (
+            json!("{\"deviceId\":\"core-legacy-string\"}"),
+            "core-legacy-string",
+            Value::Null,
+        ),
+        (
+            json!({
+                "deviceId": "core-legacy-object",
+                "deviceInfo": {
+                    "model": "legacy-model",
+                    "platform": "linux"
+                }
+            }),
+            "core-legacy-object",
+            json!({"model": "legacy-model", "platform": "linux"}),
+        ),
+    ];
+    for (record, expectedNodeId, expectedDeviceInfo) in fixtures {
+        let host = Arc::new(MemoryStorageHost::default());
+        let mut preferences = Preferences::default();
+        preferences.set(
+            &stringPreferencesKey(PREFERENCES_SCHEMA_VERSION_KEY_NAME),
+            "1".to_string(),
+        );
+        preferences.set(&stringPreferencesKey("record"), record);
+        host.writeBytes(
+            RUNTIME_LINK_ACCESS_IDENTITY_PATH,
+            &serde_json::to_vec_pretty(&preferences).expect("identity preferences serialization"),
+        )
+        .expect("identity preferences write");
+
+        let identity = CoreNodeIdentityStore::new(host.clone())
+            .initialize()
+            .expect("legacy identity must migrate");
+        assert_eq!(identity.nodeId, expectedNodeId);
+        let stored: Value = serde_json::from_slice(
+            &host
+                .readBytes(RUNTIME_LINK_ACCESS_IDENTITY_PATH)
+                .expect("migrated identity read"),
+        )
+        .expect("migrated identity JSON");
+        assert_eq!(
+            stored[PREFERENCES_SCHEMA_VERSION_KEY_NAME],
+            json!(2),
+            "migration must advance the schema version"
+        );
+        assert_eq!(stored["record"]["deviceId"], json!(expectedNodeId));
+        if !expectedDeviceInfo.is_null() {
+            assert_eq!(stored["record"]["deviceInfo"], expectedDeviceInfo);
+        }
+    }
 }
 
 #[test]
@@ -1358,11 +1417,7 @@ fn preference_transactions_converge_when_an_overlapping_edit_arrives_first() {
     let reverse = Arc::new(MemoryStorageHost::default());
     crate::PreferenceMerge::applyOperations(
         forward.clone(),
-        &crate::PreferenceMerge::PreferenceMergeSchema {
-            projections: vec![],
-            catalogs: vec![],
-            references: vec![],
-        },
+        &crate::PreferenceMerge::PreferenceMergeSchema::default(),
         &[],
         &[first.clone()],
         |_, _| true,
@@ -1371,11 +1426,7 @@ fn preference_transactions_converge_when_an_overlapping_edit_arrives_first() {
     .unwrap();
     crate::PreferenceMerge::applyOperations(
         forward.clone(),
-        &crate::PreferenceMerge::PreferenceMergeSchema {
-            projections: vec![],
-            catalogs: vec![],
-            references: vec![],
-        },
+        &crate::PreferenceMerge::PreferenceMergeSchema::default(),
         &[first.clone()],
         &[later.clone()],
         |_, _| true,
@@ -1384,11 +1435,7 @@ fn preference_transactions_converge_when_an_overlapping_edit_arrives_first() {
     .unwrap();
     crate::PreferenceMerge::applyOperations(
         reverse.clone(),
-        &crate::PreferenceMerge::PreferenceMergeSchema {
-            projections: vec![],
-            catalogs: vec![],
-            references: vec![],
-        },
+        &crate::PreferenceMerge::PreferenceMergeSchema::default(),
         &[],
         &[later.clone()],
         |_, _| true,
@@ -1397,11 +1444,7 @@ fn preference_transactions_converge_when_an_overlapping_edit_arrives_first() {
     .unwrap();
     crate::PreferenceMerge::applyOperations(
         reverse.clone(),
-        &crate::PreferenceMerge::PreferenceMergeSchema {
-            projections: vec![],
-            catalogs: vec![],
-            references: vec![],
-        },
+        &crate::PreferenceMerge::PreferenceMergeSchema::default(),
         &[later],
         &[first],
         |_, _| true,
@@ -1437,11 +1480,7 @@ fn preference_transaction_validation_rejects_the_entire_batch() {
     invalid.payload["entries"][1]["key"] = json!("A");
     assert!(crate::PreferenceMerge::applyOperations(
         host.clone(),
-        &crate::PreferenceMerge::PreferenceMergeSchema {
-            projections: vec![],
-            catalogs: vec![],
-            references: vec![]
-        },
+        &crate::PreferenceMerge::PreferenceMergeSchema::default(),
         &[],
         &[valid, invalid],
         |_, _| true,
@@ -1489,11 +1528,7 @@ fn preference_migration_sync_initializes_the_receiving_schema() {
     let target = Arc::new(MemoryStorageHost::default());
     crate::PreferenceMerge::applyOperations(
         target.clone(),
-        &crate::PreferenceMerge::PreferenceMergeSchema {
-            projections: vec![],
-            catalogs: vec![],
-            references: vec![],
-        },
+        &crate::PreferenceMerge::PreferenceMergeSchema::default(),
         &[],
         &operations,
         |_, _| true,
@@ -1520,11 +1555,7 @@ fn preference_migration_replay_supersedes_legacy_encoded_root_values() {
     let host = Arc::new(MemoryStorageHost::default());
     crate::PreferenceMerge::applyOperations(
         host.clone(),
-        &crate::PreferenceMerge::PreferenceMergeSchema {
-            projections: vec![],
-            catalogs: vec![],
-            references: vec![],
-        },
+        &crate::PreferenceMerge::PreferenceMergeSchema::default(),
         &[],
         &[native.clone()],
         |_, _| true,
@@ -1533,11 +1564,7 @@ fn preference_migration_replay_supersedes_legacy_encoded_root_values() {
     .unwrap();
     crate::PreferenceMerge::applyOperations(
         host.clone(),
-        &crate::PreferenceMerge::PreferenceMergeSchema {
-            projections: vec![],
-            catalogs: vec![],
-            references: vec![],
-        },
+        &crate::PreferenceMerge::PreferenceMergeSchema::default(),
         &[native],
         &[old],
         |_, _| true,
@@ -1566,11 +1593,7 @@ fn preference_transaction_owner_retirement_preserves_active_entries() {
     let host = Arc::new(MemoryStorageHost::default());
     crate::PreferenceMerge::applyOperations(
         host.clone(),
-        &crate::PreferenceMerge::PreferenceMergeSchema {
-            projections: vec![],
-            catalogs: vec![],
-            references: vec![],
-        },
+        &crate::PreferenceMerge::PreferenceMergeSchema::default(),
         &[],
         &[operation.clone()],
         |_, key| key != "retired", true,
@@ -1609,11 +1632,7 @@ fn preference_replay_history_is_independent_of_the_export_floor() {
     let remote = nativePreferenceOperation(path, vec![("A", json!({"name":"remote-old"}))], 1);
     crate::PreferenceMerge::applyOperations(
         host,
-        &crate::PreferenceMerge::PreferenceMergeSchema {
-            projections: vec![],
-            catalogs: vec![],
-            references: vec![],
-        },
+        &crate::PreferenceMerge::PreferenceMergeSchema::default(),
         &history,
         &[remote],
         |_, _| true,
@@ -1641,11 +1660,7 @@ fn preference_sync_rejects_legacy_payloads_on_a_migrated_owner() {
     old.payload.as_object_mut().unwrap().remove("formatVersion");
     assert!(crate::PreferenceMerge::applyOperations(
         host.clone(),
-        &crate::PreferenceMerge::PreferenceMergeSchema {
-            projections: vec![],
-            catalogs: vec![],
-            references: vec![]
-        },
+        &crate::PreferenceMerge::PreferenceMergeSchema::default(),
         &[],
         &[old],
         |_, _| true,
@@ -1678,11 +1693,7 @@ fn preference_replay_supersedes_older_native_schema_history() {
     new.payload["schemaVersion"] = json!(4);
     crate::PreferenceMerge::applyOperations(
         host.clone(),
-        &crate::PreferenceMerge::PreferenceMergeSchema {
-            projections: vec![],
-            catalogs: vec![],
-            references: vec![],
-        },
+        &crate::PreferenceMerge::PreferenceMergeSchema::default(),
         &[],
         &[new.clone()],
         |_, _| true,
@@ -1691,11 +1702,7 @@ fn preference_replay_supersedes_older_native_schema_history() {
     .unwrap();
     crate::PreferenceMerge::applyOperations(
         host.clone(),
-        &crate::PreferenceMerge::PreferenceMergeSchema {
-            projections: vec![],
-            catalogs: vec![],
-            references: vec![],
-        },
+        &crate::PreferenceMerge::PreferenceMergeSchema::default(),
         &[new],
         &[old],
         |_, _| true,
@@ -1753,11 +1760,7 @@ fn explicit_preference_mutations_converge_without_business_key_policies() {
     let secondHistory = SyncOperationStore::new(secondHost.clone(), RUNTIME_SYNC_DIR_PATH)
         .preferenceHistory()
         .unwrap();
-    let schema = crate::PreferenceMerge::PreferenceMergeSchema {
-        catalogs: vec![],
-        references: vec![],
-        projections: vec![],
-    };
+    let schema = crate::PreferenceMerge::PreferenceMergeSchema::default();
     for _ in 0..2 {
         crate::PreferenceMerge::applyOperations(
             firstHost.clone(),
@@ -1819,20 +1822,23 @@ fn explicit_preference_increment_overflow_preserves_the_committed_snapshot() {
 fn identityHistorySchema() -> crate::PreferenceMerge::PreferenceMergeSchema {
     use crate::PreferenceMerge::*;
     PreferenceMergeSchema {
-        catalogs: vec![PreferenceMergeCatalog {
-            store: PreferenceMergeStore {
-                path: "runtime/config/preferences/identity-history.preferences.json",
-                encrypted: false,
+        stores: vec![PreferenceMergeStore {
+            path: "runtime/config/preferences/identity-history.preferences.json".to_string(),
+            encrypted: false,
+            merge: operit_host_api::PluginStorage::StoragePreferencesMergeDescriptor {
+                version: 1,
+                catalog: Some(operit_host_api::PluginStorage::StoragePreferencesMergeCatalog {
+                    key_prefix: "entity_".to_string(),
+                    key_suffix: "".to_string(),
+                    identity_field: "id".to_string(),
+                    name_field: "name".to_string(),
+                    ignored_fields: vec!["updatedAt".to_string()],
+                    retired_keys: vec![],
+                }),
+                references: vec![],
+                projection: None,
             },
-            keyPrefix: "entity_",
-            keySuffix: "",
-            identityField: "id",
-            nameField: "name",
-            ignoredFields: &["updatedAt"],
-            retiredKeys: &[],
         }],
-        references: vec![],
-        projections: vec![],
     }
 }
 
@@ -1840,7 +1846,7 @@ fn identityHistorySchema() -> crate::PreferenceMerge::PreferenceMergeSchema {
 #[test]
 fn catalog_merge_compares_current_tips_instead_of_historical_snapshots() {
     let schema = identityHistorySchema();
-    let path = schema.catalogs[0].store.path;
+    let path = schema.stores[0].path.as_str();
     let operations = vec![
         nativePreferenceOperation(
             path,
@@ -1900,7 +1906,7 @@ fn catalog_merge_compares_current_tips_instead_of_historical_snapshots() {
 #[test]
 fn catalog_identity_decisions_survive_replay_edit_delete_and_new_receiver() {
     let schema = identityHistorySchema();
-    let path = schema.catalogs[0].store.path;
+    let path = schema.stores[0].path.as_str();
     let host = Arc::new(MemoryStorageHost::default());
     let mut history = vec![
         nativePreferenceOperation(
@@ -1982,7 +1988,7 @@ fn catalog_identity_decisions_survive_replay_edit_delete_and_new_receiver() {
 #[test]
 fn catalog_identity_alias_requires_declared_catalog_keys_and_transaction_semantics() {
     let schema = identityHistorySchema();
-    let path = schema.catalogs[0].store.path;
+    let path = schema.stores[0].path.as_str();
     let host = Arc::new(MemoryStorageHost::default());
     let mut operation = nativePreferenceOperation(path, vec![("unrelated", json!("entity_a"))], 1);
     operation.operation = "alias".into();
@@ -2004,7 +2010,7 @@ fn catalog_identity_alias_requires_declared_catalog_keys_and_transaction_semanti
 #[test]
 fn catalog_merge_defers_identity_decisions_until_the_exchange_is_complete() {
     let schema = identityHistorySchema();
-    let path = schema.catalogs[0].store.path;
+    let path = schema.stores[0].path.as_str();
     let host = Arc::new(MemoryStorageHost::default());
     let journal = SyncOperationStore::new(host.clone(), RUNTIME_SYNC_DIR_PATH);
     let mut history = vec![

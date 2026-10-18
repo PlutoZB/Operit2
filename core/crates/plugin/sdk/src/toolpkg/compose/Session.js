@@ -87,5 +87,6 @@ function refreshComposeInputs(runtimeOptions) {
   if (activeCallRuntime) {
     bundle.setCallRuntime(activeCallRuntime);
   }
-  return buildComposeResponse(bundle, entry, undefined, true, requireComposeResponseSink(activeCallRuntime));
+  return buildComposeResponse(bundle, entry, undefined, true, requireComposeResponseSink(activeCallRuntime),
+    Object.prototype.hasOwnProperty.call(options, '__operit_input_state'));
 }

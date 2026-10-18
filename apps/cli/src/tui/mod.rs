@@ -93,6 +93,9 @@ pub(crate) async fn run_tui_command(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     let (shell_args, link_args) = parse_tui_startup_args(args)?;
+    // Exactly one process owns an identity's sync worker and listener state.
+    #[cfg(unix)]
+    let mut owner = crate::daemon::OwnerGuard::acquire("tui")?;
     let language_cell = Arc::new(StdMutex::new(None::<TuiLanguage>));
     let (toast_sender, toast_receiver) = mpsc::channel::<String>();
     let toast_host = tui_toast_host(toast_sender.clone());
@@ -169,30 +172,52 @@ pub(crate) async fn run_tui_command(args: &[String]) -> Result<(), String> {
         network_event_sender.clone(),
     )
     .await?;
-    // Runtime peer/proxy futures are not Send. Keep the monitor on the local
-    // executor, independently of the terminal loop, and drop its in-flight
-    // operations before shutting down the Core.
+    let access_services = core_application.accessServices();
+    // The control socket lets `operit2 cli ...` reuse this Core instead of
+    // booting a second owner for the same identity.
+    #[cfg(unix)]
+    owner.refresh_log_path()?;
+    #[cfg(unix)]
+    owner.mark_ready()?;
+    #[cfg(unix)]
+    let control_server = crate::daemon::ControlServer::bind(
+        owner.paths(),
+        core_application.localClient(),
+        owner.status().clone(),
+    )
+    .await?;
+    // Runtime peer/proxy futures are not Send. Keep the monitor and the
+    // control server on the local executor, independently of the terminal
+    // loop, and drop their in-flight operations before shutting down the Core.
     let result = tokio::task::LocalSet::new()
-        .run_until(async {
+        .run_until(async move {
+            #[cfg(unix)]
+            let control_task = control_server.spawn_local();
             let network_event_task = spawn_network_ui_events(
                 network_peers,
-                core_application.accessServices(),
+                access_services.clone(),
                 network_event_sender.clone(),
             );
             let outgoing_join_task = outgoing_joins::spawn_outgoing_join_monitor(
-                core_application.accessServices(),
+                access_services,
                 network_event_sender,
             );
             let result = tui.run().await;
+            #[cfg(unix)]
+            control_task.abort();
             outgoing_join_task.abort();
             network_event_task.abort();
+            #[cfg(unix)]
+            let _ = control_task.await;
             let _ = outgoing_join_task.await;
             let _ = network_event_task.await;
+            drop(tui);
             result
         })
         .await;
-    drop(tui);
     core_application.shutdown().await;
+    #[cfg(unix)]
+    drop(owner);
     result
 }
 

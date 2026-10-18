@@ -136,6 +136,8 @@ pub struct StorageCollection<T = StorageValue> {
 pub trait StorageCollectionMethods<T>: Send + Sync {
     /// Reads a record without conflating a stored null with an absent key.
     fn get(&self, key: String) -> JsFuture<JsNullable<StorageEntry<T>>>;
+    /// Reads ordered keys, retaining missing entries, in one host transaction snapshot.
+    fn getMany(&self, keys: Vec<String>) -> JsFuture<Vec<JsNullable<StorageEntry<T>>>>;
     /// Emits the current record or absence and subsequent changes to this exact key.
     fn watch(
         &self,
@@ -194,24 +196,61 @@ pub trait StorageObjectDatabaseMethods: Send + Sync {
     /// Commits bounded mutations across collections atomically.
     fn commit(&self, mutations: Vec<StorageObjectMutation>) -> JsFuture<StorageFacadeReceipt>;
 }
-/// Selects atomic key writes, removals, and exact preconditions.
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct StorageDataStoreBatch {
-    pub set: Option<BTreeMap<String, StorageValue>>,
-    pub remove: Option<Vec<String>>,
-    pub expectedVersions: Option<BTreeMap<String, JsNullable<String>>>,
+/// Selects one native JSON preference file.
+pub struct StorageDataStoreOpenOptions {
+    pub path: String,
+    pub merge: Option<super::storage::StoragePreferencesMergeDescriptor>,
 }
-/// Owns one key-value database with exact-key subscriptions.
+/// Exposes a complete immutable preference snapshot.
+pub struct StoragePreferences {}
+pub trait StoragePreferencesMethods: Send + Sync {
+    /// Reads one typed value, preserving absence independently of a stored null.
+    fn get<T>(&self, key: String) -> super::JsUndefined<T>;
+    /// Reports whether a key is present, including a stored null value.
+    fn contains(&self, key: String) -> bool;
+    /// Enumerates all application preference entries from this snapshot.
+    fn entries(&self) -> Vec<(String, StorageValue)>;
+}
+/// Exposes the mutable snapshot scoped to one edit or schema callback.
+pub struct StorageMutablePreferences {}
+pub trait StorageMutablePreferencesMethods: Send + Sync {
+    /// Reads one typed value from the current edit snapshot.
+    fn get<T>(&self, key: String) -> super::JsUndefined<T>;
+    /// Reports whether the edit snapshot contains this key.
+    fn contains(&self, key: String) -> bool;
+    /// Enumerates the edit snapshot's application preference entries.
+    fn entries(&self) -> Vec<(String, StorageValue)>;
+    /// Writes one typed JSON value into the current transaction.
+    fn set<T>(&self, key: String, value: T);
+    /// Removes one key from the current transaction.
+    fn remove(&self, key: String);
+    /// Records an integer delta using native transaction semantics across synchronization.
+    fn incrementInteger(&self, key: String, delta: i64);
+    /// Updates one object field without overwriting concurrent edits to other fields.
+    fn setObjectField<T>(&self, key: String, field: String, value: T);
+}
+/// Accepts synchronous completion or an awaited asynchronous callback.
+pub enum StoragePreferencesCallbackResult {
+    Complete(()),
+    Pending(JsFuture<()>),
+}
+/// Owns a native JSON preference file with Rust-style snapshot and edit semantics.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct StorageDataStore {
     #[serde(flatten)]
     pub handle: StorageHandle,
-    #[serde(flatten)]
-    pub collection: StorageCollection,
 }
 pub trait StorageDataStoreMethods: Send + Sync {
-    /// Commits key writes and removals atomically.
-    fn commit(&self, batch: StorageDataStoreBatch) -> JsFuture<StorageFacadeReceipt>;
+    /// Reads the complete immutable snapshot after applying the declared schema.
+    fn data(&self) -> JsFuture<StoragePreferences>;
+    /// Publishes one callback atomically; conflicts reject without rerunning the callback.
+    fn edit(&self, transform: std::sync::Arc<dyn Fn(StorageMutablePreferences) -> StoragePreferencesCallbackResult + Send + Sync>) -> JsFuture<StoragePreferences>;
+    /// Declares ordered one-version upgrades before subsequent reads or edits.
+    fn withSchema(&self, currentVersion: u32, migrate: std::sync::Arc<dyn Fn(u32, StorageMutablePreferences) -> StoragePreferencesCallbackResult + Send + Sync>) -> StorageDataStore;
+    /// Reads the declared store's current schema version after applying pending upgrades.
+    fn schemaVersion(&self) -> JsFuture<u32>;
+    /// Observes complete snapshots with collector-owned cancellation.
+    fn dataFlow(&self, options: Option<StorageWatchOptions>) -> JsAsyncIterableIterator<StoragePreferences>;
 }
 /// Opens SQLite at an explicit plugin-owned path.
 pub trait StorageSqliteHost: Send + Sync {
@@ -223,10 +262,10 @@ pub trait StorageObjectsHost: Send + Sync {
     /// Opens a transactional object database.
     fn open(&self, options: StorageOpenOptions) -> JsFuture<StorageObjectDatabase>;
 }
-/// Opens a transactional key-value store.
+/// Opens native typed JSON preferences through the host abstraction.
 pub trait StorageDataStoreHost: Send + Sync {
-    /// Opens the named plugin-owned key-value database.
-    fn open(&self, options: StorageOpenOptions) -> JsFuture<StorageDataStore>;
+    /// Opens a native preference file without a SQLite object database.
+    fn open(&self, options: StorageDataStoreOpenOptions) -> JsFuture<StorageDataStore>;
 }
 /// Dispatches the exact wire contract through the authenticated host.
 pub trait StorageFacadeHost: Send + Sync {

@@ -73,6 +73,7 @@ impl Drop for ToolPkgExecutionEngineLease {
 /// Tracks live engines and revocation generations under the same registry lock.
 #[derive(Default)]
 struct ToolPkgExecutionEngineRegistry {
+    mainScripts: BTreeMap<String, String>,
     entries: BTreeMap<String, ToolPkgExecutionEngineEntry>,
     packageGenerations: BTreeMap<String, u64>,
     factoryGeneration: u64,
@@ -129,6 +130,7 @@ impl ToolPkgManager {
     pub fn shutdownExecutionEngines(&self) {
         self.removeExecutionEnginesMatching(|_| true, |registry| {
             registry.closed = true;
+            registry.mainScripts.clear();
             registry.factoryGeneration += 1;
         });
     }
@@ -446,7 +448,7 @@ impl ToolPkgManager {
         if !enabled || runtime.mainEntry.trim().is_empty() {
             return None;
         }
-        self.readToolPkgResourceText(&runtime, &runtime.mainEntry)
+        self.readToolPkgMainScript(&runtime)
     }
 
     /// Returns the main script of one registered ToolPkg container for runtime IPC dispatch.
@@ -456,7 +458,7 @@ impl ToolPkgManager {
         if runtime.mainEntry.trim().is_empty() {
             return None;
         }
-        self.readToolPkgResourceText(&runtime, &runtime.mainEntry)
+        self.readToolPkgMainScript(&runtime)
     }
 
     /// Reads a text resource from an enabled ToolPkg container or subpackage.
@@ -732,7 +734,10 @@ impl ToolPkgManager {
         }
         self.removeExecutionEnginesMatching(
             |entry| entry.containerPackageName == normalizedContainer,
-            |registry| { *registry.packageGenerations.entry(normalizedContainer.to_string()).or_insert(0) += 1; },
+            |registry| {
+                registry.mainScripts.remove(normalizedContainer);
+                *registry.packageGenerations.entry(normalizedContainer.to_string()).or_insert(0) += 1;
+            },
         );
     }
 
@@ -761,6 +766,31 @@ impl ToolPkgManager {
         for entry in removed {
             entry.engine.destroy();
         }
+    }
+
+    /// Shares the main source for one catalog generation and rejects publication after revocation.
+    #[allow(non_snake_case)]
+    fn readToolPkgMainScript(&self, runtime: &ToolPkgContainerRuntime) -> Option<String> {
+        let containers = self.containers.read().expect("toolpkg container runtime lock poisoned");
+        let registered = containers.get(&runtime.packageName)?;
+        if registered.sourceType != runtime.sourceType || registered.sourcePath != runtime.sourcePath
+            || registered.mainEntry != runtime.mainEntry {
+            return None;
+        }
+        let generation = {
+            let mut registry = self.toolPkgExecutionEngines.lock().expect("toolpkg execution engine mutex poisoned");
+            if registry.closed { return None; }
+            if let Some(script) = registry.mainScripts.get(&runtime.packageName) {
+                return Some(script.clone());
+            }
+            *registry.packageGenerations.entry(runtime.packageName.clone()).or_insert(0)
+        };
+        let script = self.readToolPkgResourceText(runtime, &runtime.mainEntry)?;
+        let mut registry = self.toolPkgExecutionEngines.lock().expect("toolpkg execution engine mutex poisoned");
+        if registry.closed || registry.packageGenerations.get(&runtime.packageName) != Some(&generation) {
+            return None;
+        }
+        Some(registry.mainScripts.entry(runtime.packageName.clone()).or_insert(script).clone())
     }
 
     /// Reads one ToolPkg resource as UTF-8 text.
@@ -1078,7 +1108,7 @@ mod tests {
     }
 
     use std::io::Write;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     use super::*;
@@ -1093,6 +1123,7 @@ mod tests {
     #[derive(Default)]
     struct TestFileSystemHost {
         files: Mutex<BTreeMap<String, Vec<u8>>>,
+        byteReadCount: AtomicUsize,
     }
 
     impl TestFileSystemHost {
@@ -1140,8 +1171,9 @@ mod tests {
             Self::unsupported()
         }
 
-        /// Rejects byte reads.
+        /// Counts and returns the explicitly registered test bytes.
         fn readFileBytes(&self, path: &str) -> HostResult<Vec<u8>> {
+            self.byteReadCount.fetch_add(1, Ordering::Relaxed);
             self.files.lock().unwrap().get(path).cloned()
                 .ok_or_else(|| HostError::new("file missing"))
         }
@@ -1964,6 +1996,51 @@ mod tests {
         assert!(factory.engines.lock().unwrap()[3].destroyed.load(Ordering::Acquire));
         manager.updateExecutionEngineFactory(Arc::new(RecordingExecutionEngineFactory::default()));
         assert!(factory.engines.lock().unwrap()[2].destroyed.load(Ordering::Acquire));
+    }
+
+    /// Creates a real compressed main-script archive for source-generation tests.
+    fn mainScriptArchive(script: &str) -> Vec<u8> {
+        let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        archive.start_file("main.js", zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)).unwrap();
+        archive.write_all(script.as_bytes()).unwrap();
+        archive.finish().unwrap().into_inner()
+    }
+
+    /// Reads main code once per catalog generation and invalidates both directory and archive snapshots.
+    #[test]
+    fn mainScriptSourcesFollowCatalogGenerationAndShutdown() {
+        for (source, file, archived) in [("/plugin", "/plugin/main.js", false), ("/plugin.toolpkg", "/plugin.toolpkg", true)] {
+            let (mut manager, _) = recordingManager();
+            let fs = Arc::new(TestFileSystemHost::default());
+            let old = "exports.read = () => 1;";
+            let new = "exports.read = () => 2;";
+            let bytes = if archived { mainScriptArchive(old) } else { old.as_bytes().to_vec() };
+            fs.files.lock().unwrap().insert(file.into(), bytes);
+            manager.fileSystemHost = fs.clone();
+            let mut runtime = manager.getToolPkgContainerRuntime("package_a").unwrap();
+            runtime.sourceType = ToolPkgSourceType::EXTERNAL;
+            runtime.sourcePath = source.into();
+            runtime.mainEntry = "main.js".into();
+            manager.registerToolPkg(ToolPkgLoadResult {
+                containerPackage: ToolPackage { name: "package_a".into(), ..ToolPackage::default() },
+                containerRuntime: runtime, ..ToolPkgLoadResult::default()
+            });
+            fs.byteReadCount.store(0, Ordering::Relaxed);
+            for _ in 0..9 {
+                assert_eq!(manager.getRegisteredToolPkgMainScript("package_a").as_deref(), Some(old));
+                assert_eq!(manager.getToolPkgMainScriptInternal("package_a", &["package_a".into()]).as_deref(), Some(old));
+            }
+            assert_eq!(fs.byteReadCount.load(Ordering::Relaxed), 1);
+            let bytes = if archived { mainScriptArchive(new) } else { new.as_bytes().to_vec() };
+            fs.files.lock().unwrap().insert(file.into(), bytes);
+            rescanRuntimeCatalog(&mut manager);
+            fs.byteReadCount.store(0, Ordering::Relaxed);
+            assert_eq!(manager.getRegisteredToolPkgMainScript("package_a").as_deref(), Some(new));
+            assert_eq!(fs.byteReadCount.load(Ordering::Relaxed), 1);
+            manager.shutdownExecutionEngines();
+            assert!(manager.getRegisteredToolPkgMainScript("package_a").is_none());
+        }
     }
 
     /// Same-size edits with an unchanged manifest and parent mtime still replace the realm.

@@ -4,8 +4,8 @@ export function fixture() {
   const snapshot = {
     memoryPreferences: { userDescriptionEnabled: true, autoUpdateEnabled: true },
     cards: [
-      { ...base, id: "operit", name: "Operit", description: "默认角色卡", isDefault: true },
-      { ...base, id: "travel", name: "旅行助理", description: "一起规划行程，记录沿途的故事。", isDefault: false, memoryBindingMode: "SHARED", sharedMemoryId: "shared-main", attachedTagIds: ["tag-persona", "tag-travel"] },
+      { ...base, id: "operit", name: "Operit", description: "默认角色卡" },
+      { ...base, id: "travel", name: "旅行助理", description: "一起规划行程，记录沿途的故事。", memoryBindingMode: "SHARED", sharedMemoryId: "shared-main", attachedTagIds: ["tag-persona", "tag-travel"] },
     ],
     groups: [{ id: "group-one", name: "日常讨论", description: "多个角色一起交流", themeConfigId: null, members: [{ characterCardId: "operit", orderIndex: 0 }, { characterCardId: "travel", orderIndex: 1 }], createdAt: 2, updatedAt: 3 }],
     stores: [{ id: "shared-main", name: "共享记忆", createdAt: 2, updatedAt: 3 }],
@@ -28,7 +28,7 @@ export function fixture() {
   const links = [{ id: "1", sourceMemoryId: "1", targetMemoryId: "3", type_: "影响", weight: 0.8, description: "必须保留的原始关系描述" }];
   const settings = { autoSaveIntervalMinutes: 15, nextAutoSaveRunAtMs: 12345, memoryExtractionCustomRules: "测试提取规则", profileAutoUpdateEnabled: true, profileAutoUpdateLocked: false, cloudEmbeddingEnabled: true, cloudEmbeddingEndpoint: "https://fixture.invalid/embeddings", cloudEmbeddingApiKey: "fixture-embedding-key", cloudEmbeddingModel: "fixture-embedding" };
   const searchConfig = { scoreMode: "BALANCED", keywordWeight: 0.4, tagWeight: 0.2, vectorWeight: 0.3, edgeWeight: 0.1 };
-  const importedCard = { ...snapshot.cards[0], id: "fixture-imported-card", name: "隔离 UI 导入返回角色", isDefault: false, createdAt: 10, updatedAt: 10 };
+  const importedCard = { ...snapshot.cards[0], id: "fixture-imported-card", name: "隔离 UI 导入返回角色", createdAt: 10, updatedAt: 10 };
   const importCharacterSnapshot = { ...snapshot, cards: [...snapshot.cards, importedCard] };
   const themeChoices = [{ id: "independent-theme-one", label: "测试独立主题" }, { id: "independent-theme-two", label: "测试夜间主题" }];
   return { snapshot, graph, theme, themeChoices, links, settings, searchConfig, importCharacterSnapshot };
@@ -61,6 +61,11 @@ export function installBrowserFixture(data) {
         case "readMemorySettings": return copy(data.settings);
         case "readMemorySearchConfig": return copy(data.searchConfig);
         case "listMemoryChats": return [];
+        case "listBindableChats": return copy(data.bindingChats ?? []);
+        case "writeChatBinding": {
+          if (window.testBindingFailure === operation.chatId) throw new Error("TEST_BINDING_REJECTED");
+          return { chatId: operation.chatId, selection: operation.selection };
+        }
         case "readMemoryAutoSaveStatus": return { ownerKey: operation.ownerKey, pendingCandidates: 0, pendingChats: 0, processingCandidates: 0, failedCandidates: 0, nextRunAtMs: data.settings.nextAutoSaveRunAtMs, minutesUntilNextRun: 0, lastError: "" };
         case "readMemoryRebuildProgress": return { status: "idle", totalChats: 0, completedChats: 0, totalWindows: 0, completedWindows: 0, totalSourceMessages: 0, processedSourceMessages: 0, failedWindows: 0, currentChatTitle: "", lastError: "" };
         case "readUser": return { ownerKey: operation.ownerKey, content: window.testProfile };

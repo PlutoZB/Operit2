@@ -65,6 +65,7 @@ class LinuxWebViewController extends PlatformWebViewController {
   EventChannel? _eventChannel;
   StreamSubscription<dynamic>? _eventSubscription;
   _LinuxWebViewDisposal? _nativeDisposal;
+  int? _nativeId;
 
   LinuxNavigationDelegate? _navigationDelegate;
   final Map<String, JavaScriptChannelParams> _javaScriptChannels =
@@ -101,6 +102,7 @@ class LinuxWebViewController extends PlatformWebViewController {
     final int id =
         await rootChannel.invokeMethod<int>('createWebView') ??
         (throw StateError('Failed to create Linux WebView instance.'));
+    _nativeId = id;
     _channel = MethodChannel('$linuxWebViewChannelPrefix/$id');
     _eventChannel = EventChannel('$linuxWebViewChannelPrefix/$id/events');
     _eventSubscription = _eventChannel!.receiveBroadcastStream().listen(
@@ -269,6 +271,19 @@ class LinuxWebViewController extends PlatformWebViewController {
     }
 
     await loadFile(canonicalAssetPath);
+  }
+
+  @override
+  String? get localResourceScheme => 'operit-vfs';
+
+  @override
+  Future<void> setLocalResourceHandler(WebViewLocalResourceHandler? handler) async {
+    await _ensureReady();
+    final int? identifier = _nativeId;
+    if (identifier == null) {
+      throw StateError('The Linux WebView has no native identifier.');
+    }
+    await WebViewLocalResourceBridge.setHandler(identifier, handler);
   }
 
   @override
@@ -781,6 +796,15 @@ class LinuxWebViewController extends PlatformWebViewController {
       initializationError = error;
       initializationStackTrace = stackTrace;
     }
+    final int? nativeId = _nativeId;
+    if (nativeId != null) {
+      try {
+        await WebViewLocalResourceBridge.setHandler(nativeId, null);
+      } catch (_) {
+        // The native view may already be gone; disposal must still complete.
+      }
+    }
+    _nativeId = null;
     await _nativeDisposal?.dispose();
     _eventSubscription = null;
     _javaScriptChannels.clear();

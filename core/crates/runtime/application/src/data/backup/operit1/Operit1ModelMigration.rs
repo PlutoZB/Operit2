@@ -389,7 +389,7 @@ impl Operit1ModelConfig {
         }
         match providerTypeId.to_ascii_uppercase().as_str() {
             "MNN" | "LLAMA_CPP" => {
-                AppLogger::i(
+                AppLogger::trace_detail(
                     "Operit1SnapshotImport",
                     &format!(
                         "legacy local provider mapped to LOCAL_MODEL configId={} providerType={providerTypeId}",

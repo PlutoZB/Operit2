@@ -1,4 +1,4 @@
-// @operit-compose-artifact 1
+// @operit-compose-artifact 2
 "use strict";
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -149,54 +149,41 @@ function renderGroupExecutionScreen(ctx) {
   const labels = { running: "\u6B63\u5728\u6267\u884C", settled: "\u5DF2\u7ED3\u675F", failed: "\u6267\u884C\u5931\u8D25" };
   const outcomes = { completed: "\u5DF2\u5B8C\u6210", cancelled: "\u5DF2\u53D6\u6D88\uFF0C\u53EF\u7EE7\u7EED", blocked: "\u53D1\u9001\u88AB\u963B\u6B62", consumed: "\u53D1\u9001\u88AB\u5176\u4ED6\u5904\u7406\u5668\u63A5\u7BA1", not_persisted: "\u6D88\u606F\u672A\u4FDD\u5B58" };
   const enabled = state.loaded && !state.busy && !state.finished && state.error === "";
-  return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:7203",[{
-    key: "group-execution-dialog",
-    closeOnDismissRequest: false,
-    properties: { dismissOnBackPress: !state.busy, dismissOnClickOutside: !state.busy },
-    /** Loads the actual retained state once when this modal mounts. */
-    onLoad: () => control.load(),
-    /** Closes this modal without changing the underlying submission. */
-    onDismissRequest: () => control.close()
-  },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:7605",[{ fillMaxWidth: true, paddingHorizontal: 20, paddingVertical: 16 },[
-    OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:7693",[],()=>[{ text: "\u7FA4\u7EC4\u6267\u884C", style: "titleMedium" }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
-    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:7770",[{ key: "group-execution-status", text: !state.loaded ? "\u6B63\u5728\u8BFB\u53D6\u6267\u884C\u72B6\u6001\u2026" : value === null ? "\u5F53\u524D\u4F1A\u8BDD\u6CA1\u6709\u5DF2\u63D0\u4EA4\u7684\u7FA4\u7EC4\u4EFB\u52A1" : labels[value.status], paddingVertical: 12 }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
+  return OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:7203",[!state.busy,!state.busy,() => control.load(),() => control.close(),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:7605",[[
+    OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:7693",null,__operitUiTemplate_7693),
+    OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:7770",[!state.loaded ? "\u6B63\u5728\u8BFB\u53D6\u6267\u884C\u72B6\u6001\u2026" : value === null ? "\u5F53\u524D\u4F1A\u8BDD\u6CA1\u6709\u5DF2\u63D0\u4EA4\u7684\u7FA4\u7EC4\u4EFB\u52A1" : labels[value.status]],__operitUiTemplate_7770),
     ...value === null ? [] : [
-      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:8085",[{ text: "\u63D0\u4EA4\uFF1A" + value.submissionId }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
-      ...value.outcome === null ? [] : [OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:8191",[{ text: outcomes[value.outcome.status] + " \xB7 " + value.outcome.cursor + "/" + value.outcome.plannedTurns }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs))],
-      ...value.error === null ? [] : [OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:8354",[{ text: value.error, color: ctx.MaterialTheme.colorScheme.error }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs))]
+      OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:8085",["\u63D0\u4EA4\uFF1A" + value.submissionId],__operitUiTemplate_8085),
+      ...value.outcome === null ? [] : [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:8191",[outcomes[value.outcome.status] + " \xB7 " + value.outcome.cursor + "/" + value.outcome.plannedTurns],__operitUiTemplate_8191)],
+      ...value.error === null ? [] : [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:8354",[value.error,ctx.MaterialTheme.colorScheme.error],__operitUiTemplate_8354)]
     ],
-    ...state.error === "" ? [] : [OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:8475",[{ key: "group-execution-error", text: state.error, color: ctx.MaterialTheme.colorScheme.error }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs))],
-    ...state.busy ? [OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:8607",[],()=>[{ width: 20, height: 20 }],(...__operitArgs)=>ctx.UI.CircularProgressIndicator(...__operitArgs))] : [],
-    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:8678",[{ fillMaxWidth: true },[
-      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:8721",[{
-        key: "group-execution-refresh",
-        enabled: !state.busy && !state.finished,
-        /** Requests a new status snapshot only for this explicit refresh click. */
-        onClick: () => control.refresh()
-      },OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:8964",[],()=>[{ text: "\u5237\u65B0" }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs))],(...__operitArgs)=>ctx.UI.TextButton(...__operitArgs)),
-      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:9010",[{
-        key: "group-execution-cancel",
-        enabled: enabled && value !== null && value.status === "running",
-        /** Cancels only the exact running submission currently displayed. */
-        onClick: () => control.act("cancel")
-      },OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:9275",[],()=>[{ text: "\u53D6\u6D88\u6267\u884C" }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs))],(...__operitArgs)=>ctx.UI.TextButton(...__operitArgs)),
-      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:9333",[{
-        key: "group-execution-resume",
-        enabled: enabled && value !== null && value.status === "settled" && value.outcome !== null && value.outcome.status === "cancelled",
-        /** Resumes only the exact cancelled submission without resending its user input. */
-        onClick: () => control.act("resume")
-      },OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:9679",[],()=>[{ text: "\u7EE7\u7EED\u6267\u884C" }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs))],(...__operitArgs)=>ctx.UI.TextButton(...__operitArgs))
-    ]],(...__operitArgs)=>ctx.UI.Row(...__operitArgs)),
-    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:9742",[{
-      key: "group-execution-close",
-      enabled: !state.busy && !state.finished,
-      /** Dismisses this presentation and leaves execution unchanged. */
-      onClick: () => control.close()
-    },OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:9962",[],()=>[{ name: "Close", contentDescription: "\u5173\u95ED" }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.IconButton(...__operitArgs))
-  ]],(...__operitArgs)=>ctx.UI.Column(...__operitArgs))],(...__operitArgs)=>ctx.UI.Dialog(...__operitArgs));
+    ...state.error === "" ? [] : [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:8475",[state.error,ctx.MaterialTheme.colorScheme.error],__operitUiTemplate_8475)],
+    ...state.busy ? [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:8607",null,__operitUiTemplate_8607)] : [],
+    OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:8678",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:8721",[!state.busy && !state.finished,() => control.refresh(),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:8964",null,__operitUiTemplate_8964)],__operitUiTemplate_8721),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:9010",[enabled && value !== null && value.status === "running",() => control.act("cancel"),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:9275",null,__operitUiTemplate_9275)],__operitUiTemplate_9010),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:9333",[enabled && value !== null && value.status === "settled" && value.outcome !== null && value.outcome.status === "cancelled",() => control.act("resume"),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:9679",null,__operitUiTemplate_9679)],__operitUiTemplate_9333)],__operitUiTemplate_8678),
+    OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:9742",[!state.busy && !state.finished,() => control.close(),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/group-execution/index.ui.js:9962",null,__operitUiTemplate_9962)],__operitUiTemplate_9742)
+  ]],__operitUiTemplate_7605)],__operitUiTemplate_7203);
 }
 
 // src/ui/group-execution/index.ui.ts
 function Screen(ctx) {
   return renderGroupExecutionScreen(ctx);
 }
+
+function __operitUiTemplate_7693(__ctx,__values){return __ctx.UI.Text({text:"\u7FA4\u7EC4\u6267\u884C",style:"titleMedium"}); }
+function __operitUiTemplate_7770(__ctx,__values){return __ctx.UI.Text({key:"group-execution-status",text:__values[0],paddingVertical:12}); }
+function __operitUiTemplate_8085(__ctx,__values){return __ctx.UI.Text({text:__values[0]}); }
+function __operitUiTemplate_8191(__ctx,__values){return __ctx.UI.Text({text:__values[0]}); }
+function __operitUiTemplate_8354(__ctx,__values){return __ctx.UI.Text({text:__values[0],color:__values[1]}); }
+function __operitUiTemplate_8475(__ctx,__values){return __ctx.UI.Text({key:"group-execution-error",text:__values[0],color:__values[1]}); }
+function __operitUiTemplate_8607(__ctx,__values){return __ctx.UI.CircularProgressIndicator({width:20,height:20}); }
+function __operitUiTemplate_8964(__ctx,__values){return __ctx.UI.Text({text:"\u5237\u65B0"}); }
+function __operitUiTemplate_8721(__ctx,__values){return __ctx.UI.TextButton({key:"group-execution-refresh",enabled:__values[0],onClick:__values[1]},__values[2]); }
+function __operitUiTemplate_9275(__ctx,__values){return __ctx.UI.Text({text:"\u53D6\u6D88\u6267\u884C"}); }
+function __operitUiTemplate_9010(__ctx,__values){return __ctx.UI.TextButton({key:"group-execution-cancel",enabled:__values[0],onClick:__values[1]},__values[2]); }
+function __operitUiTemplate_9679(__ctx,__values){return __ctx.UI.Text({text:"\u7EE7\u7EED\u6267\u884C"}); }
+function __operitUiTemplate_9333(__ctx,__values){return __ctx.UI.TextButton({key:"group-execution-resume",enabled:__values[0],onClick:__values[1]},__values[2]); }
+function __operitUiTemplate_8678(__ctx,__values){return __ctx.UI.Row({fillMaxWidth:true},[__values[0],__values[1],__values[2]]); }
+function __operitUiTemplate_9962(__ctx,__values){return __ctx.UI.Icon({name:"Close",contentDescription:"\u5173\u95ED"}); }
+function __operitUiTemplate_9742(__ctx,__values){return __ctx.UI.IconButton({key:"group-execution-close",enabled:__values[0],onClick:__values[1]},__values[2]); }
+function __operitUiTemplate_7605(__ctx,__values){return __ctx.UI.Column({fillMaxWidth:true,paddingHorizontal:20,paddingVertical:16},__values[0]); }
+function __operitUiTemplate_7203(__ctx,__values){return __ctx.UI.Dialog({key:"group-execution-dialog",closeOnDismissRequest:false,properties:{dismissOnBackPress:__values[0],dismissOnClickOutside:__values[1]},onLoad:__values[2],onDismissRequest:__values[3]},__values[4]); }

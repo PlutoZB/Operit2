@@ -53,7 +53,7 @@ var OperitComposeRetained = function () {
     }
 
     /// Commits changed occurrences and removes only detached branches, retaining untouched records.
-    function commit(tree) {
+    function commit(tree, skipUnchanged) {
       var upserts = new Map();
       var created = new Set();
       var removed = [];
@@ -80,6 +80,75 @@ var OperitComposeRetained = function () {
             ? child : bind(child, slot + '/' + key.length + ':' + key, oldActions, actions);
         }
         return result;
+      }
+
+      /// Mounts the direct membership of a new parent group without reconciliation bookkeeping.
+      function initialGroup(children, parent, slot) {
+        var identities = new Set();
+        return children.map(
+        /// Validates and mounts every child occurrence exactly once during the initial graph build.
+        function (child, index) {
+          stats.checkedChildReferences += 1;
+          if (!child) throw new Error('compose render must return a node');
+          var value = OperitComposeGeneration.read(child);
+          if (typeof value.type !== 'string') throw new Error('compose render must return a node');
+          var key = value.props.key;
+          var identity;
+          if (key === undefined || key === null) identity = 'i:' + index;else {
+            if (typeof key !== 'string' && typeof key !== 'number') throw new Error('compose node key must be a string or number');
+            var text = String(key);
+            identity = 'k:' + text.length + ':' + text;
+          }
+          if (identities.has(identity)) throw new Error('duplicate compose node key in ' + parent + ':' + slot);
+          identities.add(identity);
+          var id = occurrenceId(parent + '/s:' + slot.length + ':' + slot + '/' + identity + '/t:' + value.type);
+          initialVisit(child, id, parent);
+          return id;
+        });
+      }
+
+      /// Mounts one occurrence on an empty retained graph without previous-record comparisons.
+      function initialVisit(node, id, parent) {
+        if (!node) throw new Error('compose render must return a node');
+        var value = OperitComposeGeneration.read(node);
+        if (typeof value.type !== 'string') throw new Error('compose render must return a node');
+        if (active.has(node)) throw new Error('compose nodes must not form a cycle');
+        active.add(node);
+        stats.visitedNodes += 1;
+        var actions = {};
+        var props = OperitComposeNodes.hasActions(value.props) === false
+          ? value.props : bind(value.props, '', {}, actions);
+        var children = initialGroup(value.children, id, 'children');
+        var slots = {};
+        Object.keys(value.slots || {}).forEach(
+        /// Mounts named-slot members while preserving their occurrence ownership.
+        function (slot) {
+          slots[slot] = initialGroup(value.slots[slot], id, slot);
+        });
+        var record = {
+          id: id,
+          nodeType: value.type,
+          props: props,
+          children: children,
+          slots: slots
+        };
+        var unsubscribe = OperitComposeGeneration.watch(node,
+        /// Queues direct mutations for the next retained commit.
+        function (path) {
+          invalidate(id, path[0] === 'children' || path[0] === 'slots');
+          if (path[0] === 'type' || path[0] === 'props' && path[1] === 'key') {
+            if (parent !== null) invalidate(parent, true);
+          }
+        });
+        nodes.set(id, {
+          node: node,
+          record: record,
+          actions: actions,
+          parent: parent,
+          unsubscribe: unsubscribe
+        });
+        upserts.set(id, record);
+        active.delete(node);
       }
 
       /// Reconciles only the direct membership of a structurally changed parent group.
@@ -129,8 +198,9 @@ var OperitComposeRetained = function () {
         if (active.has(node)) throw new Error('compose nodes must not form a cycle');
         var previous = nodes.get(id);
         if (!previous) created.add(id);
+        var changed = dirty.has(id);
         var replacement = !previous || previous.node !== node;
-        if (!replacement && !dirty.has(id)) return;
+        if (!replacement && !changed) return;
         var structure = replacement || dirty.get(id) === true;
         dirty.delete(id);
         active.add(node);
@@ -139,7 +209,8 @@ var OperitComposeRetained = function () {
         // Callback slots belong to the mounted occurrence, not to its currently visible properties.
         // A queued event can still address a temporarily hidden slot; rebinding replaces its closure.
         var actions = Object.assign({}, oldActions);
-        var props = bind(value.props, '', oldActions, actions);
+        var props = !changed && OperitComposeNodes.hasActions(value.props) === false
+          ? value.props : bind(value.props, '', oldActions, actions);
         var children;
         var slots;
         if (structure) {
@@ -188,7 +259,7 @@ var OperitComposeRetained = function () {
           parent: parent,
           unsubscribe: unsubscribe
         });
-        if (!previous || !equal(previous.record, record)) upserts.set(id, record);
+        if (!previous || changed || !equal(previous.record, record)) upserts.set(id, record);
         active.delete(node);
       }
 
@@ -215,6 +286,20 @@ var OperitComposeRetained = function () {
         stats.removedNodes += 1;
       }
       var nextRoot = occurrenceId('root/t:' + tree.type);
+      if (revision === 0 && nodes.size === 0) {
+        initialVisit(tree, nextRoot, null);
+        runtime.actions.finish(actionDeletes);
+        rootId = nextRoot;
+        stats.commits += 1;
+        revision = 1;
+        return {
+          reset: true,
+          revision: revision,
+          rootId: rootId,
+          upserts: Array.from(upserts.values()),
+          removed: []
+        };
+      }
       if (rootId !== null && rootId !== nextRoot) removalRoots.add(rootId);
       visit(tree, nextRoot, null);
       // Only explicitly queued occurrences are visited beneath unchanged ancestors.
@@ -233,6 +318,9 @@ var OperitComposeRetained = function () {
       rootId = nextRoot;
       stats.commits += 1;
       var reset = revision === 0;
+      // An unchanged intermediate has no transport revision. Final responses
+      // still advance normally so every command retains its completion fence.
+      if (skipUnchanged && !reset && upserts.size === 0 && removed.length === 0) return null;
       revision += 1;
       return {
         reset: reset,

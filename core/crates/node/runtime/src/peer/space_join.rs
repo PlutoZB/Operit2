@@ -783,7 +783,7 @@ pub(crate) async fn incoming(service: &dyn NodeSpaceContext) -> Result<Vec<Space
         let records = match fetched {
             Ok(records) => records,
             Err(error) => {
-                operit_util::AppLogger::AppLogger::d("SpaceJoin", &format!("Assignment source unavailable {node}: {error}"));
+                operit_util::AppLogger::AppLogger::v_with_level("SpaceJoin", &format!("Assignment source unavailable {node}: {error}"), operit_util::AppLogger::VERBOSE_LEVEL_3);
                 continue;
             }
         };

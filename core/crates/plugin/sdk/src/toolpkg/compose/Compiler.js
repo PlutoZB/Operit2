@@ -38,38 +38,6 @@ var OperitComposeCompiler = function () {
     return registry.object.type === 'Identifier' ? registry.object : null;
   }
 
-  /// Classifies side-effect-free value expressions and records their lexical value dependencies.
-  function dependencies(node, names) {
-    switch (node.type) {
-      case 'Literal':
-        return true;
-      case 'Identifier':
-        names.add(node.name);
-        return true;
-      case 'ArrayExpression':
-        return node.elements.every(function (item) {
-          return item === null || dependencies(item, names);
-        });
-      case 'ObjectExpression':
-        return node.properties.every(function (property) {
-          return property.type === 'Property' && property.kind === 'init' && !property.method && (!property.computed || dependencies(property.key, names)) && dependencies(property.value, names);
-        });
-      case 'UnaryExpression':
-        return node.operator !== 'delete' && dependencies(node.argument, names);
-      case 'BinaryExpression':
-      case 'LogicalExpression':
-        return dependencies(node.left, names) && dependencies(node.right, names);
-      case 'ConditionalExpression':
-        return dependencies(node.test, names) && dependencies(node.consequent, names) && dependencies(node.alternate, names);
-      case 'TemplateLiteral':
-        return node.expressions.every(function (item) {
-          return dependencies(item, names);
-        });
-      default:
-        return false;
-    }
-  }
-
   /// Transforms only parsed UI construction calls and leaves user control flow and side effects intact.
   function compile(source, identity) {
     var compiled = OperitComposeArtifact.read(source);
@@ -79,6 +47,41 @@ var OperitComposeCompiler = function () {
       sourceType: 'script',
       allowReturnOutsideFunction: true
     });
+    var templates = [];
+    var templatePrefix = '__operitUiTemplate_';
+    while (source.indexOf(templatePrefix) !== -1) templatePrefix += '_';
+
+    /// Preserves observable enumeration, prototype and duplicate-property semantics.
+    function fixedObject(node) {
+      var keys = new Set();
+      return node.properties.every(function (property) {
+        if (property.type !== 'Property' || property.computed || property.kind !== 'init' || property.method) return false;
+        var key = property.key.type === 'Identifier' ? property.key.name : String(property.key.value);
+        if (key === '__proto__' || keys.has(key) || String(Number(key) >>> 0) === key && Number(key) < 4294967295) return false;
+        keys.add(key);
+        return true;
+      });
+    }
+
+    /// Leaves fixed literal structure in a hoisted factory; evaluates dynamic leaves in source order.
+    function templateArgument(node, plan, values) {
+      if (node.type === 'Literal' && !node.regex) return source.slice(node.start, node.end);
+      if (node.type === 'ObjectExpression' && fixedObject(node)) {
+        return '{' + node.properties.map(function (property) {
+          return source.slice(property.key.start, property.key.end) + ':' + templateArgument(property.value, plan, values);
+        }).join(',') + '}';
+      }
+      if (node.type === 'ArrayExpression' && node.elements.every(function (element) {
+        return element && element.type !== 'SpreadElement';
+      })) {
+        return '[' + node.elements.map(function (element) {
+          return templateArgument(element, plan, values);
+        }).join(',') + ']';
+      }
+      values.push(emit(node, plan));
+      return '__values[' + (values.length - 1) + ']';
+    }
+
     /// Recognizes a statically keyed state binding whose lexical value can be refreshed independently.
     function stateBinding(declaration, context) {
       var call = declaration.init;
@@ -213,27 +216,35 @@ var OperitComposeCompiler = function () {
       if (receiver) {
         var context = source.slice(receiver.start, receiver.end);
         var site = JSON.stringify(identity + ':' + node.start);
-        var callee = source.slice(node.callee.start, node.callee.end);
-        var args = '[' + node.arguments.map(function (argument) {
-          return emit(argument, plan);
-        }).join(',') + ']';
-        var factory = '(...__operitArgs)=>' + callee + '(...__operitArgs)';
+        // Argument spreading has observable iteration and is handled by the existing generic path.
+        if (node.arguments.some(function (argument) { return argument.type === 'SpreadElement'; })) {
+          var args = '[' + node.arguments.map(function (argument) { return emit(argument, plan); }).join(',') + ']';
+          var callee = source.slice(node.callee.start, node.callee.end);
+          var genericFactory = '(...__operitArgs)=>' + callee + '(...__operitArgs)';
+          if (plan) {
+            var spreadNames = new Set();
+            node.arguments.forEach(function (argument) { reads(argument, plan, spreadNames); });
+            var spreadKeys = '[' + Array.from(spreadNames).map(function (name) {
+              return plan.frame + '.key+' + JSON.stringify(':value:' + name);
+            }).join(',') + ']';
+            return 'OperitComposeReactive.expression(' + plan.frame + ',' + site + ',' + spreadKeys + ',()=>' + args + ',' + genericFactory + ')';
+          }
+          return 'OperitComposeGeneration.node(' + context + ',' + site + ',' + args + ',' + genericFactory + ')';
+        }
+        var values = [];
+        var construction = node.arguments.map(function (argument) { return templateArgument(argument, plan, values); }).join(',');
+        var factory = templatePrefix + node.start;
+        templates.push('function ' + factory + '(__ctx,__values){return __ctx.UI.' + node.callee.property.name + '(' + construction + '); }');
+        var vector = values.length ? '[' + values.join(',') + ']' : 'null';
         if (plan) {
           var names = new Set();
-          node.arguments.forEach(function (argument) {
-            reads(argument, plan, names);
-          });
+          node.arguments.forEach(function (argument) { reads(argument, plan, names); });
           var keys = '[' + Array.from(names).map(function (name) {
             return plan.frame + '.key+' + JSON.stringify(':value:' + name);
           }).join(',') + ']';
-          return 'OperitComposeReactive.expression(' + plan.frame + ',' + site + ',' + keys + ',()=>' + args + ',' + factory + ')';
+          return 'OperitComposeReactive.expressionTemplate(' + plan.frame + ',' + site + ',' + keys + ',()=>' + vector + ',' + factory + ')';
         }
-        var names = new Set();
-        var pure = node.arguments.every(function (arg) {
-          return dependencies(arg, names);
-        });
-        if (pure) return 'OperitComposeGeneration.leaf(' + context + ',' + site + ',[' + Array.from(names).join(',') + '],()=>' + args + ',' + factory + ')';
-        return 'OperitComposeGeneration.node(' + context + ',' + site + ',' + args + ',' + factory + ')';
+        return 'OperitComposeGeneration.template(' + context + ',' + site + ',' + vector + ',' + factory + ')';
       }
       var cursor = node.start;
       var visitedEnd = node.start;
@@ -249,7 +260,8 @@ var OperitComposeCompiler = function () {
       });
       return output === null ? null : output + source.slice(cursor, node.end);
     }
-    return emit(ast);
+    var lowered = emit(ast);
+    return lowered + (templates.length ? '\n' + templates.join('\n') : '');
   }
   return {
     compile: compile,

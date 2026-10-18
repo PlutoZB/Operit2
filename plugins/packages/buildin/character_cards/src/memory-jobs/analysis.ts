@@ -1,3 +1,4 @@
+import { uuid } from "../identity";
 import type { CharacterRepository } from "../canonical";
 import type { Memory, MemoryChatMessage, MemoryExtractionResult, MemorySettings } from "../model";
 import { assertNumber, assertObject, assertString, assertStrings, normalizeNames, requireName } from "../validation";
@@ -130,7 +131,7 @@ async function mergeMemories(ownerKey: string, item: Merge, repository: Characte
   return repository.saveMemory(ownerKey, { ...primary, title: item.title, content: item.content, folderPath: item.folder_path,
     contentType: "text", source: "memory_analysis", credibility, importance, tags: normalizeNames(item.tags).map(
       /** Initializes explicit editable tags without numeric identity loss. */
-      (name, index) => ({ id: String(index + 1), name }),
+      name => ({ id: uuid(), name }),
   ) });
 }
 

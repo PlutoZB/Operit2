@@ -1,6 +1,5 @@
-use operit_store::PreferenceMerge::{
-    PreferenceMergePathSegment, PreferenceMergeReference, PreferenceMergeStore,
-};
+use operit_store::PreferenceMerge::PreferenceMergeStore;
+use operit_host_api::PluginStorage::{StoragePreferencesMergeDescriptor, StoragePreferencesMergeKey, StoragePreferencesMergePathSegment, StoragePreferencesMergeReference};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -74,19 +73,22 @@ impl FunctionalConfigManager {
             .withSchema(Self::PREFERENCES_VERSION, Self::migratePreferences)
     }
 
-    /// Declares provider UUIDs in the owned function-binding map without supplying executable merge code.
-    pub(crate) fn spaceMergeReference() -> PreferenceMergeReference {
-        PreferenceMergeReference {
-            store: PreferenceMergeStore {
-                path: operit_util::RuntimeStorageLayout::FUNCTIONAL_CONFIGS_PREFERENCES_PATH,
-                encrypted: false,
+    /// Declares provider UUID references using the same contract as plugin owners.
+    pub(crate) fn spaceMergeStore() -> PreferenceMergeStore {
+        PreferenceMergeStore {
+            path: operit_util::RuntimeStorageLayout::FUNCTIONAL_CONFIGS_PREFERENCES_PATH.to_string(),
+            encrypted: false,
+            merge: StoragePreferencesMergeDescriptor {
+                version: 1,
+                catalog: None,
+                references: vec![StoragePreferencesMergeReference {
+                    key: StoragePreferencesMergeKey::Exact { key: "function_model_binding".to_string() },
+                    path: vec![StoragePreferencesMergePathSegment::ObjectValues,
+                        StoragePreferencesMergePathSegment::Field { name: "providerId".to_string() }],
+                    target: operit_util::RuntimeStorageLayout::MODEL_CONFIGS_PREFERENCES_PATH.to_string(),
+                }],
+                projection: None,
             },
-            key: "function_model_binding",
-            path: &[
-                PreferenceMergePathSegment::ObjectValues,
-                PreferenceMergePathSegment::Field("providerId"),
-            ],
-            target: ModelConfigManager::spaceMergeCatalog().store.path,
         }
     }
 

@@ -304,7 +304,7 @@ pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_dataRescue(
     let response = match result {
         Ok(Ok(value)) => value,
         Ok(Err(error)) => serde_json::json!({"ok": false, "error": error}).to_string(),
-        Err(payload) => serde_json::json!({"ok": false, "error": panic_payload_message(payload)}).to_string(),
+        Err(payload) => serde_json::json!({"ok": false, "error": panic_payload_message(payload.as_ref())}).to_string(),
     };
     new_java_string(env, &response)
 }

@@ -1,7 +1,10 @@
 import type { DomainInput, DomainOperation, DomainOutput } from "./api";
 import { executeDomain, resolveConfiguration } from "./operations";
 import { parseDomainPayload } from "./domain";
+import type { ChatConfigurationService } from "./domain";
+import { combineCharacterPrompt } from "./character-prompt";
 import { findChatBinding } from "./chat-storage";
+import { listBindableChats } from "./chat-binding-catalog";
 import { parseChatSelection } from "./chat-bindings";
 import { MemoryJobRunner } from "./memory-jobs/scheduler";
 import { listMemoryChats } from "./memory-jobs/chat";
@@ -51,7 +54,6 @@ import {
   assertTag,
   assertTagValues,
   normalizeNames,
-  requireDecimal,
   requireId,
   requireName,
 } from "./validation";
@@ -83,7 +85,7 @@ interface TagPlan {
   deleted: string[];
   attachedIds: string[];
 }
-export interface CharacterCardsService {
+export interface CharacterCardsService extends ChatConfigurationService {
   readGlobalMemoryPreferences(): Promise<
     import("./model").GlobalMemoryPreferences
   >;
@@ -124,6 +126,8 @@ export function createCharacterCardsService(
     switch (request.action) {
       case "snapshot":
         return owner.readConfigurationSnapshot();
+      case "listBindableChats":
+        return listBindableChats();
       case "listMemoryChats":
         return listMemoryChats(request.ownerKey, owner);
       case "readGlobalMemoryPreferences":
@@ -162,6 +166,18 @@ export function createCharacterCardsService(
     runMemoryJobs: () => jobs.tick(),
     /** Reads only the metadata flags needed by prompt composition. */
     readGlobalMemoryPreferences: () => owner.readGlobalMemoryPreferences(),
+    /** Reads only the selected character and its owned relations. */
+    getCharacter: (id) => owner.getCharacter(id),
+    /** Reads only the selected group and its saved membership. */
+    getGroup: (id) => owner.getGroup(id),
+    /** Reads only one referenced prompt tag. */
+    getTag: (id) => owner.getTag(id),
+    /** Reads only one referenced shared memory library. */
+    getStore: (id) => owner.getStore(id),
+    /** Reads the model directory independently of role and tool catalogs. */
+    listModels: () => owner.listModels(),
+    /** Reads the speech directory independently of role and tool catalogs. */
+    listTtsConfigs: () => owner.listTtsConfigs(),
     /** Preserves action-specific results through the shared service dispatcher. */
     dispatch: dispatchRequest,
     /** Reads configuration records without loading memory data. */
@@ -547,7 +563,6 @@ export async function saveCharacter(
   assertBoolean(create, "角色新建标识");
   let value = normalizedCharacter(card);
   if (create) {
-    if (value.isDefault) throw new Error("不能新建默认角色卡");
     value = { ...value, id: "", createdAt: 0, updatedAt: 0 };
   } else {
     const id = requireId(value.id, "角色卡标识");
@@ -556,7 +571,6 @@ export async function saveCharacter(
     value = {
       ...value,
       id: original.id,
-      isDefault: original.isDefault,
       createdAt: original.createdAt,
     };
   }
@@ -717,7 +731,7 @@ export function parseOwner(ownerKey: string): MemoryOwner {
   throw new Error("记忆库命名空间无效");
 }
 
-/** Matches the original menu's explicit-card and active-card memory owner rules entirely in the plugin. */
+/** Resolves memory only from an explicitly bound character without assuming an installation card. */
 async function menuMemoryOwner(
   chatId: string,
   host: CharacterRepository,
@@ -728,12 +742,7 @@ async function menuMemoryOwner(
     binding === null ? null : parseChatSelection(binding.selection);
   if (selection?.kind === "model") throw new Error("Model-only conversations have no role memory owner");
   if (selection?.kind === "card") return resolveMemoryOwner(selection.id, host);
-  const active = await host.readActive();
-  if ("Model" in active) throw new Error("Model-only selection has no role memory owner");
-  return resolveMemoryOwner(
-    "CharacterCard" in active ? active.CharacterCard.id : "default",
-    host,
-  );
+  throw new Error("Select a character memory owner for this conversation");
 }
 
 /** Requires the selected owner to exist in the canonical character or shared store registry. */
@@ -837,7 +846,7 @@ export async function saveMemory(
   let saved: Memory;
   if (id === null) saved = await host.createMemory(ownerKey, normalized);
   else {
-    requireDecimal(id, "记忆记录标识", true);
+    requireId(id, "记忆记录标识");
     saved = await host.updateMemory(ownerKey, id, normalized);
   }
   assertMemory(saved);
@@ -866,31 +875,10 @@ export async function combinePrompts(
   characterId: string,
   additionalTagIds: string[],
   promptFunctionType: "CHAT" | "VOICE",
-  host: Pick<CharacterRepository, "getCharacter" | "listTags">,
+  host: Pick<CharacterRepository, "getCharacter" | "getTag">,
 ): Promise<string> {
   const card = await host.getCharacter(requireId(characterId, "角色卡标识"));
-  assertCard(card);
-  assertStrings(additionalTagIds, "附加标签");
-  if (promptFunctionType !== "CHAT" && promptFunctionType !== "VOICE")
-    throw new Error("提示词功能类型无效");
-  const tags = records(await host.listTags(), assertTag, "标签列表");
-  const parts: string[] = [];
-  const setting = card.characterSetting.trim();
-  if (setting !== "") parts.push(setting);
-  const otherContent = (
-    promptFunctionType === "CHAT"
-      ? card.otherContentChat
-      : card.otherContentVoice
-  ).trim();
-  if (otherContent !== "") parts.push(otherContent);
-  const ids = normalizeNames([...card.attachedTagIds, ...additionalTagIds]);
-  for (const id of ids) {
-    const content = findRecord(tags, id, "提示词标签").promptContent.trim();
-    if (content !== "") parts.push(content);
-  }
-  const advanced = card.advancedCustomPrompt.trim();
-  if (advanced !== "") parts.push(advanced);
-  return parts.join("\n\n").trim();
+  return combineCharacterPrompt(card, additionalTagIds, promptFunctionType, host);
 }
 
 /** Saves full settings through the owner service rather than writing preference files. */
@@ -992,7 +980,6 @@ export async function dispatch(
       const id = requireId(request.id, "角色卡标识");
       const card = await host.getCharacter(id);
       assertCard(card);
-      if (card.isDefault) throw new Error("默认角色卡不能删除");
       await host.deleteCharacter(id);
       return snapshot(host);
     }
@@ -1004,6 +991,8 @@ export async function dispatch(
       assertActive(active);
       return active;
     }
+    case "listBindableChats":
+      return listBindableChats();
     case "readChatBinding":
       return executeDomain(
         "chat.configuration.binding.read",
@@ -1140,12 +1129,12 @@ export async function dispatch(
     }
     case "deleteLink":
       await requireOwner(request.ownerKey, host);
-      requireDecimal(request.linkId, "记忆关系标识", true);
+      requireId(request.linkId, "记忆关系标识");
       await host.deleteLink(request.ownerKey, request.linkId);
       return graph(request.ownerKey, host);
     case "updateLink": {
       await requireOwner(request.ownerKey, host);
-      requireDecimal(request.linkId, "记忆关系标识", true);
+      requireId(request.linkId, "记忆关系标识");
       assertNumber(request.weight, "关系强度", 0, 1);
       assertString(request.description, "关系描述");
       await host.updateLink(request.ownerKey, request.linkId, {

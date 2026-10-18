@@ -67,7 +67,7 @@ test("Operit import and export are pure domain operations with complete binding 
   const exported = serialization.encodeCharacterExport(record, "operit", data.snapshot.tags);
   assert.deepEqual(JSON.parse(exported), record);
   const plan = serialization.decodeCharacterImport(exported, "operit", data.snapshot.tags);
-  assert.deepEqual(plain(plan.card), { ...record, id: "", isDefault: false, createdAt: 0, updatedAt: 0 });
+  assert.deepEqual(plain(plan.card), { ...record, id: "", createdAt: 0, updatedAt: 0 });
   assert.deepEqual(plain(plan.tagChanges), { created: [], updated: [], deleted: [] });
   assert.throws(() => serialization.decodeCharacterImport("{", "operit", data.snapshot.tags), { name: "SyntaxError" });
 });
@@ -110,20 +110,17 @@ test("service dependency failures propagate unchanged instead of becoming empty 
   assert.ok(reads.length > 0);
 });
 
-/** Checks the current decimal-string record contract without claiming legacy data compatibility. */
-test("record identifiers retain canonical decimal strings and reject numeric or malformed values", () => {
+/** Checks the opaque identity contract shared by legacy decimals and new device-independent ids. */
+test("record identifiers accept opaque strings and reject numeric or malformed values", () => {
   const item = fixture().graph.items[0], graph = fixture().graph.graph;
-  item.id = "9223372036854775807"; graph.edges[0].id = "9223372036854775807";
-  validation.assertMemory(item); validation.assertGraph(graph);
-  assert.equal(item.id, "9223372036854775807"); assert.equal(graph.edges[0].id, "9223372036854775807");
-  for (const invalid of [1, Number("9223372036854775807"), "01", "-1", "1.0", "", null]) {
-    item.id = invalid; graph.edges[0].id = invalid;
-    assert.throws(() => validation.assertMemory(item), { message: "记忆数据库标识 must be a canonical decimal string" });
-    assert.throws(() => validation.assertGraph(graph), { message: "图谱关系标识 must be a canonical decimal string" });
+  for (const valid of ["9223372036854775807", "0f5c1c2e-9a4b-4f7c-8d2e-6a3b1c0d9e8f"]) {
+    item.id = valid; graph.edges[0].id = valid;
+    validation.assertMemory(item); validation.assertGraph(graph);
+    assert.equal(item.id, valid); assert.equal(graph.edges[0].id, valid);
   }
-  for (const invalid of ["0", "9223372036854775808"]) {
+  for (const invalid of [1, "", " padded", null]) {
     item.id = invalid; graph.edges[0].id = invalid;
-    assert.throws(() => validation.assertMemory(item), /outside its i64 range/);
-    assert.throws(() => validation.assertGraph(graph), /outside its i64 range/);
+    assert.throws(() => validation.assertMemory(item), /记忆数据库标识/);
+    assert.throws(() => validation.assertGraph(graph), /图谱关系标识/);
   }
 });

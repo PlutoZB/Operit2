@@ -39,7 +39,7 @@ use operit_store::RuntimeStorageHost::{
 };
 use operit_store::RuntimeStorePaths::RuntimeStorePaths;
 use operit_store::SyncOperationStore::{
-    compactSyncOperations, SyncClock, SyncOperation, SyncOperationStore,
+    boundSyncOperationPage, compactSyncOperations, SyncClock, SyncOperation, SyncOperationStore,
 };
 use operit_tools::files::PathMapper::PathMapper;
 use operit_tools::files::VisualFileSystem::VisualFileSystem;
@@ -310,7 +310,7 @@ impl OperitApplication {
     #[allow(non_snake_case)]
     pub fn onCreate(&mut self) -> Result<(), String> {
         self.appStartupTimeMs = currentTimeMillis();
-        AppLogger::i("OperitApplication", "runtime initialization start");
+        AppLogger::v("OperitApplication", "runtime initialization start");
         setHostManager(self.hostManager.clone());
         if let Some(storage) = self.hostManager.runtimeStorageHost.clone() {
             if let Err(error) =
@@ -325,7 +325,7 @@ impl OperitApplication {
         let cleanupStartedAt = currentTimeMillis();
         self.configureOpenMpEnvironment();
         self.cleanOnExitFiles()?;
-        AppLogger::i(
+        AppLogger::v(
             "OperitApplication",
             &format!(
                 "clean on-exit files done elapsedMs={}",
@@ -344,7 +344,7 @@ impl OperitApplication {
             RuntimeStorePaths::default(),
         )?;
         self.preloadDatabase();
-        AppLogger::i(
+        AppLogger::v(
             "OperitApplication",
             &format!(
                 "database preload done elapsedMs={}",
@@ -353,9 +353,9 @@ impl OperitApplication {
         );
         let mut toolHandler = self.toolHandler.clone();
         let toolRegistrationStartedAt = currentTimeMillis();
-        AppLogger::i("OperitApplication", "default tool registration start");
+        AppLogger::v("OperitApplication", "default tool registration start");
         toolHandler.registerDefaultTools();
-        AppLogger::i(
+        AppLogger::v(
             "OperitApplication",
             &format!(
                 "default tool registration done elapsedMs={}",
@@ -363,10 +363,10 @@ impl OperitApplication {
             ),
         );
         let pluginInitializationStartedAt = currentTimeMillis();
-        AppLogger::i("OperitApplication", "built-in plugin initialization start");
+        AppLogger::v("OperitApplication", "built-in plugin initialization start");
         PluginRegistry::initializeBuiltins(self.toolPkgBridgeRuntime.clone());
         crate::plugins::toolpkg::ToolPkgChatLifecycleHookBridge::ToolPkgChatLifecycleHookBridge::register(self.toolPkgBridgeRuntime.clone())?;
-        AppLogger::i(
+        AppLogger::v(
             "OperitApplication",
             &format!(
                 "built-in plugin initialization done elapsedMs={}",
@@ -384,14 +384,14 @@ impl OperitApplication {
             }),
         );
         let runtimeEventRegistrationStartedAt = currentTimeMillis();
-        AppLogger::i("OperitApplication", "host runtime event registration start");
+        AppLogger::v("OperitApplication", "host runtime event registration start");
         self.hostRuntimeEventRegistration =
             crate::services::RuntimeEventIngressService::RuntimeEventIngressService::startHostRuntimeEventSupport(
                 self.hostManager.clone(),
                 self.toolPkgBridgeRuntime.clone(),
             )?
             .map(|registration| Arc::new(Mutex::new(registration)));
-        AppLogger::i(
+        AppLogger::v(
             "OperitApplication",
             &format!(
                 "host runtime event registration done elapsedMs={}",
@@ -854,7 +854,12 @@ impl OperitApplication {
         let clock: SyncClock = serde_json::from_value(clock).map_err(|error| error.to_string())?;
         let store = self.runtimeSyncOperationStore()?;
         let mut operations = store
-            .operationsSince(&clock, &domains, limit)
+            .operationsSinceWithBudget(
+                &clock,
+                &domains,
+                limit,
+                operit_store::SyncOperationStore::DEFAULT_SYNC_PAGE_BYTES,
+            )
             .map_err(|error| error.to_string())?;
         let sqlStore = SqlChatSyncStore::default().map_err(|error| error.to_string())?;
         operations.extend(
@@ -863,8 +868,14 @@ impl OperitApplication {
                 .map_err(|error| error.to_string())?,
         );
         operations.extend(
-            PluginStorage::operationsSince(self.pluginSqliteHost()?, &clock, &domains, limit)
-                .map_err(|e| e.to_string())?,
+            PluginStorage::operationsSinceWithBudget(
+                self.pluginSqliteHost()?,
+                &clock,
+                &domains,
+                limit,
+                operit_store::SyncOperationStore::DEFAULT_SYNC_PAGE_BYTES,
+            )
+            .map_err(|e| e.to_string())?,
         );
         operations.retain(|operation| {
             !crate::data::backup::CharacterPluginMigration::isRetiredCharacterOperation(operation)
@@ -877,7 +888,15 @@ impl OperitApplication {
         });
         operations = compactSyncOperations(operations);
         operations.truncate(limit);
-        serde_json::to_value(operations).map_err(|error| error.to_string())
+        // Bound the page by bytes as well as by count: one transaction can be
+        // hundreds of KiB, so a count-only page has no memory ceiling. The first
+        // operation always travels even when it alone exceeds the budget; the
+        // send path reports an operation that cannot fit any message.
+        let page = boundSyncOperationPage(
+            operations,
+            operit_store::SyncOperationStore::DEFAULT_SYNC_PAGE_BYTES,
+        );
+        serde_json::to_value(page).map_err(|error| error.to_string())
     }
 
     /// Applies incoming sync operations to their owning persistent stores.

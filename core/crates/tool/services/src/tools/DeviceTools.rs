@@ -81,9 +81,10 @@ impl AIToolHandler {
         origin: &str,
     ) -> JsToolCallResult {
         let call = ToolCall { name: request.qualified_tool_name(), parameters: request.parameters };
-        operit_util::AppLogger::AppLogger::d(
+        operit_util::AppLogger::AppLogger::v_with_level(
             "DeviceTools",
             &format!("Direct execution {} from authenticated node {origin}", call.name),
+            operit_util::AppLogger::VERBOSE_LEVEL_3,
         );
         match self.executeToolInvocation(&call, ToolExecutionPolicy::Direct).await {
             Ok(results) => result_to_js(results.into_iter().last()

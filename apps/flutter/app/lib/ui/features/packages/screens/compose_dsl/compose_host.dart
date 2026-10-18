@@ -180,12 +180,13 @@ class _ComposeHostState extends State<_ComposeHost> {
           return;
         }
         watch.stop();
-        ClientLogger.i(
+        ClientLogger.v(
           'event=compose_onload_frame package=${owner.packageName} '
           'context=${owner.executionContextKey} elapsedMs=${watch.elapsedMilliseconds} '
           'actionMs=${(actionMicros / 1000).toStringAsFixed(3)} '
           'frameWaitMs=${((watch.elapsedMicroseconds - actionMicros) / 1000).toStringAsFixed(3)}',
           tag: 'ToolPkgUiLauncher',
+          verboseLevel: VerboseLevel.level4,
         );
       });
     });

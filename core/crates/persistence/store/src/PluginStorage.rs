@@ -1,6 +1,9 @@
-//! Plugin-owned SQLite, object collections and atomic keys over the existing Host.
+//! Plugin-owned databases and native JSON preferences over the existing Host.
 #![allow(non_snake_case)]
+#[path = "PluginDataStore.rs"]
+mod data_store;
 
+use crate::MergeRules::{canonicalContent, uniqueNames};
 use crate::SqliteStore::{SqliteRowGet, SqliteStore, SqliteStoreError, SqliteTransaction};
 use crate::SyncOperationStore::{
     subscribeSyncMutations, SyncClock, SyncOperation,
@@ -9,6 +12,8 @@ use crate::SyncOperationStore::{
 use operit_host_api::PluginStorage::*;
 use operit_host_api::{RuntimeSqliteHost, RuntimeStorageHost, SqliteValue};
 use operit_util::RuntimeStorageLayout::{runtimeStorageOwnership, RuntimeStorageOwnership, PLUGIN_DATA_SPACE_DIR_PATH, PLUGIN_DATA_DEVICE_DIR_PATH};
+pub use operit_util::PluginStoragePaths::resolveStoragePath;
+use operit_util::PluginStoragePaths::storageNamespace;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlparser::{
@@ -43,7 +48,14 @@ CREATE TABLE IF NOT EXISTS plugin_databases (path TEXT PRIMARY KEY, owner TEXT N
 /// Owns all handles for one authenticated JavaScript execution host.
 #[derive(Clone, Default)]
 pub struct PluginStorageSession {
-    handles: Arc<Mutex<BTreeMap<String, Arc<Database>>>>,
+    handles: Arc<Mutex<BTreeMap<String, Handle>>>,
+}
+
+#[derive(Clone)]
+/// Retains the selected persistence engine rather than disguising key storage as SQLite.
+enum Handle {
+    Database(Arc<Database>),
+    DataStore(Arc<data_store::DataStore>),
 }
 
 struct Database {
@@ -98,45 +110,7 @@ fn kindName(kind: &StorageKind) -> &'static str {
     match kind {
         StorageKind::Sqlite => "sqlite",
         StorageKind::Objects => "objects",
-        StorageKind::DataStore => "data_store",
     }
-}
-
-/// Validates supported persistent data paths without restricting access by the calling plugin identity.
-pub fn resolveStoragePath(path: &str) -> Result<String, SqliteStoreError> {
-    let path = path.replace('\\', "/");
-    if path.is_empty()
-        || path.split('/').any(|segment| {
-            segment.is_empty()
-                || segment == "."
-                || segment == ".."
-                || segment.chars().any(char::is_control)
-        })
-    {
-        return Err(failure("Storage path contains invalid segments"));
-    }
-    storageNamespace(&path)?;
-    if [".operit-storage.json", "-wal", "-shm", "-journal"]
-        .iter()
-        .any(|suffix| path.ends_with(suffix))
-    {
-        return Err(failure("Storage path uses a reserved sidecar suffix"));
-    }
-    Ok(path)
-}
-
-/// Reads the durable data namespace from the canonical path independently of the script opening it.
-fn storageNamespace(path: &str) -> Result<&str, SqliteStoreError> {
-    for root in [PLUGIN_DATA_SPACE_DIR_PATH, PLUGIN_DATA_DEVICE_DIR_PATH] {
-        if let Some(relative) = path.strip_prefix(&format!("{root}/")) {
-            let (namespace, file) = relative.split_once('/')
-                .ok_or_else(|| failure("Storage path requires a namespace and database filename"))?;
-            if !namespace.is_empty() && !file.is_empty() {
-                return Ok(namespace);
-            }
-        }
-    }
-    Err(failure("Databases must use persistent plugin_data directories independent of installation scope"))
 }
 
 /// Opens the node-local catalog used for storage discovery, export and file exclusions.
@@ -712,7 +686,7 @@ impl Database {
             }
         }
         if let Some(descriptor) = &self.merge {
-            rememberPayloadNames(tx, descriptor, &tables, &changes)?;
+            rememberPayloadNames(tx, self.kind, descriptor, &changes)?;
         }
         let payload = serde_json::to_string(&Payload {
             manifest: self.manifest(),
@@ -726,6 +700,48 @@ impl Database {
 }
 
 impl PluginStorageSession {
+    /// Identifies native preference requests without requiring a SQLite host registration.
+    pub fn isPreferencesRequest(&self, request: &StorageRequest) -> Result<bool, SqliteStoreError> {
+        match request {
+            StorageRequest::OpenPreferences { .. } | StorageRequest::PreferencesData { .. }
+            | StorageRequest::PreferencesBeginEdit { .. } | StorageRequest::PreferencesFinishEdit { .. }
+            | StorageRequest::PreferencesCancelEdit { .. } => Ok(true),
+            StorageRequest::Close { handle } => {
+                let handles = self.handles.lock().map_err(|_| failure("Storage handles poisoned"))?;
+                let owned = handles.get(handle).ok_or_else(|| failure("Unknown or closed storage handle"))?;
+                Ok(matches!(owned, Handle::DataStore(_)))
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Executes native JSON preference operations using only the existing filesystem host abstraction.
+    pub fn requestPreferences(&self, storage: Arc<dyn RuntimeStorageHost>, request: StorageRequest) -> Result<StorageResponse, SqliteStoreError> {
+        if let StorageRequest::OpenPreferences { path, merge } = &request {
+            let path = resolveStoragePath(path).map_err(failure)?;
+            let store = Arc::new(data_store::DataStore::open(storage, &path, merge.as_ref())?);
+            let handle = Uuid::new_v4().to_string();
+            self.handles.lock().map_err(|_| failure("Storage handles poisoned"))?
+                .insert(handle.clone(), Handle::DataStore(store));
+            return Ok(StorageResponse::Open(StorageOpenResult { handle, path }));
+        }
+        let handle = match &request {
+            StorageRequest::Close { handle } | StorageRequest::PreferencesData { handle }
+            | StorageRequest::PreferencesBeginEdit { handle } | StorageRequest::PreferencesFinishEdit { handle, .. }
+            | StorageRequest::PreferencesCancelEdit { handle, .. } => handle,
+            _ => return Err(failure("Native preference requests require DataStore operations")),
+        };
+        let owned = self.handles.lock().map_err(|_| failure("Storage handles poisoned"))?
+            .get(handle).cloned().ok_or_else(|| failure("Unknown or closed storage handle"))?;
+        let Handle::DataStore(store) = owned else { return Err(failure("Preference operations require a DataStore handle")); };
+        if matches!(&request, StorageRequest::Close { .. }) {
+            self.handles.lock().map_err(|_| failure("Storage handles poisoned"))?.remove(handle);
+            publishSyncMutation();
+            return Ok(StorageResponse::Close);
+        }
+        store.request(request)
+    }
+
     /// Emits an atomic initial record and waits only for changes to that database, collection and key.
     pub async fn waitForRecord(
         &self,
@@ -746,6 +762,15 @@ impl PluginStorageSession {
                 let database = self.handles.lock()
                     .map_err(|_| failure("Storage handle registry is poisoned"))?
                     .get(&handle).cloned().ok_or_else(|| failure("Storage handle is not active"))?;
+                let database = match database {
+                    Handle::DataStore(store) => {
+                        if collection != "__preferences" || key != "snapshot" {
+                            return Err(failure("DataStore observations require a complete preferences snapshot"));
+                        }
+                        return store.watchSnapshot().map(Some);
+                    }
+                    Handle::Database(database) => database,
+                };
                 validateCollection(&database, &collection)?;
                 database.store.transaction(|tx| {
                     let row = tx.queryOne(
@@ -779,8 +804,10 @@ impl PluginStorageSession {
         request: StorageRequest,
         deviceId: &str,
     ) -> Result<StorageResponse, SqliteStoreError> {
+        if self.isPreferencesRequest(&request)? { return self.requestPreferences(storage, request); }
         if let StorageRequest::Open { path, kind, merge } = &request {
-            let path = resolveStoragePath(path)?;
+            let path = resolveStoragePath(path).map_err(failure)?;
+            if path.ends_with(".preferences.json") {return Err(failure("Preference JSON paths require a DataStore handle"));}
             let sync = match runtimeStorageOwnership(&path).map_err(failure)? {
                 RuntimeStorageOwnership::Space => true,
                 RuntimeStorageOwnership::CoreNode => false,
@@ -792,7 +819,7 @@ impl PluginStorageSession {
             };
             let manifest = Manifest {
                 path: path.clone(),
-                owner: storageNamespace(&path)?.to_string(),
+                owner: storageNamespace(&path).map_err(failure)?.to_string(),
                 kind: *kind,
                 sync,
                 merge: merge.clone(),
@@ -809,19 +836,24 @@ impl PluginStorageSession {
             self.handles
                 .lock()
                 .map_err(|_| failure("Storage handles poisoned"))?
-                .insert(handle.clone(), database);
+                .insert(handle.clone(), Handle::Database(database));
             return Ok(StorageResponse::Open(StorageOpenResult { handle, path }));
         }
         let handle = match &request {
-            StorageRequest::Close { handle }
+            StorageRequest::PreferencesData { handle }
+            | StorageRequest::PreferencesBeginEdit { handle }
+            | StorageRequest::PreferencesFinishEdit { handle, .. }
+            | StorageRequest::PreferencesCancelEdit { handle, .. }
+            | StorageRequest::Close { handle }
             | StorageRequest::Query { handle, .. }
             | StorageRequest::Execute { handle, .. }
             | StorageRequest::Transaction { handle, .. }
             | StorageRequest::DefineTable { handle, .. }
             | StorageRequest::Get { handle, .. }
+            | StorageRequest::GetMany { handle, .. }
             | StorageRequest::List { handle, .. }
             | StorageRequest::Commit { handle, .. } => handle,
-            StorageRequest::Open { .. } => unreachable!(),
+            StorageRequest::Open { .. } | StorageRequest::OpenPreferences { .. } => unreachable!(),
         };
         let database = self
             .handles
@@ -838,10 +870,33 @@ impl PluginStorageSession {
             publishSyncMutation();
             return Ok(StorageResponse::Close);
         }
-        resolveStoragePath(&database.path)?;
+        let database = match database {
+            Handle::DataStore(store) => {
+                return store.request(request);
+            }
+            Handle::Database(database) => database,
+        };
+        resolveStoragePath(&database.path).map_err(failure)?;
         if !storage.exists(&database.path)? || !ownsFile(storage.clone(), &database.path)? {
             return Err(failure("Storage database has been removed"));
         }
+        let request = match request {
+            StorageRequest::Query { statement, .. } => {
+                if database.kind != StorageKind::Sqlite {
+                    return Err(failure("SQL access requires a SQLite handle"));
+                }
+                validateStatement(&statement, true, database.sync)?;
+                let rows = database.store.queryRows(
+                    &statement.sql,
+                    statement.params.into_iter().map(sqlValue).collect::<Result<Vec<_>, _>>()?,
+                )?;
+                return Ok(StorageResponse::Query(rows.into_iter().map(|row| StorageSqlRow {
+                    columns: row.columns,
+                    values: row.values.into_iter().map(wireValue).collect(),
+                }).collect()));
+            }
+            request => request,
+        };
         let mutating = matches!(
             &request,
             StorageRequest::Execute { .. }
@@ -850,12 +905,6 @@ impl PluginStorageSession {
                 | StorageRequest::Commit { .. }
         );
         let result = database.store.transaction(|tx| match request {
-            StorageRequest::Query {statement,..} => {
-                if database.kind != StorageKind::Sqlite { return Err(failure("SQL access requires a SQLite handle")); }
-                validateStatement(&statement,true,database.sync)?;
-                let rows = tx.queryRows(&statement.sql,statement.params.into_iter().map(sqlValue).collect::<Result<Vec<_>,_>>()?)?;
-                Ok(StorageResponse::Query(rows.into_iter().map(|row| StorageSqlRow { columns: row.columns, values: row.values.into_iter().map(wireValue).collect() }).collect()))
-            }
             StorageRequest::Execute {statement,..} => executeStatements(&database, tx, vec![statement]).map(StorageResponse::Execute),
             StorageRequest::Transaction {statements, when_absent, ..} => {
                 if let Some(identity) = when_absent {
@@ -879,12 +928,15 @@ impl PluginStorageSession {
             }
             StorageRequest::Get {collection,key,..} => {
                 validateCollection(&database, &collection)?;
-                let row = tx.queryOne("SELECT value,version FROM _operit_values WHERE collection=?1 AND key=?2", vec![SqliteValue::Text(collection),SqliteValue::Text(key)])?;
-                let entry = row.map(|row| -> Result<StorageValueEntry, SqliteStoreError> { Ok(StorageValueEntry {
-                    value: serde_json::from_str(&row.get::<_, String>(0)?).map_err(|error| failure(error.to_string()))?,
-                    version: row.get::<_, String>(1)?,
-                }) }).transpose()?;
-                Ok(StorageResponse::Get(entry))
+                readValue(tx, &collection, &key).map(StorageResponse::Get)
+            }
+            StorageRequest::GetMany {collection,keys,..} => {
+                validateCollection(&database, &collection)?;
+                if keys.is_empty() || keys.len() > 1000 {
+                    return Err(failure("Object batch read requires 1..1000 keys"));
+                }
+                keys.iter().map(|key| readValue(tx, &collection, key))
+                    .collect::<Result<Vec<_>, _>>().map(StorageResponse::GetMany)
             }
             StorageRequest::List {collection,after,limit,..} => {
                 validateCollection(&database, &collection)?; bounded(limit)?;
@@ -899,13 +951,41 @@ impl PluginStorageSession {
                 })).collect::<Result<Vec<_>, SqliteStoreError>>().map(StorageResponse::List)
             }
             StorageRequest::Commit {mutations,..} => commitValues(&database,tx,mutations).map(StorageResponse::Commit),
-            StorageRequest::Open {..} | StorageRequest::Close {..} => unreachable!(),
+            StorageRequest::PreferencesData { .. }
+            | StorageRequest::PreferencesBeginEdit { .. }
+            | StorageRequest::PreferencesFinishEdit { .. }
+            | StorageRequest::PreferencesCancelEdit { .. } => Err(failure("Preference operations require a DataStore handle")),
+            StorageRequest::Open {..} | StorageRequest::OpenPreferences {..} | StorageRequest::Close {..} | StorageRequest::Query {..} => unreachable!(),
         })?;
         if mutating {
             publishSyncMutation();
         }
         Ok(result)
     }
+}
+
+/// Reads an exact object identity from the transaction snapshot shared by a batch.
+fn readValue(
+    tx: &mut SqliteTransaction<'_>,
+    collection: &str,
+    key: &str,
+) -> Result<Option<StorageValueEntry>, SqliteStoreError> {
+    validateObjectKey(key)?;
+    tx.queryOne(
+        "SELECT value,version FROM _operit_values WHERE collection=?1 AND key=?2",
+        vec![SqliteValue::Text(collection.into()), SqliteValue::Text(key.into())],
+    )?.map(|row| Ok(StorageValueEntry {
+        value: serde_json::from_str(&row.get::<_, String>(0)?).map_err(|error| failure(error.to_string()))?,
+        version: row.get::<_, String>(1)?,
+    })).transpose()
+}
+
+/// Enforces the same exact object-key contract for reads and writes.
+fn validateObjectKey(key: &str) -> Result<(), SqliteStoreError> {
+    if key.is_empty() || key.len() > 1024 || key.chars().any(char::is_control) {
+        return Err(failure("Invalid object key"));
+    }
+    Ok(())
 }
 
 /// Bounds pagination without substituting a default for malformed requests.
@@ -920,14 +1000,11 @@ fn bounded(limit: u32) -> Result<(), SqliteStoreError> {
 fn validateCollection(database: &Database, collection: &str) -> Result<(), SqliteStoreError> {
     if database.kind == StorageKind::Sqlite {
         return Err(failure(
-            "Object operations require an object or DataStore handle",
+            "Object operations require an object database handle",
         ));
     }
     if collection.is_empty() || collection.len() > 256 || collection.chars().any(char::is_control) {
         return Err(failure("Invalid collection"));
-    }
-    if database.kind == StorageKind::DataStore && collection != "keys" {
-        return Err(failure("DataStore collection must be keys"));
     }
     Ok(())
 }
@@ -997,12 +1074,9 @@ fn commitValues(
                 "Storage mutation has inconsistent deletion or version metadata",
             ));
         }
-        if mutation.key.is_empty()
-            || mutation.key.len() > 1024
-            || mutation.key.chars().any(char::is_control)
-            || !seen.insert((mutation.collection.clone(), mutation.key.clone()))
-        {
-            return Err(failure("Invalid or duplicated mutation key"));
+        validateObjectKey(&mutation.key)?;
+        if !seen.insert((mutation.collection.clone(), mutation.key.clone())) {
+            return Err(failure("Duplicated mutation key"));
         }
         let args = vec![
             SqliteValue::Text(mutation.collection.clone()),
@@ -1053,7 +1127,6 @@ fn manifests(host: Arc<dyn RuntimeSqliteHost>) -> Result<Vec<Manifest>, SqliteSt
             let kind = match row.get::<_, String>(2)?.as_str() {
                 "sqlite" => StorageKind::Sqlite,
                 "objects" => StorageKind::Objects,
-                "data_store" => StorageKind::DataStore,
                 _ => return Err(failure("Unknown registered storage kind")),
             };
             Ok(Manifest {
@@ -1077,6 +1150,10 @@ pub fn ownsFile(host: Arc<dyn RuntimeStorageHost>, path: &str) -> Result<bool, S
         .iter()
         .find_map(|suffix| path.strip_suffix(suffix))
         .unwrap_or(path);
+    if database.ends_with(".preferences.json") && [PLUGIN_DATA_SPACE_DIR_PATH, PLUGIN_DATA_DEVICE_DIR_PATH].iter().any(|root| database.strip_prefix(root).is_some_and(|relative| relative.starts_with('/'))) {
+        resolveStoragePath(database).map_err(failure)?;
+        return Ok(true);
+    }
     let marker = format!("{database}.operit-storage.json");
     if !host.exists(&marker)? {
         return Ok(false);
@@ -1150,31 +1227,112 @@ pub fn operationsSince(
     domains: &[String],
     limit: usize,
 ) -> Result<Vec<SyncOperation>, SqliteStoreError> {
+    operationsSinceWithBudget(host, clock, domains, limit, usize::MAX)
+}
+
+/// Exports one byte-bounded page of record transactions.
+///
+/// The page is planned from outbox metadata first and only the selected payloads
+/// are parsed, so one large transaction cannot make a store materialize
+/// `limit × origins` operations before the page is truncated. The first
+/// operation is always kept even when it alone exceeds `maxBytes`: the send path
+/// reports an operation that cannot fit any message instead of stalling here.
+pub fn operationsSinceWithBudget(
+    host: Arc<dyn RuntimeSqliteHost>,
+    clock: &SyncClock,
+    domains: &[String],
+    limit: usize,
+    maxBytes: usize,
+) -> Result<Vec<SyncOperation>, SqliteStoreError> {
     if !domains.is_empty() && !domains.iter().any(|d| d == PLUGIN_STORAGE_SYNC_DOMAIN) {
         return Ok(Vec::new());
     }
-    let mut operations = Vec::new();
-    for manifest in manifests(host.clone())?.into_iter().filter(|m| m.sync) {
-        let store = SqliteStore::openWithHost(host.clone(), &manifest.path)?;
+    struct PlannedOperation {
+        store: usize,
+        origin: String,
+        sequence: i64,
+        createdAt: i64,
+        bytes: usize,
+    }
+    let stores = manifests(host.clone())?
+        .into_iter()
+        .filter(|manifest| manifest.sync)
+        .map(|manifest| SqliteStore::openWithHost(host.clone(), &manifest.path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut planned = Vec::new();
+    for (storeIndex, store) in stores.iter().enumerate() {
         for originRow in store.queryRows(
             "SELECT DISTINCT origin FROM _operit_log WHERE outgoing=1",
             Vec::new(),
         )? {
             let origin: String = originRow.get(0)?;
-            for row in store.queryRows("SELECT sequence,created_at,payload FROM _operit_log WHERE origin=?1 AND sequence>?2 AND outgoing=1 ORDER BY sequence LIMIT ?3",vec![SqliteValue::Text(origin.clone()),SqliteValue::Integer(clock.sequenceFor(&origin)),SqliteValue::Integer(i64::try_from(limit).map_err(|_|failure("Sync limit overflows int64"))?)])? {
-                let sequence:i64=row.get(0)?;
-                operations.push(SyncOperation {opId:format!("{origin}:{sequence}"),originDeviceId:origin.clone(),sequence,domain:PLUGIN_STORAGE_SYNC_DOMAIN.into(),entityType:"transaction".into(),entityId:format!("{origin}:{sequence}"),operation:"commit".into(),semantics:SyncOperationSemantics::Transaction,payload:serde_json::from_str(&row.get::<_,String>(2)?).map_err(|e|failure(e.to_string()))?,createdAt:row.get(1)?,schemaVersion:1});
+            for row in store.queryRows(
+                "SELECT sequence,created_at,length(payload) FROM _operit_log WHERE origin=?1 AND sequence>?2 AND outgoing=1 ORDER BY sequence LIMIT ?3",
+                vec![
+                    SqliteValue::Text(origin.clone()),
+                    SqliteValue::Integer(clock.sequenceFor(&origin)),
+                    SqliteValue::Integer(i64::try_from(limit).map_err(|_| failure("Sync limit overflows int64"))?),
+                ],
+            )? {
+                planned.push(PlannedOperation {
+                    store: storeIndex,
+                    origin: origin.clone(),
+                    sequence: row.get(0)?,
+                    createdAt: row.get(1)?,
+                    bytes: usize::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
+                });
             }
         }
     }
-    operations.sort_by(|a, b| {
-        (a.createdAt, &a.originDeviceId, a.sequence).cmp(&(
-            b.createdAt,
-            &b.originDeviceId,
-            b.sequence,
+    planned.sort_by(|left, right| {
+        (left.createdAt, &left.origin, left.sequence).cmp(&(
+            right.createdAt,
+            &right.origin,
+            right.sequence,
         ))
     });
-    operations.truncate(limit);
+    let mut selected = Vec::new();
+    let mut bytes = 0usize;
+    for operation in planned {
+        if selected.len() >= limit {
+            break;
+        }
+        if !selected.is_empty() && bytes.saturating_add(operation.bytes) > maxBytes {
+            break;
+        }
+        bytes = bytes.saturating_add(operation.bytes);
+        selected.push(operation);
+    }
+    let mut operations = Vec::with_capacity(selected.len());
+    for operation in selected {
+        let sequence = operation.sequence;
+        let payload: String = stores[operation.store]
+            .queryRows(
+                "SELECT payload FROM _operit_log WHERE origin=?1 AND sequence=?2",
+                vec![
+                    SqliteValue::Text(operation.origin.clone()),
+                    SqliteValue::Integer(sequence),
+                ],
+            )
+            .map_err(|error| failure(error.to_string()))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| failure("Missing synchronization payload"))?
+            .get(0)?;
+        operations.push(SyncOperation {
+            opId: format!("{}:{sequence}", operation.origin),
+            originDeviceId: operation.origin.clone(),
+            sequence,
+            domain: PLUGIN_STORAGE_SYNC_DOMAIN.into(),
+            entityType: "transaction".into(),
+            entityId: format!("{}:{sequence}", operation.origin),
+            operation: "commit".into(),
+            semantics: SyncOperationSemantics::Transaction,
+            payload: serde_json::from_str(&payload).map_err(|error| failure(error.to_string()))?,
+            createdAt: operation.createdAt,
+            schemaVersion: 1,
+        });
+    }
     Ok(operations)
 }
 
@@ -1356,7 +1514,6 @@ fn validatePayload(payload: &Payload) -> Result<(), SqliteStoreError> {
         } else if change.collection.is_empty()
             || change.collection.len() > 256
             || change.collection.chars().any(char::is_control)
-            || (payload.manifest.kind == StorageKind::DataStore && change.collection != "keys")
         {
             return Err(failure("Invalid remote storage collection"));
         }
@@ -1379,97 +1536,51 @@ fn validateMergeDescriptor(
     {
         return Err(failure("Invalid storage merge contract bounds"));
     }
-    let mut declaredTables = BTreeMap::<String, StorageTable>::new();
-    for table in &payload.tables {
-        declaredTables.insert(table.name.clone(), table.clone());
-    }
-    for row in tx.queryRows("SELECT name,definition FROM _operit_tables", Vec::new())? {
-        let name: String = row.get(0)?;
-        let table: StorageTable = serde_json::from_str(&row.get::<_, String>(1)?)
-            .map_err(|error| failure(error.to_string()))?;
-        declaredTables.insert(name, table);
-    }
-    let tables = declaredTables.keys().map(String::as_str).collect::<BTreeSet<_>>();
     let mut entityNames = BTreeSet::new();
     let mut referenceCount = 0usize;
     for entity in &descriptor.entities {
-        if !entityNames.insert(entity.collection.as_str())
-            || !tables.contains(entity.collection.as_str())
-            || identifier(&entity.collection).is_err()
-            || identifier(&entity.identity_column).is_err()
-        {
+        if !entityNames.insert(entity.collection.as_str()) || identifier(&entity.collection).is_err() {
             return Err(failure("Invalid storage merge entity declaration"));
         }
-        let table = declaredTables
-            .get(&entity.collection)
-            .ok_or_else(|| failure("Storage merge entity table is not declared"))?;
-        if !table
-            .columns
-            .iter()
-            .any(|column| column.name == entity.identity_column)
-            || entity
-                .name_column
-                .as_ref()
-                .is_some_and(|column| !table.columns.iter().any(|item| &item.name == column))
-        {
-            return Err(failure("Storage merge entity column is not declared"));
+        let collection = MergeCollection::open(tx, payload.manifest.kind, &entity.collection)?;
+        collection.validateField(&entity.identity_column)?;
+        if let Some(name) = &entity.name_column { collection.validateField(name)?; }
+        if payload.manifest.kind == StorageKind::Objects &&
+            std::iter::once(&entity.identity_column).chain(entity.ignored_columns.iter()).any(|field| field.contains('/') || field == "*") {
+            return Err(failure("JSON entity identities and content exclusions must declare direct fields"));
         }
         let mut ignored = BTreeSet::new();
-        for column in &entity.ignored_columns {
-            if !ignored.insert(column.as_str())
-                || !table.columns.iter().any(|item| item.name == *column)
-            {
-                return Err(failure("Invalid storage merge ignored column"));
+        for field in &entity.ignored_columns {
+            if !ignored.insert(field.as_str()) { return Err(failure("Duplicate storage merge ignored field")); }
+            collection.validateField(field)?;
+        }
+        for reference in &entity.key_references {
+            if reference.prefix.chars().any(char::is_control) { return Err(failure("Invalid storage merge key reference prefix")); }
+            match &reference.target {
+                StorageMergeTarget::Collection { collection } if !descriptor.entities.iter().any(|item| item.collection == *collection) => return Err(failure("Undeclared storage merge key target")),
+                StorageMergeTarget::Preference { path } if !path.starts_with("runtime/") || !path.ends_with(".preferences.json") || path.len() > 512 || path.chars().any(char::is_control) || path.split('/').any(|part| part.is_empty() || part == "." || part == "..") => return Err(failure("Invalid storage merge preference key target")),
+                _ => {}
             }
         }
-        for keyReference in &entity.key_references {
-            if keyReference.prefix.chars().any(char::is_control)
-                || !descriptor.entities.iter().any(|item| item.collection == keyReference.collection)
-            {
-                return Err(failure("Invalid storage merge key reference"));
-            }
-        }
-        let mut childCollections = BTreeSet::new();
+        let mut children = BTreeSet::new();
         for child in &entity.child_collections {
-            if !childCollections.insert(child.as_str())
-                || child == &entity.collection
-                || !tables.contains(child.as_str())
-            {
+            if !children.insert(child.as_str()) || child == &entity.collection || identifier(child).is_err() {
                 return Err(failure("Invalid storage merge child collection declaration"));
             }
+            MergeCollection::open(tx, payload.manifest.kind, child)?;
         }
         for reference in &entity.references {
             referenceCount += 1;
-            if referenceCount > descriptor.max_references as usize
-                || identifier(&reference.collection).is_err()
-                || identifier(&reference.column).is_err()
-                || !tables.contains(reference.collection.as_str())
-            {
+            if referenceCount > descriptor.max_references as usize || identifier(&reference.collection).is_err() {
                 return Err(failure("Invalid storage merge reference declaration"));
             }
-            let referenceTable = declaredTables
-                .get(&reference.collection)
-                .ok_or_else(|| failure("Storage merge reference table is not declared"))?;
-            if !referenceTable
-                .columns
-                .iter()
-                .any(|column| column.name == reference.column)
-            {
-                return Err(failure("Storage merge reference column is not declared"));
-            }
-            if reference.key_prefix.chars().any(char::is_control)
-                || reference.key_suffix.chars().any(char::is_control)
-            {
+            MergeCollection::open(tx, payload.manifest.kind, &reference.collection)?.validateField(&reference.column)?;
+            if reference.key_prefix.chars().any(char::is_control) || reference.key_suffix.chars().any(char::is_control) {
                 return Err(failure("Invalid storage merge reference wrapper"));
             }
             match &reference.target {
                 StorageMergeTarget::Collection { collection } => {
-                    if !entityNames.contains(collection.as_str())
-                        && !descriptor
-                            .entities
-                            .iter()
-                            .any(|item| item.collection == *collection)
-                    {
+                    if !descriptor.entities.iter().any(|item| item.collection == *collection) {
                         return Err(failure("Storage merge target collection is not declared"));
                     }
                 }
@@ -1484,13 +1595,151 @@ fn validateMergeDescriptor(
     let mut resolved = BTreeSet::new();
     for _ in 0..descriptor.entities.len() {
         for entity in &descriptor.entities {
-            if entity.key_references.iter().all(|reference| resolved.contains(&reference.collection)) {
+            if entity.key_references.iter().all(|reference| match &reference.target { StorageMergeTarget::Collection { collection } => resolved.contains(collection), StorageMergeTarget::Preference { .. } => true }) {
                 resolved.insert(entity.collection.clone());
             }
         }
     }
     if resolved.len() != descriptor.entities.len() {
         return Err(failure("Storage merge identity ownership graph contains a cycle"));
+    }
+    Ok(())
+}
+
+/// Adapts physical records to the existing merge algorithm without defining another merge policy.
+struct MergeCollection {
+    name: String,
+    table: Option<StorageTable>,
+}
+
+impl MergeCollection {
+    /// Opens the explicitly selected record representation for one collection.
+    fn open(tx: &mut SqliteTransaction<'_>, kind: StorageKind, name: &str) -> Result<Self, SqliteStoreError> {
+        let table = match kind {
+            StorageKind::Sqlite => {
+                let row = tx.queryOne("SELECT definition FROM _operit_tables WHERE name=?1", vec![SqliteValue::Text(name.into())])?
+                    .ok_or_else(|| failure("Storage merge table is not declared"))?;
+                Some(serde_json::from_str(&row.get::<_, String>(0)?).map_err(|error| failure(error.to_string()))?)
+            }
+            StorageKind::Objects => None,
+        };
+        Ok(Self { name: name.into(), table })
+    }
+
+    /// Validates a SQL column or a bounded JSON field selector in the selected representation.
+    fn validateField(&self, path: &str) -> Result<(), SqliteStoreError> {
+        if let Some(table) = &self.table { columnIndex(table, path)?; }
+        else if path.is_empty() || path.len() > 512 || path.split('/').count() > 32
+            || path.split('/').any(|field| field.is_empty() || field.chars().any(char::is_control)) {
+            return Err(failure("Invalid storage merge JSON field selector"));
+        }
+        Ok(())
+    }
+
+    /// Reads complete materialized records in deterministic key order.
+    fn read(&self, tx: &mut SqliteTransaction<'_>) -> Result<Vec<(String, Value)>, SqliteStoreError> {
+        match &self.table {
+            Some(table) => readTableRows(tx, table)?.into_iter().map(|(key, values)|
+                Ok((key, serde_json::to_value(values).map_err(|error| failure(error.to_string()))?))).collect(),
+            None => tx.queryRows("SELECT key,value FROM _operit_values WHERE collection=?1 ORDER BY key", vec![SqliteValue::Text(self.name.clone())])?
+                .into_iter().map(|row| Ok((row.get(0)?, serde_json::from_str(&row.get::<_, String>(1)?).map_err(|error| failure(error.to_string()))?))).collect(),
+        }
+    }
+
+    /// Reads a required scalar identity or display name from a declared field.
+    fn text(&self, value: &Value, field: &str) -> Result<String, SqliteStoreError> {
+        match &self.table {
+            Some(table) => textColumn(table, &serde_json::from_value::<Vec<StorageSqlValue>>(value.clone()).map_err(|error| failure(error.to_string()))?, field),
+            None => {
+                let mut current = value;
+                for part in field.split('/') {
+                    current = current.get(part).ok_or_else(|| failure("Storage merge required JSON field is missing"))?;
+                }
+                current.as_str().map(str::to_owned).ok_or_else(|| failure("Storage merge identity or name is not text"))
+            }
+        }
+    }
+
+    /// Rewrites only declared text references while leaving absent optional fields untouched.
+    fn mapText(&self, value: &mut Value, field: &str,
+        map: &mut impl FnMut(&str) -> Result<String, SqliteStoreError>) -> Result<(), SqliteStoreError> {
+        match &self.table {
+            Some(table) => {
+                let mut values: Vec<StorageSqlValue> = serde_json::from_value(value.clone()).map_err(|error| failure(error.to_string()))?;
+                let index = columnIndex(table, field)?;
+                if let StorageSqlValue::Text(text) = &values[index] { values[index] = StorageSqlValue::Text(map(text)?); }
+                *value = serde_json::to_value(values).map_err(|error| failure(error.to_string()))?;
+            }
+            None => visitMergeJson(value, &field.split('/').collect::<Vec<_>>(), &mut |value| {
+                if value.is_null() { return Ok(()); }
+                let text = value.as_str().ok_or_else(|| failure("Storage merge JSON reference is not text"))?;
+                *value = Value::String(map(text)?);
+                Ok(())
+            })?,
+        }
+        Ok(())
+    }
+
+    /// Uses the established content exclusions for either complete JSON or relational records.
+    fn content(&self, entity: &StorageMergeEntity, value: &Value) -> Result<String, SqliteStoreError> {
+        match &self.table {
+            Some(table) => entityContent(table, entity, &serde_json::from_value::<Vec<StorageSqlValue>>(value.clone()).map_err(|error| failure(error.to_string()))?),
+            None => {
+                canonicalContent(value, &entity.identity_column, entity.ignored_columns.iter().map(String::as_str))
+                    .map_err(failure)
+            }
+        }
+    }
+
+    /// Rewrites physical SQL ownership fields and the declared root identity without altering user content.
+    fn identity(&self, value: &mut Value, entity: &StorageMergeEntity, key: &str, old: &str, new: &str) -> Result<(), SqliteStoreError> {
+        if let Some(table) = &self.table {
+            self.mapText(value, &table.primary_key, &mut |_| Ok(key.into()))?;
+            for field in ["_root", "_parent"] {
+                if table.columns.iter().any(|column| column.name == field) {
+                    self.mapText(value, field, &mut |text| if text == old { Ok(new.into()) }
+                        else if field == "_parent" { rewriteChildKey(text, old, new, entity.key_encoding) } else { Ok(text.into()) })?;
+                }
+            }
+        }
+        if self.name == entity.collection {
+            self.text(value, &entity.identity_column)?;
+            self.mapText(value, &entity.identity_column, &mut |_| Ok(new.into()))?;
+        }
+        Ok(())
+    }
+
+    /// Writes a derived materialization without adding a synchronization operation.
+    fn write(&self, tx: &mut SqliteTransaction<'_>, key: &str, value: Option<&Value>) -> Result<(), SqliteStoreError> {
+        if self.table.is_some() {
+            return applyRow(tx, &Change { collection: self.name.clone(), key: key.into(), value: match value { Some(value) => value.clone(), None => Value::Null }, deleted: value.is_none() });
+        }
+        match value {
+            Some(value) => {
+                let encoded = serde_json::to_string(value).map_err(|error| failure(error.to_string()))?;
+                let version = Uuid::new_v4().to_string();
+                tx.execute("INSERT INTO _operit_values(collection,key,value,version) VALUES(?1,?2,?3,?4) ON CONFLICT(collection,key) DO UPDATE SET value=excluded.value,version=excluded.version",
+                    vec![SqliteValue::Text(self.name.clone()), SqliteValue::Text(key.into()), SqliteValue::Text(encoded), SqliteValue::Text(version)])?;
+            }
+            None => { tx.execute("DELETE FROM _operit_values WHERE collection=?1 AND key=?2", vec![SqliteValue::Text(self.name.clone()), SqliteValue::Text(key.into())])?; }
+        }
+        Ok(())
+    }
+}
+
+/// Traverses explicitly declared JSON fields and array or object members without inferring references.
+fn visitMergeJson(value: &mut Value, path: &[&str], visit: &mut impl FnMut(&mut Value) -> Result<(), SqliteStoreError>) -> Result<(), SqliteStoreError> {
+    let Some((field, tail)) = path.split_first() else { return visit(value); };
+    if value.is_null() { return Ok(()); }
+    if *field == "*" {
+        match value {
+            Value::Array(values) => for value in values { visitMergeJson(value, tail, visit)?; },
+            Value::Object(values) => for value in values.values_mut() { visitMergeJson(value, tail, visit)?; },
+            _ => return Err(failure("Storage merge wildcard requires a JSON array or object")),
+        }
+    } else {
+        let object = value.as_object_mut().ok_or_else(|| failure("Storage merge field selector requires a JSON object"))?;
+        if let Some(value) = object.get_mut(*field) { visitMergeJson(value, tail, visit)?; }
     }
     Ok(())
 }
@@ -1578,23 +1827,35 @@ fn entityContent(
 }
 
 /// Compares the actual ordered relational values rather than only their root-level element counts.
-fn sameEntityChildren(tx: &mut SqliteTransaction<'_>, entity: &StorageMergeEntity,
-    localKey: &str, remoteKey: &str, incoming: &[Change]) -> Result<bool, SqliteStoreError> {
-    for collection in &entity.child_collections {
-        let definition = tx.queryOne("SELECT definition FROM _operit_tables WHERE name=?1", vec![SqliteValue::Text(collection.clone())])?
-            .ok_or_else(|| failure("Storage merge owned table is missing"))?;
-        let table: StorageTable = serde_json::from_str(&definition.get::<_, String>(0)?).map_err(|error| failure(error.to_string()))?;
+fn sameEntityChildren(tx: &mut SqliteTransaction<'_>, kind: StorageKind, descriptor: &StorageMergeDescriptor, entity: &StorageMergeEntity,
+    localKey: &str, remoteKey: &str, incoming: &[Change], pending: &BTreeMap<(String, String), String>, preferenceReferences: &BTreeMap<String, String>) -> Result<bool, SqliteStoreError> {
+    for name in &entity.child_collections {
+        let collection = MergeCollection::open(tx, kind, name)?;
+        let mut content = |tx: &mut SqliteTransaction<'_>, value: &Value| -> Result<String, SqliteStoreError> {
+            let mut value = value.clone();
+            rewriteMergeReferences(tx, &collection, descriptor, &mut value, pending, preferenceReferences)?;
+            match &collection.table {
+                Some(table) => childContent(table, &serde_json::from_value::<Vec<StorageSqlValue>>(value.clone()).map_err(|error| failure(error.to_string()))?),
+                None => {
+                    let mut value = value.as_object().ok_or_else(|| failure("Storage merge child must be a JSON object"))?.clone();
+                    value.remove(&entity.identity_column);
+                    for reference in &entity.references {
+                        if reference.collection == *name && reference.column == entity.identity_column { value.remove(&reference.column); }
+                    }
+                    serde_json::to_string(&value).map_err(|error| failure(error.to_string()))
+                }
+            }
+        };
         let mut local = Vec::new();
-        for (key, values) in readTableRows(tx, &table)? {
+        for (key, value) in collection.read(tx)? {
             if rootFromChildKey(&key, entity.key_encoding)?.as_deref() == Some(localKey) {
-                local.push((rewriteChildKey(&key, localKey, "@root", entity.key_encoding)?, childContent(&table, &values)?));
+                local.push((rewriteChildKey(&key, localKey, "@root", entity.key_encoding)?, content(tx, &value)?));
             }
         }
         let mut remote = Vec::new();
-        for change in incoming.iter().filter(|change| change.collection == *collection && !change.deleted) {
+        for change in incoming.iter().filter(|change| change.collection == *name && !change.deleted) {
             if rootFromChildKey(&change.key, entity.key_encoding)?.as_deref() == Some(remoteKey) {
-                let values: Vec<StorageSqlValue> = serde_json::from_value(change.value.clone()).map_err(|error| failure(error.to_string()))?;
-                remote.push((rewriteChildKey(&change.key, remoteKey, "@root", entity.key_encoding)?, childContent(&table, &values)?));
+                remote.push((rewriteChildKey(&change.key, remoteKey, "@root", entity.key_encoding)?, content(tx, &change.value)?));
             }
         }
         local.sort(); remote.sort();
@@ -1764,43 +2025,31 @@ fn saveMergeMapping(
 
 /// Rekeys an equivalent materialized entity and every explicitly declared dependent identity.
 fn rekeyEntity(
-    tx: &mut SqliteTransaction<'_>, descriptor: &StorageMergeDescriptor,
+    tx: &mut SqliteTransaction<'_>, kind: StorageKind, descriptor: &StorageMergeDescriptor,
     entity: &StorageMergeEntity, old: &str, new: &str, origin: &str,
 ) -> Result<(), SqliteStoreError> {
     if old == new { return Ok(()); }
     saveMergeMapping(tx, &entity.collection, origin, old, new)?;
-    for collection in std::iter::once(&entity.collection).chain(entity.child_collections.iter()) {
-        let definition = tx.queryOne("SELECT definition FROM _operit_tables WHERE name=?1", vec![SqliteValue::Text(collection.clone())])?
-            .ok_or_else(|| failure("Storage merge owned table is missing"))?;
-        let table: StorageTable = serde_json::from_str(&definition.get::<_, String>(0)?).map_err(|error| failure(error.to_string()))?;
-        for (key, mut values) in readTableRows(tx, &table)? {
-            let isRoot = collection == &entity.collection;
+    for name in std::iter::once(&entity.collection).chain(entity.child_collections.iter()) {
+        let collection = MergeCollection::open(tx, kind, name)?;
+        for (key, mut value) in collection.read(tx)? {
+            let isRoot = name == &entity.collection;
             if isRoot && key != old { continue; }
             if !isRoot && rootFromChildKey(&key, entity.key_encoding)?.as_deref() != Some(old) { continue; }
             let rewritten = if isRoot { new.to_string() } else { rewriteChildKey(&key, old, new, entity.key_encoding)? };
-            values[columnIndex(&table, &table.primary_key)?] = StorageSqlValue::Text(rewritten.clone());
-            if isRoot { values[columnIndex(&table, &entity.identity_column)?] = StorageSqlValue::Text(new.to_string()); }
-            for (index, column) in table.columns.iter().enumerate() {
-                if column.name == "_root" || column.name == "_parent" {
-                    if let StorageSqlValue::Text(value) = &values[index] {
-                        values[index] = StorageSqlValue::Text(if value == old { new.to_string() }
-                            else { rewriteChildKey(value, old, new, entity.key_encoding)? });
-                    }
-                }
-            }
-            applyRow(tx, &Change { collection: collection.clone(), key: key.clone(), value: Value::Null, deleted: true })?;
-            applyRow(tx, &Change { collection: collection.clone(), key: rewritten.clone(),
-                value: serde_json::to_value(values).map_err(|error| failure(error.to_string()))?, deleted: false })?;
+            collection.identity(&mut value, entity, &rewritten, old, new)?;
+            collection.write(tx, &key, None)?;
+            collection.write(tx, &rewritten, Some(&value))?;
             tx.execute("UPDATE _operit_versions SET key=?3 WHERE collection=?1 AND key=?2",
-                vec![SqliteValue::Text(collection.clone()), SqliteValue::Text(key), SqliteValue::Text(rewritten)])?;
+                vec![SqliteValue::Text(name.clone()), SqliteValue::Text(key), SqliteValue::Text(rewritten)])?;
         }
     }
     tx.execute("UPDATE _operit_merge_names SET key=?3 WHERE collection=?1 AND key=?2",
         vec![SqliteValue::Text(entity.collection.clone()), SqliteValue::Text(old.to_string()), SqliteValue::Text(new.to_string())])?;
     for dependent in &descriptor.entities {
         for reference in &dependent.key_references {
-            if reference.collection == entity.collection {
-                rekeyEntity(tx, descriptor, dependent, &format!("{}{old}", reference.prefix), &format!("{}{new}", reference.prefix), origin)?;
+            if matches!(&reference.target, StorageMergeTarget::Collection { collection } if collection == &entity.collection) {
+                rekeyEntity(tx, kind, descriptor, dependent, &format!("{}{old}", reference.prefix), &format!("{}{new}", reference.prefix), origin)?;
             }
         }
     }
@@ -1815,19 +2064,17 @@ fn rememberMergeName(tx: &mut SqliteTransaction<'_>, collection: &str, key: &str
 }
 
 /// Records only the names explicitly written by an accepted user transaction.
-fn rememberPayloadNames(tx: &mut SqliteTransaction<'_>, descriptor: &StorageMergeDescriptor,
-    tables: &[StorageTable], changes: &[Change]) -> Result<(), SqliteStoreError> {
+fn rememberPayloadNames(tx: &mut SqliteTransaction<'_>, kind: StorageKind, descriptor: &StorageMergeDescriptor,
+    changes: &[Change]) -> Result<(), SqliteStoreError> {
     for entity in &descriptor.entities {
-        let Some(column) = &entity.name_column else { continue; };
+        let Some(field) = &entity.name_column else { continue; };
         for change in changes.iter().filter(|change| change.collection == entity.collection) {
             if change.deleted {
                 tx.execute("DELETE FROM _operit_merge_names WHERE collection=?1 AND key=?2",
                     vec![SqliteValue::Text(entity.collection.clone()), SqliteValue::Text(change.key.clone())])?;
             } else {
-                let table = tables.iter().find(|table| table.name == entity.collection)
-                    .ok_or_else(|| failure("Storage merge name table is not declared"))?;
-                let values: Vec<StorageSqlValue> = serde_json::from_value(change.value.clone()).map_err(|error| failure(error.to_string()))?;
-                rememberMergeName(tx, &entity.collection, &change.key, &textColumn(table, &values, column)?)?;
+                let collection = MergeCollection::open(tx, kind, &entity.collection)?;
+                rememberMergeName(tx, &entity.collection, &change.key, &collection.text(&change.value, field)?)?;
             }
         }
     }
@@ -1835,38 +2082,25 @@ fn rememberPayloadNames(tx: &mut SqliteTransaction<'_>, descriptor: &StorageMerg
 }
 
 /// Assigns unique names in UUID order while retaining every entity's original requested name.
-fn reconcileMergeNames(tx: &mut SqliteTransaction<'_>, descriptor: &StorageMergeDescriptor) -> Result<(), SqliteStoreError> {
+fn reconcileMergeNames(tx: &mut SqliteTransaction<'_>, kind: StorageKind, descriptor: &StorageMergeDescriptor) -> Result<(), SqliteStoreError> {
     for entity in &descriptor.entities {
-        let Some(nameColumn) = &entity.name_column else { continue; };
-        let definition = tx.queryOne("SELECT definition FROM _operit_tables WHERE name=?1",vec![SqliteValue::Text(entity.collection.clone())])?
-            .ok_or_else(|| failure("Storage merge name table is missing"))?;
-        let table: StorageTable = serde_json::from_str(&definition.get::<_, String>(0)?).map_err(|error| failure(error.to_string()))?;
-        let nameIndex = columnIndex(&table, nameColumn)?;
+        let Some(field) = &entity.name_column else { continue; };
+        let collection = MergeCollection::open(tx, kind, &entity.collection)?;
         let mut rows = Vec::new();
-        for (key, values) in readTableRows(tx, &table)? {
+        for (key, value) in collection.read(tx)? {
             let stored = tx.queryOne("SELECT name FROM _operit_merge_names WHERE collection=?1 AND key=?2",
                 vec![SqliteValue::Text(entity.collection.clone()), SqliteValue::Text(key.clone())])?;
-            let name = match stored { Some(row) => row.get(0)?, None => textColumn(&table, &values, nameColumn)? };
+            let name = match stored { Some(row) => row.get(0)?, None => collection.text(&value, field)? };
             rememberMergeName(tx, &entity.collection, &key, &name)?;
-            rows.push((key, name, values));
+            rows.push((key, name, value));
         }
-        rows.sort_by(|left,right| left.0.cmp(&right.0));
-        let reserved = rows.iter().map(|(_,name,_)|name.clone()).collect::<BTreeSet<_>>();
-        let mut assigned = BTreeSet::new();
-        for (key, base, mut values) in rows {
-            let mut name = base.clone();
-            let mut suffix = 1;
-            if assigned.contains(&name) {
-                loop {
-                    name = format!("{base}（{suffix}）");
-                    suffix += 1;
-                    if !reserved.contains(&name) && !assigned.contains(&name) { break; }
-                }
-            }
-            assigned.insert(name.clone());
-            if values[nameIndex] != StorageSqlValue::Text(name.clone()) {
-                values[nameIndex] = StorageSqlValue::Text(name);
-                applyRow(tx, &Change { collection: entity.collection.clone(), key, value: serde_json::to_value(values).map_err(|error| failure(error.to_string()))?, deleted: false })?;
+        let names = rows.iter().map(|(key, name, _)| (key.clone(), name.clone())).collect();
+        let mut names = uniqueNames(&names);
+        for (key, _, mut value) in rows {
+            let name = names.remove(&key).ok_or_else(|| failure("Declared merge name is missing"))?;
+            if collection.text(&value, field)? != name {
+                collection.mapText(&mut value, field, &mut |_| Ok(name.clone()))?;
+                collection.write(tx, &key, Some(&value))?;
             }
         }
     }
@@ -1914,22 +2148,37 @@ fn resolveEntityKey(
     entity: &StorageMergeEntity,
     remoteKey: &str,
     pending: &BTreeMap<(String, String), String>,
+    preferenceReferences: &BTreeMap<String, String>,
 ) -> Result<String, SqliteStoreError> {
     for reference in &entity.key_references {
         if !remoteKey.starts_with(&reference.prefix) {
             continue;
         }
         let identity = &remoteKey[reference.prefix.len()..];
-        let mapped = pending
-            .get(&(reference.collection.clone(), identity.to_string()))
-            .cloned()
-            .or(mergeMapping(tx, &reference.collection, identity)?)
-            .unwrap_or_else(|| identity.to_string());
+        let declaration = StorageMergeReference {
+            collection: entity.collection.clone(), column: entity.identity_column.clone(),
+            target: reference.target.clone(), key_prefix: String::new(), key_suffix: String::new(),
+            value_encoding: StorageMergeReferenceEncoding::Direct,
+        };
+        let mapped = resolveMergeReference(tx, &declaration, identity, pending, preferenceReferences)?;
         return Ok(format!("{}{mapped}", reference.prefix));
     }
     Ok(remoteKey.to_string())
 }
 
+
+/// Applies the existing reference resolver to explicitly declared fields in either record representation.
+fn rewriteMergeReferences(
+    tx: &mut SqliteTransaction<'_>, collection: &MergeCollection, descriptor: &StorageMergeDescriptor,
+    value: &mut Value, pending: &BTreeMap<(String, String), String>, preferenceReferences: &BTreeMap<String, String>,
+) -> Result<(), SqliteStoreError> {
+    for reference in descriptor.entities.iter().flat_map(|entity| entity.references.iter())
+        .filter(|reference| reference.collection == collection.name) {
+        collection.mapText(value, &reference.column, &mut |value|
+            resolveMergeReference(tx, reference, value, pending, preferenceReferences))?;
+    }
+    Ok(())
+}
 
 /// Reports whether a declared entity owns a root or one of its explicit child collections.
 fn entityOwnsCollection(entity: &StorageMergeEntity, collection: &str) -> bool {
@@ -1949,29 +2198,13 @@ fn mergePayload(
     let sourceChanges = payload.changes.clone();
     let mut pending = BTreeMap::<(String, String), String>::new();
     for entity in &descriptor.entities {
-        let row = tx
-            .queryOne(
-                "SELECT definition FROM _operit_tables WHERE name=?1",
-                vec![SqliteValue::Text(entity.collection.clone())],
-            )?
-            .ok_or_else(|| failure("Storage merge root table is missing"))?;
-        let table: StorageTable = serde_json::from_str(&row.get::<_, String>(0)?)
-            .map_err(|error| failure(error.to_string()))?;
-        let localRows = readTableRows(tx, &table)?;
-        let localContent = localRows
-            .iter()
-            .map(|(key, values)| {
-                Ok((
-                    key.clone(),
-                    entityContent(&table, entity, values)?,
-                    entity
-                        .name_column
-                        .as_ref()
-                        .map(|column| textColumn(&table, values, column))
-                        .transpose()?,
-                ))
-            })
-            .collect::<Result<Vec<_>, SqliteStoreError>>()?;
+        let collection = MergeCollection::open(tx, payload.manifest.kind, &entity.collection)?;
+        let localRows = collection.read(tx)?;
+        let localContent = localRows.iter().map(|(key, value)| {
+            let mut value = value.clone();
+            rewriteMergeReferences(tx, &collection, descriptor, &mut value, &pending, preferenceReferences)?;
+            Ok((key.clone(), collection.content(entity, &value)?))
+        }).collect::<Result<Vec<_>, SqliteStoreError>>()?;
         for change in payload
             .changes
             .iter_mut()
@@ -1985,23 +2218,23 @@ fn mergePayload(
             } else if !entity.key_references.is_empty()
                 || entity.match_mode == StorageMergeMatchMode::Identity
             {
-                resolveEntityKey(tx, entity, &remoteKey, &pending)?
+                resolveEntityKey(tx, entity, &remoteKey, &pending, preferenceReferences)?
             } else if change.deleted || localRows.iter().any(|(key, _)| key == &remoteKey) {
                 remoteKey.clone()
             } else {
-                let values: Vec<StorageSqlValue> = serde_json::from_value(change.value.clone())
-                    .map_err(|error| failure(error.to_string()))?;
-                let content = entityContent(&table, entity, &values)?;
+                let mut candidate = change.value.clone();
+                rewriteMergeReferences(tx, &collection, descriptor, &mut candidate, &pending, preferenceReferences)?;
+                let content = collection.content(entity, &candidate)?;
                 let mut equivalent = None;
-                for (key, item, _) in &localContent {
-                    if item == &content && sameEntityChildren(tx, entity, key, &remoteKey, &sourceChanges)? {
+                for (key, item) in &localContent {
+                    if item == &content && sameEntityChildren(tx, payload.manifest.kind, descriptor, entity, key, &remoteKey, &sourceChanges, &pending, preferenceReferences)? {
                         equivalent = Some(key);
                         break;
                     }
                 }
                 if let Some(key) = equivalent {
                     if remoteKey < *key {
-                        rekeyEntity(tx, descriptor, entity, key, &remoteKey, &operation.originDeviceId)?;
+                        rekeyEntity(tx, payload.manifest.kind, descriptor, entity, key, &remoteKey, &operation.originDeviceId)?;
                         remoteKey.clone()
                     } else {
                         key.clone()
@@ -2051,94 +2284,45 @@ fn mergePayload(
             if change.deleted {
                 continue;
             }
-            let table = payload
-                .tables
-                .iter()
-                .find(|table| table.name == change.collection)
-                .ok_or_else(|| failure("Storage merge changed table is missing"))?;
-            let mut values: Vec<StorageSqlValue> = serde_json::from_value(change.value.clone())
-                .map_err(|error| failure(error.to_string()))?;
-            let primaryIndex = columnIndex(table, &table.primary_key)?;
-            values[primaryIndex] = StorageSqlValue::Text(change.key.clone());
-            if change.collection == entity.collection {
-                let identityIndex = columnIndex(table, &entity.identity_column)?;
-                values[identityIndex] = StorageSqlValue::Text(canonicalRoot.clone());
-            }
-            for (index, column) in table.columns.iter().enumerate() {
-                if let Some(StorageSqlValue::Text(value)) = values.get(index).cloned() {
-                    let rewritten = if column.name == "_root" {
-                        if value == remoteRoot {
-                            canonicalRoot.clone()
-                        } else {
-                            value
-                        }
-                    } else if column.name == "_parent" {
-                        if value == remoteRoot {
-                            canonicalRoot.clone()
-                        } else {
-                            rewriteChildKey(&value, &remoteRoot, &canonicalRoot, entity.key_encoding)?
-                        }
-                    } else {
-                        value
-                    };
-                    values[index] = StorageSqlValue::Text(rewritten);
-                }
-            }
-            for reference in descriptor
-                .entities
-                .iter()
-                .flat_map(|item| item.references.iter())
-                .filter(|reference| reference.collection == change.collection)
-            {
-                let index = columnIndex(table, &reference.column)?;
-                if let Some(StorageSqlValue::Text(value)) = values.get(index).cloned() {
-                    values[index] = StorageSqlValue::Text(resolveMergeReference(
-                        tx,
-                        reference,
-                        &value,
-                        &pending,
-                        preferenceReferences,
-                    )?);
-                }
-            }
-            change.value =
-                serde_json::to_value(values).map_err(|error| failure(error.to_string()))?;
+            let collection = MergeCollection::open(tx, payload.manifest.kind, &change.collection)?;
+            collection.identity(&mut change.value, entity, &change.key, &remoteRoot, &canonicalRoot)?;
+
         }
     }
+    for change in payload.changes.iter_mut().filter(|change| !change.deleted) {
+        let collection = MergeCollection::open(tx, payload.manifest.kind, &change.collection)?;
+        rewriteMergeReferences(tx, &collection, descriptor, &mut change.value, &pending, preferenceReferences)?;
+    }
+
     Ok(())
 }
 
 /// Canonicalizes stored references without changing their originating write versions or journal payloads.
 fn reconcileLocalReferences(
-    tx: &mut SqliteTransaction<'_>,
+    tx: &mut SqliteTransaction<'_>, kind: StorageKind,
     descriptor: &StorageMergeDescriptor,
     preferenceReferences: &BTreeMap<String, String>,
 ) -> Result<(), SqliteStoreError> {
+    for entity in &descriptor.entities {
+        let collection = MergeCollection::open(tx, kind, &entity.collection)?;
+        for (key, _) in collection.read(tx)? {
+            let canonical = resolveEntityKey(tx, entity, &key, &BTreeMap::new(), preferenceReferences)?;
+            if canonical != key { rekeyEntity(tx, kind, descriptor, entity, &key, &canonical, "preferences")?; }
+        }
+    }
     let mut references = BTreeMap::<String, Vec<&StorageMergeReference>>::new();
     for reference in descriptor.entities.iter().flat_map(|entity| entity.references.iter()) {
         references.entry(reference.collection.clone()).or_default().push(reference);
     }
-    for definition in tx.queryRows("SELECT name,definition FROM _operit_tables", Vec::new())? {
-        let collection: String = definition.get(0)?;
-        let Some(references) = references.get(&collection) else { continue; };
-        let table: StorageTable = serde_json::from_str(&definition.get::<_, String>(1)?)
-            .map_err(|error| failure(error.to_string()))?;
-        for (key, mut values) in readTableRows(tx, &table)? {
-            let original = values.clone();
-            for reference in references {
-                let index = columnIndex(&table, &reference.column)?;
-                if let StorageSqlValue::Text(value) = &values[index] {
-                    values[index] = StorageSqlValue::Text(resolveMergeReference(
-                        tx, reference, value, &BTreeMap::new(), preferenceReferences)?);
-                }
+    for (name, references) in references {
+        let collection = MergeCollection::open(tx, kind, &name)?;
+        for (key, mut value) in collection.read(tx)? {
+            let original = value.clone();
+            for reference in &references {
+                collection.mapText(&mut value, &reference.column, &mut |value|
+                    resolveMergeReference(tx, reference, value, &BTreeMap::new(), preferenceReferences))?;
             }
-            if values != original {
-                applyRow(tx, &Change {
-                    collection: table.name.clone(), key,
-                    value: serde_json::to_value(values).map_err(|error| failure(error.to_string()))?,
-                    deleted: false,
-                })?;
-            }
+            if value != original { collection.write(tx, &key, Some(&value))?; }
         }
     }
     Ok(())
@@ -2154,7 +2338,7 @@ pub fn reconcilePreferenceReferences(
         if let Some(descriptor) = manifest.merge {
             let store = SqliteStore::openWithHost(host.clone(), &manifest.path)?;
             store.transaction(|tx| {
-                reconcileLocalReferences(tx, &descriptor, preferenceReferences)?;
+                reconcileLocalReferences(tx, manifest.kind, &descriptor, preferenceReferences)?;
                 tx.execute("DELETE FROM _operit_dirty", Vec::new())?;
                 Ok(())
             })?;
@@ -2188,9 +2372,9 @@ pub fn applyOperation(
         return Err(failure("Remote storage must declare synchronization"));
     }
     validatePayload(&payload)?;
-    let path = resolveStoragePath(&payload.manifest.path)?;
+    let path = resolveStoragePath(&payload.manifest.path).map_err(failure)?;
     if runtimeStorageOwnership(&path).map_err(failure)? != RuntimeStorageOwnership::Space
-        || storageNamespace(&path)? != payload.manifest.owner
+        || storageNamespace(&path).map_err(failure)? != payload.manifest.owner
     {
         return Err(failure("Remote storage identity does not match its shared data path"));
     }
@@ -2246,7 +2430,7 @@ pub fn applyOperation(
                 if incoming<=current {continue;}
             }
             if let Some(descriptor) = &database.merge {
-                rememberPayloadNames(tx, descriptor, &payload.tables, std::slice::from_ref(change))?;
+                rememberPayloadNames(tx, database.kind, descriptor, std::slice::from_ref(change))?;
             }
             if database.kind==StorageKind::Sqlite {applyRow(tx,change)?;} else {
                 validateCollection(&database,&change.collection)?;
@@ -2258,8 +2442,8 @@ pub fn applyOperation(
         }
         if !payload.changes.is_empty() {
             if let Some(descriptor) = &database.merge {
-                reconcileLocalReferences(tx, descriptor, preferenceReferences)?;
-                reconcileMergeNames(tx, descriptor)?;
+                reconcileLocalReferences(tx, database.kind, descriptor, preferenceReferences)?;
+                reconcileMergeNames(tx, database.kind, descriptor)?;
             }
         }
         tx.execute("DELETE FROM _operit_dirty",Vec::new())?;

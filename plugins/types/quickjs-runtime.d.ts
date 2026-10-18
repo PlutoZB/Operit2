@@ -1,5 +1,10 @@
 declare global {
+    /** Diagnostic depth shared with Rust AppLogger and Flutter ClientLogger. */
+    type VerboseLogLevel = 1 | 2 | 3 | 4 | 5 | 6;
+
     interface Console {
+        /** Writes lifecycle (V1), operation (V2), call (V3), resource (V4), internal (V5), or per-item (V6) diagnostics. */
+        verbose(level: VerboseLogLevel, ...data: any[]): void;
         log(...data: any[]): void;
         info(...data: any[]): void;
         warn(...data: any[]): void;

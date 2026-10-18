@@ -211,7 +211,7 @@ async function handleIsPlanStartedIpc(request) {
         return await plan_mode_runtime_ipc_js_1.PlanModeShared.isPlanStarted(request.planContent, request.chatId);
     }
     catch (error) {
-        (0, plan_mode_logging_js_1.logPlanModeDebug)("handleIsPlanStartedIpc.error", {
+        (0, plan_mode_logging_js_1.logPlanModeError)("handleIsPlanStartedIpc.error", {
             message: error instanceof Error ? error.message : "error",
         });
         return false;
@@ -277,7 +277,7 @@ async function onInputMenuToggle(event) {
         return null;
     }
     catch (error) {
-        (0, plan_mode_logging_js_1.logPlanModeDebug)("onInputMenuToggle.error", {
+        (0, plan_mode_logging_js_1.logPlanModeError)("onInputMenuToggle.error", {
             message: error instanceof Error ? error.message : "error",
         });
         return null;
@@ -323,7 +323,7 @@ async function onSystemPromptCompose(event) {
         };
     }
     catch (error) {
-        (0, plan_mode_logging_js_1.logPlanModeDebug)("onSystemPromptCompose.error", {
+        (0, plan_mode_logging_js_1.logPlanModeError)("onSystemPromptCompose.error", {
             message: error instanceof Error ? error.message : "error",
         });
         return null;
@@ -346,7 +346,7 @@ async function onToolPromptCompose(event) {
             return null;
         }
         const filteredTools = filterPlanModeTools(availableTools);
-        (0, plan_mode_logging_js_1.logPlanModeDebug)("onToolPromptCompose", {
+        (0, plan_mode_logging_js_1.logPlanModeVerbose)("onToolPromptCompose", {
             chatId,
             stage,
             toolCountBefore: availableTools.length,
@@ -357,7 +357,7 @@ async function onToolPromptCompose(event) {
         };
     }
     catch (error) {
-        (0, plan_mode_logging_js_1.logPlanModeDebug)("onToolPromptCompose.error", {
+        (0, plan_mode_logging_js_1.logPlanModeError)("onToolPromptCompose.error", {
             message: error instanceof Error ? error.message : "error",
         });
         return null;
@@ -394,7 +394,7 @@ async function onPromptFinalize(event) {
         return await buildPromptFinalizeResult(payload);
     }
     catch (error) {
-        (0, plan_mode_logging_js_1.logPlanModeDebug)("onPromptFinalize.error", {
+        (0, plan_mode_logging_js_1.logPlanModeError)("onPromptFinalize.error", {
             message: error instanceof Error ? error.message : "error",
         });
         return null;
@@ -411,7 +411,7 @@ async function onPromptEstimateFinalize(event) {
         return await buildPromptFinalizeResult(payload);
     }
     catch (error) {
-        (0, plan_mode_logging_js_1.logPlanModeDebug)("onPromptEstimateFinalize.error", {
+        (0, plan_mode_logging_js_1.logPlanModeError)("onPromptEstimateFinalize.error", {
             message: error instanceof Error ? error.message : "error",
         });
         return null;

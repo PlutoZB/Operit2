@@ -56,3 +56,14 @@ test("folder projection reads native membership without plugin metadata and scop
   const other = plain(projection.conversationSidebarScope({...section,id:"card:other"}));
   assert.notEqual(projected.groups[0].id, other.groups[0].id);
 });
+
+test("model-only chat bindings remain in the unbound sidebar category", () => {
+  const projection = loadModule("src/ui-sidebar.ts"), directory = fixture().snapshot, chats = summaries();
+  const sections = plain(projection.characterSidebarSections(directory, [
+    { chatId: chats[0].id, selection: "model:chat" },
+    { chatId: chats[1].id, selection: null },
+  ], chats));
+  const unbound = sections.find(section => section.id === "unbound");
+  assert.deepEqual(unbound.chats.map(chat => chat.id), chats.map(chat => chat.id));
+  assert.equal(sections.some(section => section.id === "model:chat"), false);
+});

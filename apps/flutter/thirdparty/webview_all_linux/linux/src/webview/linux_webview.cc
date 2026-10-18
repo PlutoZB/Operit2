@@ -776,6 +776,7 @@ LinuxWebView *create_linux_webview(WebviewAllLinuxPlugin *self) {
   g_object_ref_sink(webview->web_view);
   g_object_set_data(G_OBJECT(webview->web_view), kLinuxWebViewInstanceKey,
                     webview);
+  ensure_local_resource_scheme(webkit_web_view_get_context(webview->web_view));
   webview->pending_nav_decisions =
       g_hash_table_new_full(g_direct_hash, g_direct_equal, nullptr,
                             destroy_pending_navigation_decision);

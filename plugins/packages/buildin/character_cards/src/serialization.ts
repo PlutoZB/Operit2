@@ -83,7 +83,7 @@ function decodeOperitExtension(value: unknown, tags: Tag[], changes: TagChanges)
   } else {
     for (const id of payload.attachedTagIds) attachedIds.push(canonicalTag(tags, id).id);
   }
-  const card = { ...payload, id: "", isDefault: false, createdAt: 0, updatedAt: 0, attachedTagIds: normalizeNames(attachedIds) };
+  const card = { ...payload, id: "", createdAt: 0, updatedAt: 0, attachedTagIds: normalizeNames(attachedIds) };
   assertCard(card);
   return card;
 }
@@ -151,7 +151,7 @@ export function decodeCharacterImport(content: string, format: "operit" | "taver
   if (format === "operit") {
     assertCard(document);
     for (const id of document.attachedTagIds) canonicalTag(tags, id);
-    return { card: { ...document, id: "", isDefault: false, createdAt: 0, updatedAt: 0 }, tagChanges };
+    return { card: { ...document, id: "", createdAt: 0, updatedAt: 0 }, tagChanges };
   }
   if (format !== "tavern") throw new Error("角色卡导入格式无效");
   assertObject(document, "酒馆角色卡");

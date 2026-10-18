@@ -1,14 +1,16 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:webview_all/webview_all.dart';
 import 'package:webview_all_linux/webview_all_linux.dart';
 import 'package:webview_flutter_platform_interface/webview_flutter_platform_interface.dart';
 import 'package:operit2/ui/features/packages/screens/ToolPkgComposeDslWebView.dart';
 import 'package:operit2/ui/features/packages/screens/ToolPkgUiLauncherScreen.dart';
 
-/// Verifies native preference delivery and browser-preserving theme updates.
+/// Verifies native preference, theme, and platform-view visibility behavior.
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -200,6 +202,76 @@ void main() {
     expect(actions, isNotEmpty);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets(
+    'hides the native WebView below a dialog route only where needed',
+    (tester) async {
+      final platform = _ThemeTestPlatform();
+      WebViewPlatform.instance = platform;
+      const channel = MethodChannel('operit/webview_theme');
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        (_) async => null,
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          channel,
+          null,
+        ),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ComposeDslWebView(
+            props: const {'url': 'https://example.com'},
+            onAction: (id, [payload]) async => null,
+            hostContext: null,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      /// Reads the nearest Offstage above the native view, which is the
+      /// production visibility wrapper rather than route chrome.
+      bool nativeViewOffstage() => tester
+          .widget<Offstage>(
+            find
+                .ancestor(
+                  of: find.byType(WebViewWidget, skipOffstage: false),
+                  matching: find.byType(Offstage, skipOffstage: false),
+                )
+                .first,
+          )
+          .offstage;
+
+      expect(nativeViewOffstage(), isFalse);
+      final context = tester.element(find.byType(ComposeDslWebView));
+      unawaited(
+        showDialog<void>(
+          context: context,
+          builder: (_) => const AlertDialog(title: Text('dialog')),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('dialog'), findsOneWidget);
+      // Only Linux paints the native WebView above Flutter's layer tree.
+      expect(
+        nativeViewOffstage(),
+        defaultTargetPlatform == TargetPlatform.linux,
+      );
+
+      Navigator.of(context).pop();
+      await tester.pumpAndSettle();
+      expect(nativeViewOffstage(), isFalse);
+
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpAndSettle();
+    },
+    variant: TargetPlatformVariant(<TargetPlatform>{
+      TargetPlatform.linux,
+      TargetPlatform.android,
+    }),
+  );
 }
 
 class _ThemeTestPlatform extends WebViewPlatform {

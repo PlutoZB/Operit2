@@ -12,6 +12,7 @@ use rquickjs::{CatchResultExt, Context as QuickJsContext, Runtime as QuickJsRunt
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::io::{Cursor, Read, Write};
+use zeroize::Zeroize;
 use zip::write::SimpleFileOptions;
 
 pub const PROTECTION_ID: &str = "operit-protected";
@@ -1463,7 +1464,7 @@ fn protectionKey() -> Vec<u8> {
     }
 }
 
-/// Reconstructs the public non-production key through the same volatile share topology.
+/// Reconstructs the public non-production key from shares behind optimization barriers.
 #[cfg(not(operit_private_toolpkg_protection))]
 #[inline(never)]
 fn decoyProtectionKey() -> Vec<u8> {
@@ -1487,11 +1488,11 @@ fn decoyProtectionKey() -> Vec<u8> {
     output
 }
 
-/// Reads one public decoy share through a volatile access boundary.
+/// Reads one public decoy share with bounds checks and best-effort optimization barriers.
 #[cfg(not(operit_private_toolpkg_protection))]
 #[inline(never)]
 fn readDecoyByte(values: &[u8; DECOY_PRIVATE_SIZE], index: usize) -> u8 {
-    unsafe { core::ptr::read_volatile(values.as_ptr().add(index)) }
+    std::hint::black_box(values)[std::hint::black_box(index)]
 }
 
 #[allow(non_snake_case)]
@@ -1603,13 +1604,9 @@ fn constantTimeEquals(left: &[u8], right: &[u8]) -> bool {
 }
 
 #[allow(non_snake_case)]
-/// Clears a fixed-size key buffer through volatile writes before it is released.
+/// Clears a fixed-size key buffer without allowing the writes to be optimized away.
 fn clearKeyMaterial(material: &mut [u8; SHA256_SIZE]) {
-    for value in material {
-        unsafe {
-            core::ptr::write_volatile(value, 0);
-        }
-    }
+    material.zeroize();
 }
 
 #[allow(non_snake_case)]
@@ -1653,6 +1650,28 @@ fn decryptDetached(
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+
+    #[test]
+    #[cfg(not(operit_private_toolpkg_protection))]
+    /// Preserves the existing public key derivation contract for protected artifacts and archives.
+    fn public_decoy_key_derivation_matches_existing_format() {
+        assert_eq!(
+            deriveAeadKey(),
+            [
+                0x1b, 0xbc, 0xf7, 0x7f, 0x22, 0x1b, 0xdc, 0x8b, 0x7b, 0x0d, 0x41, 0x3e, 0x3f, 0x52,
+                0x02, 0x10, 0x56, 0xc4, 0xc8, 0x8b, 0xac, 0xd7, 0x82, 0x37, 0x4d, 0x99, 0x3e, 0x1f,
+                0x8b, 0xb0, 0xd6, 0x1c,
+            ]
+        );
+        assert_eq!(
+            deriveMarketArchiveMacKey(),
+            [
+                0xda, 0xff, 0xb6, 0xfd, 0x1f, 0x32, 0x8e, 0x06, 0x22, 0x45, 0xab, 0x7d, 0xfd, 0xe6,
+                0x41, 0xf0, 0x29, 0xe2, 0x5a, 0xe8, 0x64, 0x7e, 0x57, 0xf0, 0xaa, 0x73, 0x7f, 0xeb,
+                0x11, 0x43, 0xe2, 0xbd,
+            ]
+        );
+    }
 
     /// Builds a minimal ToolPkg archive with one main JavaScript entry.
     fn buildSimilarityTestToolPkg(mainScript: &str) -> Vec<u8> {

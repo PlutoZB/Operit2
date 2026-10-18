@@ -343,6 +343,13 @@ impl JsExecutionHost for TestPluginConfigExecutionHost {
                 };
             }
 
+            if request.tool_name == "echo_owned" {
+                return JsToolCallResult {
+                    success: true,
+                    data: JsToolCallResultData::Value(Value::Object(request.parameters.into_iter().collect())),
+                    error: None,
+                };
+            }
             if request.tool_name == "echo" {
                 return JsToolCallResult {
                     success: true,
@@ -1173,6 +1180,63 @@ pub(super) fn ensure_test_runtime_root() {
     setDefaultRuntimeStorageHost(host);
 }
 
+/// Keeps large hot calls on source handles and preserves the module's mutable state.
+#[test]
+fn registered_script_hot_calls_transfer_only_handles_without_hashing() {
+    let mut state = newTestJsEngineState(None);
+    state.evalJavaScriptVoid(r#"
+        globalThis.__sourceRegistrations = 0;
+        globalThis.__sourceInvocations = 0;
+        const registerSource = __operitRegisterScriptSource;
+        __operitRegisterScriptSource = function(id, text) {
+            globalThis.__sourceRegistrations += 1;
+            return registerSource(id, text);
+        };
+        const invokeSource = __operitExecuteScriptFunction;
+        __operitExecuteScriptFunction = function() {
+            if (typeof arguments[2] !== 'string' || arguments[2].length > 32) {
+                throw new Error('Invocation transferred source text instead of its handle');
+            }
+            globalThis.__sourceInvocations += 1;
+            return invokeSource.apply(this, arguments);
+        };
+    "#).unwrap();
+    let script = format!("/*{}*/ let calls = 0; exports.count = () => ++calls;", "x".repeat(524_000));
+    for index in 1..=10 {
+        let output = state.execute_script_function_on_current_thread(
+            super::JsTextResourceSource::ExecutionHost,
+            &script, "count", &testParams(), &BTreeMap::new(), None, true, 60, None,
+        );
+        assert_eq!(expect_js_output(output, "registered source counter"), index.to_string());
+        if index == 1 {
+            state.evalJavaScriptVoid(r#"
+                __operitNativeHashText = function() { throw new Error('Hot call rescanned source'); };
+            "#).unwrap();
+        }
+    }
+    state.evalJavaScriptVoid(r#"
+        if (__sourceRegistrations !== 1 || __sourceInvocations !== 10) {
+            throw new Error('Source registration or invocation count changed');
+        }
+    "#).unwrap();
+}
+
+/// Distinguishes equal-length legacy fingerprint collisions and restores each source's own state.
+#[test]
+fn registered_script_replacement_preserves_exact_source_identity() {
+    let mut state = newTestJsEngineState(None);
+    let first = "let count = 0; exports.read = () => 'Aa:' + ++count;";
+    let second = "let count = 0; exports.read = () => 'BB:' + ++count;";
+    assert_eq!(super::javaScriptSourceFingerprint(first), super::javaScriptSourceFingerprint(second));
+    for (script, expected) in [(first, "\"Aa:1\""), (second, "\"BB:1\""), (first, "\"Aa:2\"")] {
+        let output = state.execute_script_function_on_current_thread(
+            super::JsTextResourceSource::ExecutionHost,
+            script, "read", &testParams(), &BTreeMap::new(), None, true, 60, None,
+        );
+        assert_eq!(expect_js_output(output, "source replacement"), expected);
+    }
+}
+
 #[test]
 fn execute_promise_script_repeatedly_on_same_engine() {
     let mut state = newTestJsEngineState(None);
@@ -1312,6 +1376,74 @@ fn bootstrap_exposes_ui_android_okhttp_api() {
         expect_js_output(output, "bootstrap API inspection"),
         "\"function:function:function:function:function:function:object:object:function:object:object:object:function:function:function:function\""
     );
+}
+
+/// Exercises real QuickJS logging, native severity/depth metadata, and strict level validation.
+#[test]
+fn plugin_console_uses_shared_diagnostic_depths() {
+    let mut state = newTestJsEngineState(None);
+    let script = r#"
+        /** Exercises console forwarding, diagnostic depths, and strict validation. */
+        exports.verify_logging = function() {
+            const callId = String(globalThis.__operitCurrentCallId);
+            for (let level = 1; level <= 6; level++) console.verbose(level, 'log-policy-v' + level);
+            console.debug('log-policy-debug');
+            console.log('log-policy-log');
+            console.info('log-policy-info');
+            console.warn('log-policy-warn');
+            console.error('log-policy-error');
+            let rejected = 0;
+            for (const level of [0, 7, 1.5, '3', null]) {
+                try { console.verbose(level, 'invalid-policy'); }
+                catch (error) { if (error instanceof RangeError) rejected++; }
+            }
+            let nativeRejected = false;
+            try { __operitNativeLogVerbose(7, callId, 'invalid-native-policy'); }
+            catch (_) { nativeRejected = true; }
+            return { callId, rejected, nativeRejected };
+        };
+    "#;
+    let output = state.execute_script_function_on_current_thread(
+        super::JsTextResourceSource::ExecutionHost,
+        script,
+        "verify_logging",
+        &testParams(),
+        &BTreeMap::new(),
+        None,
+        true,
+        60,
+        None,
+    );
+    let result: serde_json::Value =
+        serde_json::from_str(&expect_js_output(output, "plugin logging policy")).unwrap();
+    assert_eq!(result["rejected"], 5);
+    assert_eq!(result["nativeRejected"], true);
+    let call_id = result["callId"].as_str().unwrap();
+    let entries = operit_util::AppLogger::AppLogger::entries();
+    for level in 1..=6 {
+        let message = format!("[{call_id}] log-policy-v{level}");
+        let entry = entries
+            .iter()
+            .find(|entry| entry.tag == "ToolPkg" && entry.message == message)
+            .unwrap();
+        assert_eq!(entry.priority, operit_util::AppLogger::VERBOSE);
+        assert_eq!(entry.verbose_level, Some(level));
+    }
+    for (label, priority) in [
+        ("debug", operit_util::AppLogger::DEBUG),
+        ("log", operit_util::AppLogger::INFO),
+        ("info", operit_util::AppLogger::INFO),
+        ("warn", operit_util::AppLogger::WARN),
+        ("error", operit_util::AppLogger::ERROR),
+    ] {
+        let message = format!("[{call_id}] log-policy-{label}");
+        let entry = entries
+            .iter()
+            .find(|entry| entry.tag == "ToolPkg" && entry.message == message)
+            .unwrap();
+        assert_eq!(entry.priority, priority);
+        assert_eq!(entry.verbose_level, None);
+    }
 }
 
 #[test]
@@ -2523,16 +2655,11 @@ fn render_planask_through_async_compose_host() {
     );
     let intermediate = intermediate.lock().unwrap();
     assert!(
-        !intermediate.is_empty(),
-        "onLoad must deliver intermediate renders"
+        intermediate.is_empty(),
+        "Synchronous onLoad must publish its state through the final render only"
     );
-    for raw in intermediate.iter() {
-        let result: Value = raw.clone();
-        assert!(
-            result["tree"].is_object(),
-            "Unexpected intermediate result: {raw}"
-        );
-    }
+    assert_eq!(result["state"]["closed"], true);
+    assert_eq!(result["tree"]["props"]["key"], "planask-ready");
     engine.destroy();
 }
 
@@ -3652,6 +3779,71 @@ async fn bridge_roundtrip_benchmark() {
     }
 }
 
+/// Separates strict request snapshots, Promise jobs and complete host round trips.
+/// Run explicitly in release mode; timing is diagnostic, never a correctness assertion.
+#[tokio::test]
+#[ignore = "manual release bridge payload benchmark"]
+async fn bridge_payload_benchmark() {
+    let iterations: usize = std::env::var("OPERIT_JS_BRIDGE_BENCH_ITERATIONS")
+        .expect("set OPERIT_JS_BRIDGE_BENCH_ITERATIONS")
+        .parse().expect("positive iteration count");
+    assert!(iterations > 0);
+    let engine = newTestJsEngine(Arc::new(TestPluginConfigExecutionHost::default()));
+    let script = r#"exports.main = async function(params) {
+        var data = {rows: []}, result;
+        for (var row = 0; row < params.rows; row++)
+            data.rows.push({id: row, name: 'role-' + row, enabled: true,
+                settings: {prompt: 'x'.repeat(64), tags: ['a', 'b', 'c']}});
+        for (var i = 0; i < params.iterations; i++) {
+            if (params.mode === 'input') { __operitHostSnapshotJsonObject(data); result = data; }
+            else if (params.mode === 'snapshot') result = __operitSnapshotJsonObject(data);
+            else if (params.mode === 'promise') result = await Promise.resolve(data);
+            else result = await toolCall(params.mode === 'hostOwned' || params.mode === 'hostReadAll' ? 'echo_owned' : 'echo', data);
+            if (params.mode === 'hostReadAll') {
+                for (var row = 0; row < params.rows; row++) {
+                    var value = result.rows[row];
+                    if (value.id !== row || value.name !== 'role-' + row || value.enabled !== true ||
+                        value.settings.prompt !== 'x'.repeat(64) || value.settings.tags.join(',') !== 'a,b,c')
+                        throw new Error('Payload changed in transit at row ' + row);
+                }
+            }
+        }
+        for (var row = 0; row < params.rows; row++) {
+            var value = result.rows[row];
+            if (value.id !== row || value.name !== 'role-' + row || value.enabled !== true ||
+                value.settings.prompt !== 'x'.repeat(64) || value.settings.tags.join(',') !== 'a,b,c')
+                throw new Error('Payload changed in transit at row ' + row);
+        }
+        return result.rows.length;
+    };"#;
+    let rows: Vec<usize> = std::env::var("OPERIT_JS_BRIDGE_BENCH_ROWS").unwrap_or_else(|_| "0,1,32,256".into())
+        .split(',').map(|value| value.parse().expect("row count")).collect();
+    let modes = std::env::var("OPERIT_JS_BRIDGE_BENCH_MODES").unwrap_or_else(|_| "promise,snapshot,input,host,hostOwned,hostReadAll".into());
+    for rows in rows {
+        for mode in modes.split(',') {
+            let params = BTreeMap::from([
+                ("rows".to_owned(), serde_json::json!(rows)),
+                ("mode".to_owned(), serde_json::json!(mode)),
+                ("iterations".to_owned(), serde_json::json!(iterations)),
+            ]);
+            let mut times = Vec::new();
+            for sample in 0..6 {
+                let started = Instant::now();
+                let output = expect_js_output(engine.execute_script_function(
+                    script, "main", &params, &BTreeMap::new(), None, true, 30, None,
+                ).await, "payload benchmark");
+                assert_eq!(output, rows.to_string());
+                if sample > 0 {
+                    times.push(started.elapsed().as_secs_f64() * 1e6 / iterations as f64);
+                }
+            }
+            times.sort_by(f64::total_cmp);
+            eprintln!("BRIDGE_PAYLOAD rows={rows} mode={mode} median_us_per_call={:.3} samples_us={times:?}", times[2]);
+        }
+    }
+    engine.destroy();
+}
+
 /// Creates an actual immutable SDK execution context without authenticating any owner through JavaScript data.
 fn chatExtensionFixtureContext(owner: &str) -> ToolPkgExecutionContext {
     ToolPkgExecutionContext {
@@ -3752,6 +3944,136 @@ async fn shared_initialization_promise_preserves_each_waiting_call_context() {
     assert_eq!(expect_js_output(first.await.unwrap(), "shared initialization owner"), "\"initializer\"");
     assert_eq!(expect_js_output(second.await.unwrap(), "shared initialization consumer"), "\"consumer\"");
     assert_eq!(executionSessionCounts(&engine).await, (0, 0));
+    engine.destroy();
+}
+
+/// A completed asynchronous call must not resurrect its cleaned id for a suspended caller.
+///
+/// The reported failure was a memory query that resumed after an unrelated async hook had
+/// finished: the hook's completion restored the suspended call's id, then the continuation
+/// wrapper wrote the hook's now-deleted id back over it.
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test(flavor = "current_thread")]
+async fn completed_async_call_keeps_a_suspended_call_context_alive() {
+    let engine = newTestJsEngine(Arc::new(TestPluginConfigExecutionHost::default()));
+    let awaiter_engine = engine.clone();
+    let awaiter = tokio::spawn(async move {
+        awaiter_engine
+            .execute_script_function(
+                r#"exports.awaiter = async function() {
+                    await new Promise(function(resolve) { setTimeout(resolve, 100); });
+                    var callId = String(globalThis.__operitCurrentCallId || '');
+                    return JSON.stringify({
+                        callId: callId,
+                        callStateAvailable: !!(callId && globalThis.__operitGetCallState(callId))
+                    });
+                };"#,
+                "awaiter",
+                &testParams(),
+                &BTreeMap::new(),
+                None,
+                true,
+                2,
+                None,
+            )
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    engine
+        .execute_script_function(
+            r#"exports.hook = async function() { return 'hook'; };"#,
+            "hook",
+            &testParams(),
+            &BTreeMap::new(),
+            None,
+            true,
+            2,
+            None,
+        )
+        .await
+        .expect("independent async call must complete");
+    let output = awaiter.await.expect("awaiter task must not panic");
+    let encoded = expect_js_output(output, "suspended call context");
+    let json = serde_json::from_str::<String>(&encoded).expect("suspended call context string");
+    let report: Value =
+        serde_json::from_str(&json).expect("suspended call context must be JSON");
+    assert_eq!(
+        report["callStateAvailable"], true,
+        "suspended call must keep a live call state: {report}"
+    );
+    engine.destroy();
+}
+
+/// A hook that finishes while another call is suspended must hand the execution id back
+/// to the suspended call instead of clearing it.
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test(flavor = "current_thread")]
+async fn completed_hook_restores_a_concurrently_suspended_call() {
+    let engine = newTestJsEngine(Arc::new(TestPluginConfigExecutionHost::default()));
+    let (started_sender, mut started) = tokio::sync::mpsc::unbounded_channel();
+    let hook_engine = engine.clone();
+    let hook = tokio::spawn(async move {
+        hook_engine
+            .execute_script_function(
+                r#"exports.hook = async function() {
+                    sendIntermediateResult('hook-started');
+                    await new Promise(function(resolve) { setTimeout(resolve, 25); });
+                    return 'hook';
+                };"#,
+                "hook",
+                &testParams(),
+                &BTreeMap::new(),
+                Some(Arc::new(move |value| { started_sender.send(value).unwrap(); })),
+                true,
+                2,
+                None,
+            )
+            .await
+    });
+    started.recv().await.expect("hook must start before the probe");
+    let probe_engine = engine.clone();
+    let probe = tokio::spawn(async move {
+        probe_engine
+            .execute_script_function(
+                r#"exports.probe = async function() {
+                    var owner = String(globalThis.__operitCurrentCallId || '');
+                    await new Promise(function(resolve) { setTimeout(resolve, 100); });
+                    var current = String(globalThis.__operitCurrentCallId || '');
+                    return JSON.stringify({
+                        owner: owner,
+                        current: current,
+                        sameOwner: current === owner,
+                        callStateAvailable: !!(current && globalThis.__operitGetCallState(current))
+                    });
+                };"#,
+                "probe",
+                &testParams(),
+                &BTreeMap::new(),
+                None,
+                true,
+                2,
+                None,
+            )
+            .await
+    });
+    expect_js_output(
+        hook.await.expect("hook task must not panic"),
+        "hook completion",
+    );
+    let encoded = expect_js_output(
+        probe.await.expect("probe task must not panic"),
+        "suspended call after hook completion",
+    );
+    let json = serde_json::from_str::<String>(&encoded).expect("probe report string");
+    let report: Value = serde_json::from_str(&json).expect("probe report JSON");
+    assert_eq!(
+        report["callStateAvailable"], true,
+        "suspended call must keep a live state: {report}"
+    );
+    assert_eq!(
+        report["sameOwner"], true,
+        "suspended call must keep its own execution id: {report}"
+    );
     engine.destroy();
 }
 
@@ -4063,8 +4385,9 @@ async fn compose_dsl_reload_drains_intermediate_revisions_before_final() {
         exports.default = function(ctx) {
             const [count, setCount] = ctx.useState('count', 0);
             return ctx.UI.Column({onLoad: async function() {
-                await toolCall('gate', {});
                 setCount(count + 1);
+                await toolCall('gate', {});
+                setCount(count + 2);
                 return 'done';
             }}, [ctx.UI.Text({text: String(count)})]);
         };
@@ -4076,19 +4399,29 @@ async fn compose_dsl_reload_drains_intermediate_revisions_before_final() {
     let action_id = initial["update"]["upserts"].as_array().unwrap().iter().find_map(|node| node["props"]["onLoad"]["__actionId"].as_str()).unwrap().to_owned();
     let delivered = Arc::new(Mutex::new(vec![initial["update"]["revision"].as_u64().unwrap()]));
     let captured = delivered.clone();
+    let intermediate_ready = Arc::new(tokio::sync::Notify::new());
+    let notify_intermediate = intermediate_ready.clone();
     let action = engine.actionForAssertionsAsync(action_id, None, params.clone(), BTreeMap::new(), Some(Arc::new(move |value| {
         captured.lock().unwrap().push(value["update"]["revision"].as_u64().unwrap());
+        notify_intermediate.notify_one();
     })));
     tokio::pin!(action);
     tokio::select! {
         _ = host.gatedToolStarted.notified() => {},
         result = &mut action => panic!("gated action completed before release: {result:?}"),
     }
+    // Keep the action pending until its real pre-await change has streamed.
+    // The post-await state is coalesced into final and need not publish twice.
+    tokio::select! {
+        _ = intermediate_ready.notified() => {},
+        result = &mut action => panic!("gated action completed before its intermediate: {result:?}"),
+    }
     let reloaded = expect_js_output(engine.renderForAssertionsAsync(source.into(), params, BTreeMap::new(), Arc::new(BTreeMap::new())).await, "same-context render");
     delivered.lock().unwrap().push(reloaded["update"]["revision"].as_u64().unwrap());
     finishGatedTool(&host);
     let final_response = expect_js_output(action.await, "action final revision");
     assert_eq!(final_response["actionResult"], "done");
+    assert!(final_response["update"]["upserts"].as_array().unwrap().iter().any(|node| node["props"]["text"] == "2"));
     delivered.lock().unwrap().push(final_response["update"]["revision"].as_u64().unwrap());
     let revisions = delivered.lock().unwrap().clone();
     assert!(revisions.len() >= 4, "both action intermediates and final updates must be exercised: {revisions:?}");
@@ -4545,4 +4878,94 @@ async fn collector_owned_execution_has_no_wall_deadline_and_cancels_cleanly() {
     );
     assert!(tokio::time::timeout(Duration::from_secs(2),spinning).await.unwrap().is_err());
     engine.destroy();
+}
+
+
+/// Queues continuations without blocking, preserving the original affine owner and FIFO order.
+#[test]
+fn host_notification_queue_preserves_affinity_and_order() {
+    let host = NativeHostJavaScriptRuntimeHost::new();
+    let (owner_sender, owner_receiver) = std::sync::mpsc::channel();
+    let handle = host.createHostJavaScriptRuntimeState("notification-test", Box::new(move || {
+        owner_sender.send(std::thread::current().id()).unwrap();
+        Ok(Box::new(Vec::<usize>::new()))
+    })).unwrap();
+    let owner = owner_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+    let (started_sender, started_receiver) = std::sync::mpsc::channel();
+    let (release_sender, release_receiver) = std::sync::mpsc::channel();
+    host.enqueueHostJavaScriptRuntimeStateTask(handle, 10_000, Box::new(move |state, _| {
+        assert_eq!(std::thread::current().id(), owner);
+        started_sender.send(()).unwrap();
+        release_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        state.downcast_mut::<Vec<usize>>().unwrap().push(1);
+        Ok(Box::new(()))
+    })).unwrap();
+    started_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+    host.enqueueHostJavaScriptRuntimeStateTask(handle, 10_000, Box::new(move |state, _| {
+        assert_eq!(std::thread::current().id(), owner);
+        state.downcast_mut::<Vec<usize>>().unwrap().push(2);
+        Ok(Box::new(()))
+    })).unwrap();
+    release_sender.send(()).unwrap();
+    let result = host.executeHostJavaScriptRuntimeStateTask(handle, 10_000, Box::new(move |state, _| {
+        assert_eq!(std::thread::current().id(), owner);
+        Ok(Box::new(state.downcast_ref::<Vec<usize>>().unwrap().clone()))
+    })).unwrap();
+    assert_eq!(*result.downcast::<Vec<usize>>().unwrap(), [1, 2]);
+    host.destroyHostJavaScriptRuntimeState(handle).unwrap();
+    assert!(host.enqueueHostJavaScriptRuntimeStateTask(handle, 1_000, Box::new(|_, _| Ok(Box::new(())))).is_err());
+}
+
+
+/// Completes an owner-lifetime call when its Host discards the queued start before execution.
+#[tokio::test(flavor = "current_thread")]
+async fn discarded_queued_start_finishes_without_a_wall_deadline() {
+    use operit_host_api::{
+        HostJavaScriptRuntime, HostJavaScriptRuntimeStateFactory,
+        HostJavaScriptRuntimeStateHandle, HostJavaScriptRuntimeStateTask,
+        HostJavaScriptRuntimeStateOutput, HostJavaScriptRuntimeStateAsyncTask,
+        HostJavaScriptRuntimeStateOutputFuture,
+    };
+
+    struct DiscardQueuedHost(Arc<dyn HostJavaScriptRuntimeHost>);
+
+    impl HostJavaScriptRuntimeHost for DiscardQueuedHost {
+        /// Keeps runtime creation on the real native Host.
+        fn createHostJavaScriptRuntime(&self) -> HostResult<Box<dyn HostJavaScriptRuntime>> {
+            self.0.createHostJavaScriptRuntime()
+        }
+        /// Keeps state creation on the real native Host.
+        fn createHostJavaScriptRuntimeState(&self, name: &str, factory: HostJavaScriptRuntimeStateFactory) -> HostResult<HostJavaScriptRuntimeStateHandle> {
+            self.0.createHostJavaScriptRuntimeState(name, factory)
+        }
+        /// Preserves synchronous lifecycle operations on the existing state.
+        fn executeHostJavaScriptRuntimeStateTask(&self, handle: HostJavaScriptRuntimeStateHandle, timeout: u64, task: HostJavaScriptRuntimeStateTask) -> HostResult<HostJavaScriptRuntimeStateOutput> {
+            self.0.executeHostJavaScriptRuntimeStateTask(handle, timeout, task)
+        }
+        /// Models destruction after admission but before the owner runs the queued start.
+        fn enqueueHostJavaScriptRuntimeStateTask(&self, _: HostJavaScriptRuntimeStateHandle, _: u64, task: HostJavaScriptRuntimeStateTask) -> HostResult<()> {
+            drop(task);
+            Ok(())
+        }
+        /// Preserves real cancellation and cleanup operations.
+        fn executeHostJavaScriptRuntimeStateAsyncTask(&self, handle: HostJavaScriptRuntimeStateHandle, timeout: u64, task: HostJavaScriptRuntimeStateAsyncTask) -> HostJavaScriptRuntimeStateOutputFuture {
+            self.0.executeHostJavaScriptRuntimeStateAsyncTask(handle, timeout, task)
+        }
+        /// Releases the same native state during cleanup.
+        fn destroyHostJavaScriptRuntimeState(&self, handle: HostJavaScriptRuntimeStateHandle) -> HostResult<()> {
+            self.0.destroyHostJavaScriptRuntimeState(handle)
+        }
+    }
+
+    let engine = newTestToolPkgRegistrationEngine();
+    let mut worker = engine.worker.clone();
+    worker.runtimeHost = Arc::new(DiscardQueuedHost(worker.runtimeHost.clone()));
+    let result = tokio::time::timeout(Duration::from_secs(2), worker.execute_script_function_async(
+        "exports.run = function() { return true; };".into(), "run".into(),
+        BTreeMap::new(), BTreeMap::new(), None, false, Duration::from_secs(60), 60,
+        None, None, false, true,
+    )).await;
+    engine.destroy();
+    let error = result.expect("A discarded start must disconnect without a wall-clock timer").unwrap_err();
+    assert_eq!(error.kind, JsExecutionErrorKind::WorkerUnavailable);
 }

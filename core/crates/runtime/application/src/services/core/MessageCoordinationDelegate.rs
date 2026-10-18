@@ -230,15 +230,6 @@ impl MessageCoordinationDelegate {
         turnOptions: ChatTurnOptions,
         admittedLease: Option<ChatExecutionLease>,
     ) -> Result<ChatTurnSubmission, String> {
-        AppLogger::i(
-            "CoreSend",
-            &format!(
-                "dispatch entry messageChars={} attachments={} prompt={:?}",
-                messageText.chars().count(),
-                attachments.len(),
-                promptFunctionType
-            ),
-        );
         let result = self.sendMessageInternal(
             enhancedAiService,
             promptFunctionType,
@@ -258,7 +249,6 @@ impl MessageCoordinationDelegate {
             turnOptions,
             admittedLease)
         .await;
-        AppLogger::i("CoreSend", "dispatch return");
         result
     }
 
@@ -565,7 +555,7 @@ impl MessageCoordinationDelegate {
             Some(value) => !value.trim().is_empty(),
             None => false,
         };
-        ChainLogger::info(
+        ChainLogger::verbose_with_level(
             SEND_CHAIN,
             "send.dispatch.start",
             &[
@@ -588,6 +578,7 @@ impl MessageCoordinationDelegate {
                 ),
                 ("modelOverrideSet", ChainLogger::boolField(modelOverrideSet)),
             ],
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
         self.tokenStatisticsDelegate
             .setActiveChatId(Some(chatId.clone()));
@@ -726,7 +717,7 @@ impl MessageCoordinationDelegate {
                 Some(chatId.clone()),
             );
         }
-        ChainLogger::info(
+        ChainLogger::verbose_with_level(
             SEND_CHAIN,
             "send.dispatch.accepted",
             &[
@@ -735,6 +726,7 @@ impl MessageCoordinationDelegate {
                 ("outputTokens", outputTokens.to_string()),
                 ("windowSize", windowSize.to_string()),
             ],
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
         if isAutoContinuation {
             self.removePendingAutoContinuation(chatId);

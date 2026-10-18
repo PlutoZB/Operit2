@@ -40,7 +40,7 @@ export interface StorageRecordIdentity {
 /**
  * Selects a database's permanently recorded data contract.
  */
-export type StorageKind = "sqlite" | "objects" | "data_store";
+export type StorageKind = "sqlite" | "objects";
 
 /**
  * Declares a synchronized collection column.
@@ -87,7 +87,7 @@ export interface StorageRecordWatchState {
 /**
  * Dispatches storage operations only through an authenticated engine-owned handle.
  */
-export type StorageRequest = { op: "open"; path: string; kind: StorageKind; merge: StorageMergeDescriptor | null; } | { op: "close"; handle: string; } | { op: "query"; handle: string; statement: StorageStatement; } | { op: "execute"; handle: string; statement: StorageStatement; } | { op: "transaction"; handle: string; statements: StorageStatement[]; whenAbsent: StorageRecordIdentity | null; } | { op: "define_table"; handle: string; table: StorageTable; } | { op: "get"; handle: string; collection: string; key: string; } | { op: "list"; handle: string; collection: string; after: string | null; limit: number; } | { op: "commit"; handle: string; mutations: StorageMutation[]; };
+export type StorageRequest = { op: "open"; path: string; kind: StorageKind; merge: StorageMergeDescriptor | null; } | { op: "open_preferences"; path: string; merge: StoragePreferencesMergeDescriptor | null; } | { op: "preferences_data"; handle: string; } | { op: "preferences_begin_edit"; handle: string; } | { op: "preferences_finish_edit"; handle: string; token: string; edits: StoragePreferenceEdit[]; schemaVersion: number; } | { op: "preferences_cancel_edit"; handle: string; token: string; } | { op: "close"; handle: string; } | { op: "query"; handle: string; statement: StorageStatement; } | { op: "execute"; handle: string; statement: StorageStatement; } | { op: "transaction"; handle: string; statements: StorageStatement[]; whenAbsent: StorageRecordIdentity | null; } | { op: "define_table"; handle: string; table: StorageTable; } | { op: "get"; handle: string; collection: string; key: string; } | { op: "get_many"; handle: string; collection: string; keys: string[]; } | { op: "list"; handle: string; collection: string; after: string | null; limit: number; } | { op: "commit"; handle: string; mutations: StorageMutation[]; };
 
 /**
  * Identifies one successfully opened database session.
@@ -111,7 +111,7 @@ export type StorageMergeMatchMode = "content" | "identity";
  * Describes a key prefix that points to another declared entity identity.
  */
 export interface StorageMergeKeyReference {
-  collection: string;
+  target: StorageMergeTarget;
   prefix: string;
 }
 
@@ -210,7 +210,79 @@ export interface StorageCommitResult {
 }
 
 /**
+ * Declares one complete-record catalog using the native preference merge executor.
+ */
+export interface StoragePreferencesMergeCatalog {
+  keyPrefix: string;
+  keySuffix: string;
+  identityField: string;
+  nameField: string;
+  ignoredFields: string[];
+  retiredKeys: string[];
+}
+
+/**
+ * Selects an exact preference or complete records with explicit key boundaries.
+ */
+export type StoragePreferencesMergeKey = { kind: "exact"; key: string; } | { kind: "records"; prefix: string; suffix: string; };
+
+/**
+ * Selects nested reference fields without interpreting application-specific JSON.
+ */
+export type StoragePreferencesMergePathSegment = { kind: "field"; name: string; } | { kind: "object_values"; } | { kind: "array_values"; } | { kind: "variant"; name: string; } | { kind: "identity"; prefix: string; suffix: string; };
+
+/**
+ * Declares a native preference reference targeting an explicit catalog file.
+ */
+export interface StoragePreferencesMergeReference {
+  key: StoragePreferencesMergeKey;
+  path: StoragePreferencesMergePathSegment[];
+  target: string;
+}
+
+/**
+ * Projects selected entity fields through the native preference merge executor.
+ */
+export interface StoragePreferencesMergeProjection {
+  selectionKey: string;
+  sourceField: string;
+  fields: Record<string, string>;
+  retiredKeys: string[];
+}
+
+/**
+ * Carries the native merge capabilities as bounded data alongside preference journal entries.
+ */
+export interface StoragePreferencesMergeDescriptor {
+  version: number;
+  catalog: StoragePreferencesMergeCatalog | null;
+  references: StoragePreferencesMergeReference[];
+  projection: StoragePreferencesMergeProjection | null;
+}
+
+/**
+ * Preserves native preference edit intentions across the callback transport boundary.
+ */
+export type StoragePreferenceEdit = { op: "set"; key: string; value: unknown; } | { op: "remove"; key: string; } | { op: "increment_integer"; key: string; delta: number; } | { op: "set_object_field"; key: string; field: string; value: unknown; };
+
+/**
+ * Carries a complete typed preference snapshot independently of object collection versions.
+ */
+export interface StoragePreferencesSnapshot {
+  values: Record<string, unknown>;
+  schemaVersion: number;
+}
+
+/**
+ * Identifies a single callback invocation whose publication must match its original snapshot.
+ */
+export interface StoragePreferencesEdit {
+  token: string;
+  snapshot: StoragePreferencesSnapshot;
+}
+
+/**
  * Returns each storage operation's concrete business result.
  * Serialization preserves the database API payload; tool results add their own operation discriminator.
  */
-export type StorageResponse = StorageOpenResult | null | StorageSqlRow[] | StorageSqlExecutionResult[] | StorageSqlExecutionResult[] | StorageTableDefinitionResult | StorageValueEntry | null | StorageKeyValueEntry[] | StorageCommitResult;
+export type StorageResponse = StorageOpenResult | StoragePreferencesSnapshot | StoragePreferencesEdit | StoragePreferencesSnapshot | null | null | StorageSqlRow[] | StorageSqlExecutionResult[] | StorageSqlExecutionResult[] | StorageTableDefinitionResult | StorageValueEntry | null | (StorageValueEntry | null)[] | StorageKeyValueEntry[] | StorageCommitResult;

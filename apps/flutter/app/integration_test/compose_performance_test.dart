@@ -370,6 +370,7 @@ void main() {
               );
               // Prove actual seeded business content was rendered, not just a spinner.
               Map<String, Object?>? webTiming;
+              List<String>? renderedRoleLabels;
               if (workload == 'main') {
                 webTiming = await waitForWebContent(
                   tester,
@@ -377,7 +378,16 @@ void main() {
                   expectedCardCount,
                 );
               } else {
-                expect(find.text('Benchmark character 0'), findsWidgets);
+                // Lazy rows follow the live sidebar order; card 0 can be outside
+                // the viewport. Require real seeded roles in the visible tree.
+                renderedRoleLabels = tester
+                    .widgetList<Text>(
+                      find.textContaining(RegExp(r'^Benchmark character \d+$')),
+                    )
+                    .map((text) => text.data ?? text.textSpan!.toPlainText())
+                    .toSet()
+                    .toList();
+                expect(renderedRoleLabels, isNotEmpty);
               }
               final images = tester
                   .widgetList<Image>(find.byType(Image))
@@ -402,6 +412,8 @@ void main() {
                 'finishedWallMicros': finishedWallMicros,
                 'log': log,
                 if (webTiming != null) 'webTiming': webTiming,
+                if (renderedRoleLabels != null)
+                  'renderedRoleLabels': renderedRoleLabels,
                 'imageWidgets': images.length,
                 'uniqueMemoryImages': memoryImages.length,
                 'uniqueVfsImages': vfsImages.length,

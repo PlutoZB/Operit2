@@ -11,10 +11,31 @@ mod chat_runtime;
 mod cli;
 mod client_paths;
 mod core_proxy;
+#[cfg(unix)]
+mod daemon;
 mod error;
 mod mdns;
 mod rescue;
+#[cfg(test)]
+mod profile_migration_acceptance_tests;
 mod tui;
+
+#[cfg(not(unix))]
+mod daemon {
+    /// The control channel is a Unix domain socket; other hosts keep the
+    /// existing short-lived CLI Core behavior.
+    pub(crate) async fn run(_args: &[String]) -> Result<(), String> {
+        Err("daemon mode is only supported on Unix hosts".to_string())
+    }
+
+    pub(crate) fn process_is_owner() -> bool {
+        false
+    }
+
+    pub(crate) fn owner_is_running() -> bool {
+        false
+    }
+}
 
 pub(crate) use bootstrap::{
     create_cli_core_application, create_cli_core_application_configured,
@@ -61,6 +82,7 @@ async fn run() -> Result<(), CliError> {
             Ok(())
         }
         "cli" => cli::run_cli_root(&args[1..]).await.map_err(CliError::user),
+        "daemon" => daemon::run(&args[1..]).await.map_err(CliError::user),
         "tui" => tui::run_tui_command(&args[1..]).await.map_err(map_tui_error),
         "install" | "uninstall" => cli::run_cli_root(&args).await.map_err(CliError::user),
         value if value.starts_with('-') => {

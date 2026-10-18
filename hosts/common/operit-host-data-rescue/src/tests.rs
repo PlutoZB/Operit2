@@ -11,7 +11,7 @@ impl Fixture {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!("operit-rescue-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
-        Self(root)
+        Self(fs::canonicalize(root).unwrap())
     }
 
     /// Creates one raw payload without using any database or normal bootstrap service.
@@ -36,7 +36,7 @@ impl Fixture {
 impl Drop for Fixture {
     /// Deletes only the UUID-owned fixture after its borrowed sessions have been dropped.
     fn drop(&mut self) {
-        assert_eq!(self.0.parent(), Some(std::env::temp_dir().as_path()));
+        assert_eq!(self.0.parent(), Some(fs::canonicalize(std::env::temp_dir()).unwrap().as_path()));
         fs::remove_dir_all(&self.0).unwrap();
     }
 }
@@ -212,6 +212,124 @@ fn interrupted_publication_requires_explicit_resume_and_keeps_originals() {
     assert!(StorageLease::acquire(&target.0.join("runtime"), false).is_ok());
 }
 
+/// Creates the directory aliases used by Unix application containers.
+#[cfg(unix)]
+fn directory_alias(target: &Path, alias: &Path) {
+    std::os::unix::fs::symlink(target, alias).unwrap();
+}
+
+/// Creates a Windows directory junction without requiring symbolic-link privileges.
+#[cfg(windows)]
+fn directory_alias(target: &Path, alias: &Path) {
+    let output = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(alias)
+        .arg(target)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "Cannot create test junction: {}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// Resolves fresh-install destinations without creating them and rejects invalid directory roots.
+#[test]
+fn physical_roots_preserve_missing_directories() {
+    let fixture = Fixture::new();
+    assert_eq!(absolute_root(&fixture.0).unwrap(), fixture.0);
+    for relative in ["runtime", "not-created/identities/default/runtime"] {
+        let root = fixture.0.join(relative);
+        assert_eq!(absolute_root(&root).unwrap(), root);
+        assert!(!root.exists());
+    }
+    assert!(absolute_root(Path::new("relative/runtime")).is_err());
+    let mut traversal = fixture.0.as_os_str().to_os_string();
+    traversal.push(format!("{separator}..{separator}escape", separator = std::path::MAIN_SEPARATOR));
+    assert!(absolute_root(Path::new(&traversal)).is_err());
+    fixture.write("regular-file", b"not a directory");
+    assert!(absolute_root(&fixture.0.join("regular-file")).is_err());
+    assert!(absolute_root(&fixture.0.join("regular-file/runtime")).is_err());
+}
+
+/// Shares one storage lock across ancestor aliases before the runtime directory exists.
+#[test]
+fn ancestor_aliases_share_runtime_and_maintenance_leases() {
+    let fixture = Fixture::new();
+    let physical = fixture.0.join("physical");
+    let application = physical.join("app/files");
+    fs::create_dir_all(&application).unwrap();
+    let alias = fixture.0.join("user-0");
+    directory_alias(&physical, &alias);
+    let aliased_runtime = alias.join("app/files/runtime");
+    let runtime = application.join("runtime");
+    assert!(!runtime.exists());
+    assert_eq!(absolute_root(&aliased_runtime).unwrap(), runtime);
+    let normal = StorageLease::acquire(&aliased_runtime, false).unwrap();
+    assert!(StorageLease::acquire(&runtime, true).is_err());
+    drop(normal);
+    let mut session = NativeRescueSession::open(aliased_runtime.clone(), None).unwrap();
+    assert_eq!(session.default_runtime, runtime);
+    let described = session.execute(json!({
+        "operation": "configure",
+        "roots": RescueRoots {
+            runtime_root: aliased_runtime.clone(),
+            workspace_root: alias.join("app/files/workspaces"),
+            cli_config_root: None,
+        },
+    })).unwrap();
+    assert_eq!(described["applicationRoot"], json!(application));
+    assert_eq!(described["roots"]["runtime"], json!(runtime));
+    assert!(StorageLease::acquire(&aliased_runtime, false).is_err());
+    assert!(StorageLease::acquire(&runtime, false).is_err());
+    drop(session);
+    assert!(StorageLease::acquire(&runtime, false).is_ok());
+    fs::create_dir_all(&runtime).unwrap();
+    assert_eq!(absolute_root(&aliased_runtime).unwrap(), runtime);
+}
+
+/// Compares physical roots so directory aliases cannot conceal overlapping data trees.
+#[test]
+fn ancestor_aliases_do_not_hide_overlapping_roots() {
+    let fixture = Fixture::new();
+    let physical = fixture.0.join("physical");
+    fs::create_dir_all(&physical).unwrap();
+    let alias = fixture.0.join("alias");
+    directory_alias(&physical, &alias);
+    let roots = RescueRoots {
+        runtime_root: physical.join("runtime"),
+        workspace_root: alias.join("runtime/nested"),
+        cli_config_root: None,
+    };
+    let error = NativeRescueHost::new(&fixture.0.join("application/runtime"), roots, None).err().unwrap();
+    assert_eq!(error, "Selected storage roots must not overlap");
+}
+
+/// Rejects root links and linked descendants even when ancestor aliases are accepted.
+#[test]
+fn root_links_and_descendant_links_are_rejected() {
+    let fixture = Fixture::new();
+    let external = fixture.0.join("external");
+    fs::create_dir_all(&external).unwrap();
+    let linked_root = fixture.0.join("linked-root");
+    directory_alias(&external, &linked_root);
+    let error = absolute_root(&linked_root).unwrap_err();
+    assert!(error.starts_with("Filesystem links are not accepted at the rescue boundary:"));
+    let runtime = fixture.0.join("runtime");
+    fs::create_dir_all(&runtime).unwrap();
+    directory_alias(&external, &runtime.join("linked-directory"));
+    assert!(checked_descendant(&runtime, "linked-directory/secret").is_err());
+    assert!(collect_files(&runtime, "runtime", &mut Vec::new(), &mut Vec::new()).is_err());
+}
+
+/// Reports dangling ancestor aliases without treating their targets as new data directories.
+#[test]
+fn dangling_ancestor_aliases_are_rejected() {
+    let fixture = Fixture::new();
+    let missing = fixture.0.join("missing-target");
+    let alias = fixture.0.join("dangling-alias");
+    directory_alias(&missing, &alias);
+    assert!(absolute_root(&alias.join("runtime")).is_err());
+    assert!(!missing.exists());
+}
+
 /// Rejects overlapping roots before the service can traverse or stage any user data.
 #[test]
 fn root_overlap_is_an_explicit_error() {
@@ -220,4 +338,54 @@ fn root_overlap_is_an_explicit_error() {
     roots.workspace_root = roots.runtime_root.join("nested-workspace");
     let mut session = NativeRescueSession::open(fixture.0.join("runtime"), None).unwrap();
     assert!(session.execute(json!({"operation":"configure","roots":roots})).is_err());
+}
+
+/// Allows vetted platform prefixes to be links while keeping rescue behavior intact.
+#[test]
+#[cfg(unix)]
+fn platform_symlinked_ancestors_keep_startup_and_maintenance_available() {
+    use std::os::unix::fs::symlink;
+    let fixture = Fixture::new();
+    let application = fixture.0.join("application");
+    fs::create_dir_all(application.join("runtime")).unwrap();
+    fs::create_dir_all(application.join("workspaces")).unwrap();
+    let alias = fixture.0.join("alias");
+    symlink(&application, &alias).unwrap();
+    if let Err(error) = StorageLease::acquire(&alias.join("runtime"), false) {
+        panic!("a symlinked platform prefix must not block startup: {error}");
+    }
+    let mut session = NativeRescueSession::open(alias.join("runtime"), None).unwrap();
+    session.execute(json!({"operation":"configure","roots":{
+        "runtimeRoot": alias.join("runtime"),
+        "workspaceRoot": alias.join("workspaces")
+    }})).unwrap();
+    let archive = session.execute(json!({"operation":"export","password":PASSWORD})).unwrap();
+    assert!(Path::new(archive["fileReference"].as_str().unwrap()).is_file());
+}
+
+/// Continues to reject a redirected root and link components inside an accepted root.
+#[test]
+#[cfg(unix)]
+fn direct_links_are_still_rejected_at_the_rescue_boundary() {
+    use std::os::unix::fs::symlink;
+    let fixture = Fixture::new();
+    fixture.write("runtime/file", b"payload");
+    let linked_root = fixture.0.join("linked-runtime");
+    symlink(fixture.0.join("runtime"), &linked_root).unwrap();
+    let mut linked = NativeRescueSession::open(fixture.0.join("runtime"), None).unwrap();
+    let error = linked.execute(json!({"operation":"configure","roots":{
+        "runtimeRoot": linked_root.clone(),
+        "workspaceRoot": fixture.0.join("workspaces")
+    }})).unwrap_err();
+    assert!(error.starts_with("Filesystem links are not accepted at the rescue boundary:"), "{error}");
+    drop(linked);
+    match NativeRescueSession::open(linked_root.clone(), None) {
+        Ok(_) => panic!("a redirected default runtime root must be rejected"),
+        Err(error) => assert!(error.starts_with("Filesystem links are not accepted at the rescue boundary:"), "{error}"),
+    }
+
+    let mut session = NativeRescueSession::open(fixture.0.join("runtime"), None).unwrap();
+    symlink(&fixture.0, fixture.0.join("runtime/escape")).unwrap();
+    let error = session.execute(json!({"operation":"configure","roots":fixture.roots()})).unwrap_err();
+    assert!(error.starts_with("Filesystem links require an explicit archival policy:"), "{error}");
 }

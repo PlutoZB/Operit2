@@ -493,19 +493,21 @@ fn scheduleSharedStreamCollection<S>(
                     if matches!(started, StreamStart::Lazily)
                         && retryShared.subscription_count() == 0
                     {
-                        AppLogger::d(
+                        AppLogger::v_with_level(
                             STREAM_DISPATCH_LOG_TAG,
                             "shared stream collection deferred until a subscriber is attached",
+                            crate::AppLogger::VERBOSE_LEVEL_4,
                         );
                         scheduleSharedStreamCollectionAfterDelay(retrySource, retryShared, started);
                         return;
                     }
-                    AppLogger::d(
+                    AppLogger::v_with_level(
                         STREAM_DISPATCH_LOG_TAG,
                         &format!(
                             "shared stream collection started subscribers={}",
                             retryShared.subscription_count()
                         ),
+                        crate::AppLogger::VERBOSE_LEVEL_4,
                     );
                     let mut stream = retrySource
                         .lock()
@@ -517,9 +519,10 @@ fn scheduleSharedStreamCollection<S>(
                         stream.collect(&mut move |value| target.emit(value)).await;
                     }
                     retryShared.close();
-                    AppLogger::d(
+                    AppLogger::v_with_level(
                         STREAM_DISPATCH_LOG_TAG,
                         "shared stream collection completed",
+                        crate::AppLogger::VERBOSE_LEVEL_4,
                     );
                 })
             }),

@@ -14,6 +14,7 @@ struct TestFileSystemHost {
     fail_inspect: bool,
     fail_directory: bool,
     fail_write: Option<String>,
+    append_count: std::sync::atomic::AtomicUsize,
 }
 
 impl FileSystemHost for TestFileSystemHost {
@@ -61,6 +62,7 @@ impl FileSystemHost for TestFileSystemHost {
             return Err(HostError::new("Parent directory does not exist"));
         }
         if append {
+            self.append_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             storage
                 .files
                 .entry(path.into())
@@ -245,4 +247,77 @@ fn failed_configuration_keeps_memory_logs_and_can_recover() {
     let storage = recovered.storage.lock().unwrap();
     assert!(storage.files[LOG].contains("file logging recovered"));
     assert!(storage.files[PACKAGE_LOG].contains("file logging recovered"));
+}
+
+/// Coalesces nested synchronous scopes while preserving formatted records and explicit host ownership.
+#[test]
+fn file_write_batches_preserve_records_and_flush_once_per_host() {
+    let first = Arc::new(TestFileSystemHost::default());
+    let second = Arc::new(TestFileSystemHost::default());
+    let first_host: Arc<dyn FileSystemHost> = first.clone();
+    let second_host: Arc<dyn FileSystemHost> = second.clone();
+    let path = "/runtime/logs/operit.log";
+    ensure_log_file(&first_host, path).unwrap();
+    ensure_log_file(&second_host, path).unwrap();
+    {
+        let _outer = AppLogger::batch_file_writes();
+        append_line(&first_host, path, "12:00:00.001 first\n");
+        {
+            let _inner = AppLogger::batch_file_writes();
+            append_line(&first_host, path, "12:00:00.002 second\n");
+            append_line(&second_host, path, "12:00:00.003 other-host\n");
+        }
+        assert_eq!(first.storage.lock().unwrap().files[path], "");
+    }
+    assert_eq!(first.storage.lock().unwrap().files[path], "12:00:00.001 first\n12:00:00.002 second\n");
+    assert_eq!(second.storage.lock().unwrap().files[path], "12:00:00.003 other-host\n");
+    assert_eq!(first.append_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(second.append_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    append_line(&first_host, path, "12:00:00.004 outside\n");
+    assert_eq!(first.append_count.load(std::sync::atomic::Ordering::Relaxed), 2);
+}
+
+/// Flushes records before a failed synchronous execution leaves its thread.
+#[test]
+fn file_write_batches_flush_when_execution_unwinds() {
+    let host = Arc::new(TestFileSystemHost::default());
+    let files: Arc<dyn FileSystemHost> = host.clone();
+    let path = "/runtime/logs/operit.log";
+    ensure_log_file(&files, path).unwrap();
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _batch = AppLogger::batch_file_writes();
+        append_line(&files, path, "execution failed\n");
+        panic!("fixture execution failure");
+    }));
+    assert!(failure.is_err());
+    assert_eq!(host.storage.lock().unwrap().files[path], "execution failed\n");
+    assert_eq!(host.append_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+
+/// Flushes each poll before yielding and keeps unrelated work outside the suspended future's batch.
+#[test]
+fn future_file_write_batches_flush_before_pending() {
+    use std::future::{poll_fn, Future};
+    use std::task::{Context, Poll, Waker};
+    let host = Arc::new(TestFileSystemHost::default());
+    let files: Arc<dyn FileSystemHost> = host.clone();
+    let path = "/runtime/logs/operit.log";
+    ensure_log_file(&files, path).unwrap();
+    let mut polls = 0;
+    let mut future = Box::pin(AppLogger::batch_future_file_writes(poll_fn(|_| {
+        append_line(&files, path, "first record\n");
+        append_line(&files, path, "second record\n");
+        polls += 1;
+        if polls == 1 { Poll::Pending } else { Poll::Ready(42) }
+    })));
+    let _: &dyn Send = &future;
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(future.as_mut().poll(&mut context).is_pending());
+    assert_eq!(host.append_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(host.storage.lock().unwrap().files[path], "first record\nsecond record\n");
+    append_line(&files, path, "unrelated task\n");
+    assert_eq!(host.append_count.load(std::sync::atomic::Ordering::Relaxed), 2);
+    assert_eq!(future.as_mut().poll(&mut context), Poll::Ready(42));
+    assert_eq!(host.append_count.load(std::sync::atomic::Ordering::Relaxed), 3);
 }

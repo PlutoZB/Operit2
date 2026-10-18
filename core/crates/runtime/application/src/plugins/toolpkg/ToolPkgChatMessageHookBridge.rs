@@ -77,7 +77,7 @@ impl ToolPkgChatMessageHookBridge {
                     let eventPayload = buildChatMessagePayload(chatId, message);
                     let manager = runtime.package_manager();
                     for hook in activeHooks {
-                        ChainLogger::info(
+                        ChainLogger::verbose_with_level(
                             PLUGIN_CHAIN,
                             "plugin.toolpkg.chat_message.run.start",
                             &[
@@ -86,6 +86,7 @@ impl ToolPkgChatMessageHookBridge {
                                 ("hookId", hook.hookId.clone()),
                                 ("function", hook.functionName.clone()),
                             ],
+                            operit_util::AppLogger::VERBOSE_LEVEL_3,
                         );
                         match manager
                             .runToolPkgMainHook(
@@ -102,7 +103,7 @@ impl ToolPkgChatMessageHookBridge {
                             )
                             .await
                         {
-                            Ok(_) => ChainLogger::info(
+                            Ok(_) => ChainLogger::verbose_with_level(
                                 PLUGIN_CHAIN,
                                 "plugin.toolpkg.chat_message.run.done",
                                 &[
@@ -110,6 +111,7 @@ impl ToolPkgChatMessageHookBridge {
                                     ("package", hook.containerPackageName.clone()),
                                     ("hookId", hook.hookId.clone()),
                                 ],
+                                operit_util::AppLogger::VERBOSE_LEVEL_3,
                             ),
                             Err(error) => ChainLogger::error(
                                 PLUGIN_CHAIN,

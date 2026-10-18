@@ -167,7 +167,7 @@ export function characterSidebarSections(directory: Pick<SnapshotRecord, "cards"
   for (const chat of chats) {
     const state = selectionByChat.get(chat.id);
     if (state === undefined) throw new Error("Sidebar has no explicit namespace selection state for chat: " + chat.id);
-    if (state.selection === null) { unbound.chats.push(chat); continue; }
+    if (state.selection === null || decodeSelection(state.selection, directory).entity === "model") { unbound.chats.push(chat); continue; }
     const section = bySelection.get(state.selection);
     if (section === undefined) throw new Error("Plugin selection has no real category: " + state.selection);
     section.chats.push(chat);

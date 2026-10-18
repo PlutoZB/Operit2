@@ -4,7 +4,7 @@ import type { Catalog } from "./catalog";
 import type { Chat } from "./chat";
 import type { JsonObject } from "./core";
 import type { Models } from "./models";
-import type { StorageKeyValueEntry, StorageSqlExecutionResult, StorageSqlRow, StorageValueEntry } from "./storage.generated";
+import type { StorageKeyValueEntry, StoragePreferencesEdit, StoragePreferencesSnapshot, StorageSqlExecutionResult, StorageSqlRow, StorageValueEntry } from "./storage.generated";
 import type { Theme } from "./theme";
 import type { Tts } from "./tts";
 
@@ -478,7 +478,7 @@ export interface FileApplyResultData {
 /**
  * Returns the concrete result fields of the selected Storage tool operation.
  */
-export type StorageRequestResultData = { op: "open"; handle: string; path: string; } | { op: "close"; } | { op: "query"; rows: StorageSqlRow[]; } | { op: "execute"; results: StorageSqlExecutionResult[]; } | { op: "transaction"; results: StorageSqlExecutionResult[]; } | { op: "define_table"; changed: boolean; } | { op: "get"; entry: StorageValueEntry | null; } | { op: "list"; entries: StorageKeyValueEntry[]; } | { op: "commit"; version: string; };
+export type StorageRequestResultData = { op: "open"; handle: string; path: string; } | { op: "preferences_data"; snapshot: StoragePreferencesSnapshot; } | { op: "preferences_begin_edit"; edit: StoragePreferencesEdit; } | { op: "preferences_finish_edit"; snapshot: StoragePreferencesSnapshot; } | { op: "preferences_cancel_edit"; } | { op: "close"; } | { op: "query"; rows: StorageSqlRow[]; } | { op: "execute"; results: StorageSqlExecutionResult[]; } | { op: "transaction"; results: StorageSqlExecutionResult[]; } | { op: "define_table"; changed: boolean; } | { op: "get"; entry: StorageValueEntry | null; } | { op: "get_many"; entries: (StorageValueEntry | null)[]; } | { op: "list"; entries: StorageKeyValueEntry[]; } | { op: "commit"; version: string; };
 
 /**
  * Contains an HTTP response status, headers, cookies, media type, and decoded or Base64 body.

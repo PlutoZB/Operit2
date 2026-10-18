@@ -8,7 +8,7 @@ export function createCharacterDraft(): Card {
     advancedCustomPrompt: "", marks: "", chatModelBindingMode: "FOLLOW_GLOBAL", chatModelId: null, chatProviderId: null,
     ttsConfigId: null, themeConfigId: null, memoryBindingMode: "CHARACTER", sharedMemoryId: null, sharedMemoryMounts: [],
     toolAccessConfig: { enabled: false, allowedBuiltinTools: [], allowedPackages: [], allowedSkills: [], allowedMcpServers: [] },
-    isDefault: false, createdAt: 0, updatedAt: 0,
+    createdAt: 0, updatedAt: 0,
   };
 }
 

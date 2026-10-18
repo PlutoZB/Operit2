@@ -1,6 +1,19 @@
 /// Owns callback closures, transport IDs, and registration cleanup for one context.
 var OperitComposeActions = function () {
   var sources = new WeakMap();
+  var viewportHandlers = new WeakSet();
+
+  /// Only SDK-owned range callbacks may reuse content across a viewport recomposition.
+  function viewport(handler) {
+    viewportHandlers.add(handler);
+    return handler;
+  }
+
+  /// Keeps the current callback kind when generation replaces a trampoline's closure.
+  function forward(wrapper, handler) {
+    if (viewportHandlers.has(handler)) viewportHandlers.add(wrapper);
+    else viewportHandlers.delete(wrapper);
+  }
 
   /// Preserves ownership when generation observes the same callback through a proxy.
   function inherit(reference, proxy) {
@@ -58,6 +71,11 @@ var OperitComposeActions = function () {
     }
     return {
       store: store,
+      isViewport: function (id) {
+        var handler = store[String(id || '').trim()];
+        if (typeof handler !== 'function') throw new Error('compose action not found: ' + id);
+        return viewportHandlers.has(handler);
+      },
       allocate: allocate,
       set: set,
       register: register,
@@ -77,6 +95,8 @@ var OperitComposeActions = function () {
   }
   return {
     create: create,
+    viewport: viewport,
+    forward: forward,
     inherit: inherit
   };
 }();

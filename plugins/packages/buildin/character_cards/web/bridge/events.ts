@@ -1,3 +1,4 @@
+import { inputChatBinding, changeChatBinding } from "../features/characters/chat-binding";
 import { changeMemoryControls } from "../features/memory/controls-events";
 import { cancelGraphCameraAnimation } from "../features/graph/camera";
 import { updateScoreOutput } from "../features/memory/item-events";
@@ -42,6 +43,8 @@ export function createEditorEvents(context: EditorContext, features: readonly Ac
     if (!(event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement)) return;
     const element = event.target;
     if (element.disabled) return;
+    if (element.hasAttribute("data-binding-query") && event instanceof InputEvent && event.isComposing) return;
+    if (inputChatBinding(context, element)) return;
     if (element instanceof HTMLInputElement && context.onScreenInput(element)) return;
     if (element instanceof HTMLInputElement && element.type === "checkbox") return;
     if (element.hasAttribute("data-graph-search")) { topDialog("graph").query = element.value; return; }
@@ -61,6 +64,7 @@ export function createEditorEvents(context: EditorContext, features: readonly Ac
     if (!(event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement)) return;
     const element = event.target;
     if (element.disabled) return;
+    if (changeChatBinding(context, element)) return;
     if (element.hasAttribute("data-graph-folder")) { topDialog("graph").folder = element.value; updateGraphSurface(topDialog("graph")); return; }
     if (element instanceof HTMLInputElement && changeMemoryControls(context, element)) return;
   }

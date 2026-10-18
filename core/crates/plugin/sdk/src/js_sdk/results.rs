@@ -792,6 +792,14 @@ pub enum StorageRequestResultData {
         handle: String,
         path: String,
     },
+    #[serde(rename = "preferences_data")]
+    PreferencesData { snapshot: super::storage::StoragePreferencesSnapshot },
+    #[serde(rename = "preferences_begin_edit")]
+    PreferencesBeginEdit { edit: super::storage::StoragePreferencesEdit },
+    #[serde(rename = "preferences_finish_edit")]
+    PreferencesFinishEdit { snapshot: super::storage::StoragePreferencesSnapshot },
+    #[serde(rename = "preferences_cancel_edit")]
+    PreferencesCancelEdit,
     #[serde(rename = "close")]
     Close,
     #[serde(rename = "query")]
@@ -814,6 +822,10 @@ pub enum StorageRequestResultData {
     Get {
         entry: JsNullable<StorageValueEntry>,
     },
+    #[serde(rename = "get_many")]
+    GetMany {
+        entries: Vec<JsNullable<StorageValueEntry>>,
+    },
     #[serde(rename = "list")]
     List {
         entries: Vec<StorageKeyValueEntry>,
@@ -831,6 +843,10 @@ impl From<StorageResponse> for StorageRequestResultData {
                 handle: opened.handle,
                 path: opened.path,
             },
+            StorageResponse::PreferencesData(snapshot) => Self::PreferencesData { snapshot },
+            StorageResponse::PreferencesBeginEdit(edit) => Self::PreferencesBeginEdit { edit },
+            StorageResponse::PreferencesFinishEdit(snapshot) => Self::PreferencesFinishEdit { snapshot },
+            StorageResponse::PreferencesCancelEdit => Self::PreferencesCancelEdit,
             StorageResponse::Close => Self::Close,
             StorageResponse::Query(rows) => Self::Query { rows },
             StorageResponse::Execute(results) => Self::Execute { results },
@@ -840,6 +856,9 @@ impl From<StorageResponse> for StorageRequestResultData {
             },
             StorageResponse::Get(entry) => Self::Get {
                 entry: JsNullable::from_option(entry),
+            },
+            StorageResponse::GetMany(entries) => Self::GetMany {
+                entries: entries.into_iter().map(JsNullable::from_option).collect(),
             },
             StorageResponse::List(entries) => Self::List { entries },
             StorageResponse::Commit(result) => Self::Commit {

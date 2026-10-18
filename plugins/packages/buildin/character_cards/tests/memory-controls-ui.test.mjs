@@ -120,7 +120,7 @@ test("real main IPC: memory settings load/save atomically, retain scheduler stat
   ui.harness.disk.clearCalls();
   await dialog.getByRole("button", { name: "保存", exact: true }).click();
   await ui.page.getByText("记忆设置已保存", { exact: true }).waitFor();
-  assert.equal(ui.harness.disk.calls.filter(call => call.method === "storage.transaction").length, 1);
+  assert.equal(ui.harness.disk.calls.filter(call => call.method === "storage.commit").length, 1);
   const owner = await storedOwner(ui.harness);
   assert.equal(owner.settings.autoSaveIntervalMinutes, 13);
   assert.equal(owner.settings.memoryExtractionCustomRules, "Only real owner-scoped extraction rules");
@@ -346,16 +346,16 @@ test("real search-debug UI: draft weights change genuine ranking without saving;
 test("global switches genuinely persist, gate new USER.md profiles and automatic jobs, while explicit rebuild remains available", async t => {
   const ui = await controlsPage(t);
   await ui.runtime.web({ action: "writeUser", ownerKey: CONTROLLED_OWNER, content: "# Private actual USER.md" });
-  const resolve = () => ui.runtime.api("chat.configuration.resolve", { purpose: "execution", chatId: CONTROLLED_CHAT_ID, chatExtension: { version: 1, selection: "card:default" }, messageExtension: null, participantId: null, promptFunctionType: "CHAT", defaultModelBinding: { providerId: "dashscope", modelId: "qwen-plus" }, defaultTtsConfigId: "tts-one" });
+  const resolve = () => ui.runtime.api("chat.configuration.resolve", { purpose: "execution", chatId: CONTROLLED_CHAT_ID, chatExtension: { version: 1, selection: "card:default" }, participantId: null, promptFunctionType: "CHAT", defaultModelBinding: { providerId: "dashscope", modelId: "qwen-plus" }, defaultTtsConfigId: "tts-one" });
   const initialExecution = plain(await resolve());
   assert.equal(initialExecution.profile.userPreferencesText, "# Private actual USER.md");
   const profile = ui.page.getByRole("switch", { name: "向模型提供用户资料", exact: true });
   await profile.click(); await ui.page.waitForFunction(() => !document.querySelector('[data-key="userDescriptionEnabled"]').checked);
   assert.equal((await resolve()).profile.userPreferencesText, "");
-  const historical = plain(await ui.runtime.api("chat.configuration.resolve", { purpose: "execution", chatId: CONTROLLED_CHAT_ID, chatExtension: null, messageExtension: initialExecution.messageExtension, participantId: initialExecution.profile.id, promptFunctionType: "CHAT", defaultModelBinding: { providerId: "must-not-replace-history", modelId: "must-not-replace-history" }, defaultTtsConfigId: "must-not-replace-history" }));
-  assert.deepEqual(historical.profile, { ...initialExecution.profile, userPreferencesText: "" });
-  assert.ok(historical.participants.every(profile => profile.userPreferencesText === ""));
-  assert.deepEqual(historical.messageExtension, initialExecution.messageExtension);
+  const current = plain(await resolve());
+  assert.deepEqual(current.profile, { ...initialExecution.profile, userPreferencesText: "" });
+  assert.ok(current.participants.every(profile => profile.userPreferencesText === ""));
+  await assert.rejects(() => ui.runtime.api("chat.configuration.resolve", { purpose: "execution", chatId: CONTROLLED_CHAT_ID, chatExtension: null, executionData: initialExecution.executionData, participantId: initialExecution.profile.id, promptFunctionType: "CHAT", defaultModelBinding: initialExecution.profile.modelBinding, defaultTtsConfigId: initialExecution.profile.ttsConfigId }), /not a supported field/);
   assert.equal((await ui.runtime.web({ action: "readUser", ownerKey: CONTROLLED_OWNER })).content, "# Private actual USER.md");
   const automatic = ui.page.getByRole("switch", { name: "自动更新记忆库", exact: true });
   await ui.runtime.enqueueReplies(); await ui.runtime.makeDue();
@@ -389,7 +389,7 @@ test("global preferences reject malformed IPC and failed transactions without pu
     { action: "writeGlobalMemoryPreference", key: "autoUpdateEnabled", value: "true" },
   ]) await assert.rejects(() => ui.runtime.web(operation), /Unknown global|必须是布尔值/);
   assert.equal(await ui.harness.readStateText(), before);
-  ui.harness.disk.failNext("storage.transaction", new Error("Actual global preference transaction failure"));
+  ui.harness.disk.failNext("storage.preferences.edit", new Error("Actual global preference transaction failure"));
   await assert.rejects(() => ui.runtime.web({ action: "writeGlobalMemoryPreference", key: "autoUpdateEnabled", value: false }), /Actual global preference transaction failure/);
   assert.equal(await ui.harness.readStateText(), before);
   assert.equal((await ui.harness.openRuntime().web({ action: "snapshot" })).memoryPreferences.autoUpdateEnabled, true);
@@ -474,15 +474,15 @@ test("Tavern import selector delegates untouched input to genuine codecs; native
   assert.deepEqual(ui.errors, []);
 });
 
-/** Requires centralized migration to supply complete flags and rejects malformed live SQL values. */
+/** Rejects absent or malformed flags in complete stored JSON without changing user data. */
 test("runtime rejects missing or corrupt memory preferences without writing defaults", async t => {
   const ui = await controlsPage(t);
   await ui.runtime.web({ action: "writeGlobalMemoryPreference", key: "autoUpdateEnabled", value: false });
   assert.equal((await ui.harness.openRuntime().web({ action: "snapshot" })).memoryPreferences.autoUpdateEnabled, false);
-  ui.harness.disk.storage.inspect(sql => sql.prepare('UPDATE meta SET "memoryPreferences__state"=0 WHERE "_key"=?').run("state"));
+  ui.harness.disk.storage.inspectPreferences("meta", values => { delete values.state.memoryPreferences; });
   await assert.rejects(ui.runtime.web({ action: "snapshot" }), /global memory preferences/);
-  assert.equal(ui.harness.disk.storage.inspect(sql => sql.prepare('SELECT "memoryPreferences__state" FROM meta WHERE "_key"=?').get("state").memoryPreferences__state), 0);
-  ui.harness.disk.storage.inspect(sql => sql.prepare('UPDATE meta SET "memoryPreferences__state"=2, "memoryPreferences__autoUpdateEnabled"=? WHERE "_key"=?').run("false", "state"));
-  await assert.rejects(ui.runtime.web({ action: "snapshot" }), /Invalid stored boolean/);
-  assert.equal(ui.harness.disk.storage.inspect(sql => sql.prepare('SELECT "memoryPreferences__autoUpdateEnabled" FROM meta WHERE "_key"=?').get("state").memoryPreferences__autoUpdateEnabled), "false");
+  assert.equal(ui.harness.disk.storage.inspectPreferences("meta", values => values.state.memoryPreferences), undefined);
+  ui.harness.disk.storage.inspectPreferences("meta", values => { values.state.memoryPreferences = { userDescriptionEnabled: true, autoUpdateEnabled: "false" }; });
+  await assert.rejects(ui.runtime.web({ action: "snapshot" }), /auto update enabled/);
+  assert.equal(ui.harness.disk.storage.inspectPreferences("meta", values => values.state.memoryPreferences.autoUpdateEnabled), "false");
 });

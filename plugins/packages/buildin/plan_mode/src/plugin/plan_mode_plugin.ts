@@ -30,7 +30,8 @@ import {
 } from "../shared/plan_mode_ask_execution.js";
 import { type PlanImplementationRequest } from "../shared/plan_mode_execution.js";
 import {
-  logPlanModeDebug,
+  logPlanModeError,
+  logPlanModeVerbose,
 } from "../shared/plan_mode_logging.js";
 import { onPlanaskXmlRender } from "./planask-xml-render-plugin.js";
 import { onPlantodoXmlRender } from "./plantodo-xml-render-plugin.js";
@@ -245,7 +246,7 @@ async function handleIsPlanStartedIpc(request: PlanImplementationRequest): Promi
   try {
     return await PlanModeShared.isPlanStarted(request.planContent, request.chatId);
   } catch (error) {
-    logPlanModeDebug("handleIsPlanStartedIpc.error", {
+    logPlanModeError("handleIsPlanStartedIpc.error", {
       message: error instanceof Error ? error.message : "error",
     });
     return false;
@@ -329,7 +330,7 @@ export async function onInputMenuToggle(
 
     return null;
   } catch (error) {
-    logPlanModeDebug("onInputMenuToggle.error", {
+    logPlanModeError("onInputMenuToggle.error", {
       message: error instanceof Error ? error.message : "error",
     });
     return null;
@@ -379,7 +380,7 @@ export async function onSystemPromptCompose(
       systemPrompt: appendPrompt(currentPrompt, buildExistingPlanPrompt(useEnglish)),
     };
   } catch (error) {
-    logPlanModeDebug("onSystemPromptCompose.error", {
+    logPlanModeError("onSystemPromptCompose.error", {
       message: error instanceof Error ? error.message : "error",
     });
     return null;
@@ -407,7 +408,7 @@ export async function onToolPromptCompose(
     }
 
     const filteredTools = filterPlanModeTools(availableTools);
-    logPlanModeDebug("onToolPromptCompose", {
+    logPlanModeVerbose("onToolPromptCompose", {
       chatId,
       stage,
       toolCountBefore: availableTools.length,
@@ -417,7 +418,7 @@ export async function onToolPromptCompose(
       availableTools: filteredTools,
     };
   } catch (error) {
-    logPlanModeDebug("onToolPromptCompose.error", {
+    logPlanModeError("onToolPromptCompose.error", {
       message: error instanceof Error ? error.message : "error",
     });
     return null;
@@ -467,7 +468,7 @@ export async function onPromptFinalize(
     }
     return await buildPromptFinalizeResult(payload);
   } catch (error) {
-    logPlanModeDebug("onPromptFinalize.error", {
+    logPlanModeError("onPromptFinalize.error", {
       message: error instanceof Error ? error.message : "error",
     });
     return null;
@@ -486,7 +487,7 @@ export async function onPromptEstimateFinalize(
     }
     return await buildPromptFinalizeResult(payload);
   } catch (error) {
-    logPlanModeDebug("onPromptEstimateFinalize.error", {
+    logPlanModeError("onPromptEstimateFinalize.error", {
       message: error instanceof Error ? error.message : "error",
     });
     return null;

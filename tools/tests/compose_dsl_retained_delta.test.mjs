@@ -134,3 +134,113 @@ test('generation rejects a copied context at the ownership boundary', () => {
   assert.throws(() => context.OperitComposeGeneration.begin({ ...runtime.ctx }), /original SDK context/);
   assert.doesNotThrow(() => context.OperitComposeGeneration.begin(runtime.ctx));
 });
+
+/** Theme helper methods stay local; only actual UI callbacks own transport actions. */
+test('theme color helpers never become mounted callbacks or transport properties', () => {
+  const { context } = retained();
+  const runtime = context.OperitComposeDslRuntime.createContext({});
+  const ctx = runtime.ctx;
+  const primary = ctx.MaterialTheme.colorScheme.primary;
+  const faded = primary.copy({ alpha: 0.5 });
+  assert.equal(typeof faded.copy, 'function');
+  assert.equal(faded.copy({ alpha: 0.25 }).alpha, 0.25);
+  const root = ctx.UI.Text({
+    text: 'actual role', color: primary, background: faded,
+    modifier: ctx.Modifier.border(1, faded, { cornerRadius: 4 }),
+    onClick: () => 'clicked',
+  });
+  const update = runtime.composition.commit(root);
+  const props = update.upserts.find(record => record.id === update.rootId).props;
+  assert.equal(Object.hasOwn(props.color, 'copy'), false);
+  assert.equal(Object.hasOwn(props.background, 'copy'), false);
+  assert.equal(Object.hasOwn(props.modifier.__modifierOps[0].args[1], 'copy'), false);
+  assert.equal(props.color.__colorToken, 'primary');
+  assert.equal(props.background.alpha, 0.5);
+  assert.equal(runtime.actions.invoke(props.onClick.__actionId), 'clicked');
+  assert.equal(Object.keys(runtime.actions.store).filter(id => id.startsWith('__action_')).length, 1);
+});
+
+/** Reuses detached snapshots without missing mutable inputs or the latest callback closure. */
+test('generation copies only changed argument branches and refreshes callbacks in reused snapshots', () => {
+  const { context, generation } = retained();
+  const runtime = context.OperitComposeDslRuntime.createContext({});
+  const entry = { initialized: false };
+  const model = { label: 'first', stable: { padding: [1, 2] }, detail: { value: 1 } };
+  let factories = 0;
+  const factory = props => { factories++; return runtime.ctx.UI.Text(props); };
+  const build = handler => generation.evaluate(entry, [{ model, onClick: handler }], factory);
+  const first = build(() => 'old');
+  runtime.composition.commit(first);
+  const args = entry.args;
+  assert.equal(build(() => 'latest'), first);
+  assert.equal(entry.args, args, 'unchanged arguments keep their detached snapshot');
+  assert.equal(factories, 1);
+  const unchanged = runtime.composition.commit(first, true);
+  assert.equal(unchanged, null);
+  assert.equal(runtime.actions.invoke(first.props.onClick.__actionId), 'latest', 'skipping transport still refreshes captured callbacks');
+
+  model.detail.value = 2;
+  assert.equal(build(() => 'after mutation'), first, 'the mounted node handle remains stable');
+  assert.equal(factories, 2);
+  assert.notEqual(entry.args, args);
+  assert.equal(entry.args[0].model.stable, args[0].model.stable);
+  assert.notEqual(entry.args[0].model.detail, args[0].model.detail);
+  assert.equal(args[0].model.detail.value, 1, 'the old snapshot stays detached from plugin writes');
+  assert.equal(first.props.model.detail.value, 2);
+  const changed = runtime.composition.commit(first);
+  assert.equal(changed.upserts.length, 1);
+  assert.equal(runtime.actions.invoke(first.props.onClick.__actionId), 'after mutation');
+
+  delete model.detail.value;
+  model.detail.other = undefined;
+  build(() => 'changed keys');
+  assert.equal(Object.hasOwn(first.props.model.detail, 'value'), false);
+  assert.equal(Object.hasOwn(first.props.model.detail, 'other'), true);
+  model.stable.padding.push(3);
+  build(() => 'changed array');
+  assert.deepEqual(Array.from(first.props.model.stable.padding), [1, 2, 3]);
+  model.self = model;
+  assert.throws(() => build(() => 'cycle'), /must not contain cycles/);
+});
+
+/** Nonprimitive dependencies always evaluate their real arguments, so they need no detached dependency copy. */
+test('leaf dependencies retain no unused deep snapshot and still observe in-place input changes', () => {
+  const { context, generation } = retained();
+  const runtime = context.OperitComposeDslRuntime.createContext({});
+  const model = { value: 1 };
+  Object.defineProperty(model, 'unrelated', { enumerable: true, get() { throw Error('unread dependency field copied'); } });
+  const build = () => {
+    generation.begin(runtime.ctx);
+    try {
+      return generation.leaf(runtime.ctx, 'leaf', [model], () => [{ text: String(model.value) }], props => runtime.ctx.UI.Text(props));
+    } finally {
+      generation.end(runtime.ctx);
+    }
+  };
+  const first = build();
+  runtime.composition.commit(first);
+  model.value = 2;
+  const next = build();
+  assert.equal(next, first);
+  assert.equal(next.props.text, '2');
+});
+
+/** Empty intermediate reconciliation must release bookkeeping without consuming a wire revision. */
+test('unchanged intermediate commits preserve contiguous published revisions and final completion fences', () => {
+  const { graph, node } = retained();
+  const root = node('Column', 'root', [node('Text', 'visible')]);
+  assert.equal(graph.commit(root).revision, 1);
+  assert.equal(graph.commit(root, true), null);
+  root.children[0].props.text = 'changed';
+  const changed = graph.commit(root, true);
+  assert.equal(changed.revision, 2);
+  assert.equal(changed.upserts.length, 1);
+  assert.equal(graph.commit(root, true), null);
+  const final = graph.commit(root);
+  assert.equal(final.revision, 3);
+  assert.equal(final.upserts.length, 0);
+  root.children = [];
+  const removed = graph.commit(root, true);
+  assert.equal(removed.revision, 4);
+  assert.equal(removed.removed.length, 1);
+});

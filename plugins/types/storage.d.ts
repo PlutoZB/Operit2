@@ -1,6 +1,6 @@
 // Generated from operit-plugin-sdk Rust declarations.
 
-import type { StorageMergeDescriptor, StorageRequest, StorageTable } from "./storage.generated";
+import type { StorageMergeDescriptor, StoragePreferencesMergeDescriptor, StorageRequest, StorageTable } from "./storage.generated";
 
 /**
  * Dispatches the exact wire contract through the authenticated host.
@@ -160,6 +160,10 @@ export namespace Storage {
      */
     get(key: string): Promise<Entry<T> | null>;
     /**
+     * Reads ordered keys, retaining missing entries, in one host transaction snapshot.
+     */
+    getMany(keys: string[]): Promise<(Entry<T> | null)[]>;
+    /**
      * Emits the current record or absence and subsequent changes to this exact key.
      */
     watch(key: string, options?: WatchOptions): AsyncIterableIterator<Entry<T> | null>;
@@ -201,22 +205,94 @@ export namespace Storage {
   }
 
   /**
-   * Selects atomic key writes, removals, and exact preconditions.
+   * Selects one native JSON preference file.
    */
-  export interface DataStoreBatch {
-    set?: Record<string, Value>;
-    remove?: string[];
-    expectedVersions?: Record<string, string | null>;
+  export interface DataStoreOpenOptions {
+    path: string;
+    merge?: StoragePreferencesMergeDescriptor;
   }
 
   /**
-   * Owns one key-value database with exact-key subscriptions.
+   * Exposes a complete immutable preference snapshot.
    */
-  export interface DataStore extends Handle, Collection {
+  export interface Preferences {
     /**
-     * Commits key writes and removals atomically.
+     * Reads one typed value, preserving absence independently of a stored null.
      */
-    commit(batch: DataStoreBatch): Promise<Receipt>;
+    get<T>(key: string): T | undefined;
+    /**
+     * Reports whether a key is present, including a stored null value.
+     */
+    contains(key: string): boolean;
+    /**
+     * Enumerates all application preference entries from this snapshot.
+     */
+    entries(): [string, Value][];
+  }
+
+  /**
+   * Exposes the mutable snapshot scoped to one edit or schema callback.
+   */
+  export interface MutablePreferences {
+    /**
+     * Reads one typed value from the current edit snapshot.
+     */
+    get<T>(key: string): T | undefined;
+    /**
+     * Reports whether the edit snapshot contains this key.
+     */
+    contains(key: string): boolean;
+    /**
+     * Enumerates the edit snapshot's application preference entries.
+     */
+    entries(): [string, Value][];
+    /**
+     * Writes one typed JSON value into the current transaction.
+     */
+    set<T>(key: string, value: T): void;
+    /**
+     * Removes one key from the current transaction.
+     */
+    remove(key: string): void;
+    /**
+     * Records an integer delta using native transaction semantics across synchronization.
+     */
+    incrementInteger(key: string, delta: number): void;
+    /**
+     * Updates one object field without overwriting concurrent edits to other fields.
+     */
+    setObjectField<T>(key: string, field: string, value: T): void;
+  }
+
+  /**
+   * Accepts synchronous completion or an awaited asynchronous callback.
+   */
+  export type PreferencesCallbackResult = void | Promise<void>;
+
+  /**
+   * Owns a native JSON preference file with Rust-style snapshot and edit semantics.
+   */
+  export interface DataStore extends Handle {
+    /**
+     * Reads the complete immutable snapshot after applying the declared schema.
+     */
+    data(): Promise<Preferences>;
+    /**
+     * Publishes one callback atomically; conflicts reject without rerunning the callback.
+     */
+    edit(transform: (arg0: MutablePreferences) => PreferencesCallbackResult): Promise<Preferences>;
+    /**
+     * Declares ordered one-version upgrades before subsequent reads or edits.
+     */
+    withSchema(currentVersion: number, migrate: (arg0: number, arg1: MutablePreferences) => PreferencesCallbackResult): DataStore;
+    /**
+     * Reads the declared store's current schema version after applying pending upgrades.
+     */
+    schemaVersion(): Promise<number>;
+    /**
+     * Observes complete snapshots with collector-owned cancellation.
+     */
+    dataFlow(options?: WatchOptions): AsyncIterableIterator<Preferences>;
   }
 
   /**
@@ -240,13 +316,13 @@ export namespace Storage {
   }
 
   /**
-   * Opens a transactional key-value store.
+   * Opens native typed JSON preferences through the host abstraction.
    */
   export namespace dataStore {
     /**
-     * Opens the named plugin-owned key-value database.
+     * Opens a native preference file without a SQLite object database.
      */
-    function open(options: Storage.OpenOptions): Promise<Storage.DataStore>;
+    function open(options: Storage.DataStoreOpenOptions): Promise<Storage.DataStore>;
   }
 
   /**
@@ -255,4 +331,4 @@ export namespace Storage {
   function request(request: StorageRequest): Promise<any>;
 }
 
-export type { StorageRequest, StorageTable, StorageSqlValue, StorageMergeDescriptor, StorageKind, StorageColumn, StorageColumnType, StorageMutation, StorageStatement, StorageMergeEntity, StorageMergeReference, StorageMergeTarget, StorageMergeKeyEncoding } from "./storage.generated";
+export type { StorageRequest, StorageTable, StorageSqlValue, StorageMergeDescriptor, StorageKind, StorageColumn, StorageColumnType, StorageMutation, StorageStatement, StorageMergeEntity, StorageMergeReference, StorageMergeTarget, StorageMergeKeyEncoding, StoragePreferencesMergeDescriptor, StoragePreferencesMergeCatalog, StoragePreferencesMergeReference, StoragePreferencesMergeKey, StoragePreferencesMergePathSegment, StoragePreferencesMergeProjection } from "./storage.generated";

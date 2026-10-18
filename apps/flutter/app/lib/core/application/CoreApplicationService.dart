@@ -48,22 +48,28 @@ class CoreApplicationService with WidgetsBindingObserver {
   /// Installs process-level Core lifecycle listeners.
   void initialize() {
     if (_initialized) {
-      ClientLogger.d(
+      ClientLogger.v(
         'initialize skipped alreadyInitialized=true',
         tag: _logTag,
+        verboseLevel: VerboseLevel.level1,
       );
       return;
     }
     final stopwatch = Stopwatch()..start();
-    ClientLogger.i('initialize start', tag: _logTag);
+    ClientLogger.v(
+      'initialize start',
+      tag: _logTag,
+      verboseLevel: VerboseLevel.level1,
+    );
     _initialized = true;
     PluginHotReload.register(_coreClients);
     WidgetsBinding.instance.addObserver(this);
     _runtimeManager.addListener(_handleRuntimeBootstrapChanged);
     unawaited(_startRuntimeServices());
-    ClientLogger.i(
+    ClientLogger.v(
       'initialize done elapsedMs=${stopwatch.elapsedMilliseconds}',
       tag: _logTag,
+      verboseLevel: VerboseLevel.level1,
     );
   }
 
@@ -155,10 +161,18 @@ class CoreApplicationService with WidgetsBindingObserver {
   Future<void> _startRuntimeServices() {
     final activeStart = _runtimeServicesStart;
     if (activeStart != null) {
-      ClientLogger.d('runtime services start already active', tag: _logTag);
+      ClientLogger.v(
+        'runtime services start already active',
+        tag: _logTag,
+        verboseLevel: VerboseLevel.level1,
+      );
       return activeStart;
     }
-    ClientLogger.i('runtime services start scheduled', tag: _logTag);
+    ClientLogger.v(
+      'runtime services start scheduled',
+      tag: _logTag,
+      verboseLevel: VerboseLevel.level1,
+    );
     final start = _startRuntimeServicesOnce();
     _runtimeServicesStart = start;
     return start.whenComplete(() {
@@ -180,9 +194,10 @@ class CoreApplicationService with WidgetsBindingObserver {
     }
     try {
       ClientLogger.attachPersistentStorage();
-      ClientLogger.i(
+      ClientLogger.v(
         'runtime services start localConfirmed=${_runtimeManager.config.confirmed}',
         tag: _logTag,
+        verboseLevel: VerboseLevel.level1,
       );
       await _startLocalBackgroundService();
       await _syncHostSubscriber();
@@ -241,19 +256,25 @@ class CoreApplicationService with WidgetsBindingObserver {
     if (_localBackgroundServiceStartAttempted ||
         kIsWeb ||
         defaultTargetPlatform != TargetPlatform.android) {
-      ClientLogger.d(
+      ClientLogger.v(
         'local background service not started attempted=$_localBackgroundServiceStartAttempted isWeb=$kIsWeb platform=$defaultTargetPlatform',
         tag: _logTag,
+        verboseLevel: VerboseLevel.level1,
       );
       return;
     }
     final stopwatch = Stopwatch()..start();
-    ClientLogger.i('local background service start', tag: _logTag);
+    ClientLogger.v(
+      'local background service start',
+      tag: _logTag,
+      verboseLevel: VerboseLevel.level1,
+    );
     _localBackgroundServiceStartAttempted = true;
     await _runtimeChannel.invokeMethod<void>('startLocalCoreService');
-    ClientLogger.i(
+    ClientLogger.v(
       'local background service done elapsedMs=${stopwatch.elapsedMilliseconds}',
       tag: _logTag,
+      verboseLevel: VerboseLevel.level1,
     );
   }
 
@@ -263,21 +284,31 @@ class CoreApplicationService with WidgetsBindingObserver {
     final installed = RuntimeHostInteractionSubscriber.isInstalled;
     if (shouldInstall && !installed) {
       final subscriberStopwatch = Stopwatch()..start();
-      ClientLogger.i('host subscriber install start', tag: _logTag);
+      ClientLogger.v(
+        'host subscriber install start',
+        tag: _logTag,
+        verboseLevel: VerboseLevel.level1,
+      );
       RuntimeHostInteractionSubscriber.install();
-      ClientLogger.i(
+      ClientLogger.v(
         'host subscriber install done elapsedMs=${subscriberStopwatch.elapsedMilliseconds}',
         tag: _logTag,
+        verboseLevel: VerboseLevel.level1,
       );
       return;
     }
     if (!shouldInstall && installed) {
       final subscriberStopwatch = Stopwatch()..start();
-      ClientLogger.i('host subscriber uninstall start', tag: _logTag);
+      ClientLogger.v(
+        'host subscriber uninstall start',
+        tag: _logTag,
+        verboseLevel: VerboseLevel.level1,
+      );
       await RuntimeHostInteractionSubscriber.uninstall();
-      ClientLogger.i(
+      ClientLogger.v(
         'host subscriber uninstall done elapsedMs=${subscriberStopwatch.elapsedMilliseconds}',
         tag: _logTag,
+        verboseLevel: VerboseLevel.level1,
       );
     }
   }

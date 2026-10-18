@@ -220,7 +220,7 @@ fn runChatViewHook(
                 let hook = &hook;
                 let eventName = &eventName;
                 let manager = runtime.package_manager();
-                ChainLogger::info(
+                ChainLogger::verbose_with_level(
                     PLUGIN_CHAIN,
                     "plugin.toolpkg.chat_view.run.start",
                     &[
@@ -229,6 +229,7 @@ fn runChatViewHook(
                         ("hookId", hook.hookId.clone()),
                         ("function", hook.functionName.clone()),
                     ],
+                    operit_util::AppLogger::VERBOSE_LEVEL_3,
                 );
                 match manager
                     .runToolPkgMainHook(
@@ -256,7 +257,7 @@ fn runChatViewHook(
                                 .expect("toolpkg chat view engine mutex poisoned")
                                 .insert(hookKey(hook), Arc::downgrade(&engine));
                         }
-                        ChainLogger::info(
+                        ChainLogger::verbose_with_level(
                             PLUGIN_CHAIN,
                             "plugin.toolpkg.chat_view.run.done",
                             &[
@@ -264,6 +265,7 @@ fn runChatViewHook(
                                 ("package", hook.containerPackageName.clone()),
                                 ("hookId", hook.hookId.clone()),
                             ],
+                            operit_util::AppLogger::VERBOSE_LEVEL_3,
                         );
                     }
                     Err(error) => ChainLogger::error(

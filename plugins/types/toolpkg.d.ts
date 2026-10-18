@@ -867,7 +867,7 @@ export namespace ToolPkg {
   }
 
   /**
-   * Exposes only the receiving registered package's immutable namespace for an actual tool-policy turn.
+   * Exposes only the receiving registered package's current execution context for an actual tool-policy turn.
    */
   export interface ToolExecutionContext extends JsonObject {
     /**
@@ -883,13 +883,13 @@ export namespace ToolPkg {
      */
     extensionOwner: string;
     /**
-     * Carries only this owner's frozen message object; null explicitly means no contribution.
+     * Carries only this owner's current in-memory execution data; null explicitly means no contribution.
      */
-    messageExtension: JsonObject | null;
+    executionData: JsonObject | null;
   }
 
   /**
-   * Carries a required isolated snapshot while retaining ordinary prompt metadata fields.
+   * Carries a required isolated execution context while retaining ordinary prompt metadata fields.
    */
   export interface ToolHookMetadata extends JsonObject {
     /**
@@ -906,6 +906,10 @@ export namespace ToolPkg {
      * Carries the exact execution participant selected for this prompt request.
      */
     executionContext?: ExecutionContext;
+    /**
+     * Identifies one send preparation across system composition and finalization; absent for independent estimates.
+     */
+    promptPreparationId?: string;
   }
 
   /**
@@ -1161,7 +1165,7 @@ export namespace ToolPkg {
   }
 
   /**
-   * Carries the actual tool-prompt policy state and its required owner-isolated execution snapshot.
+   * Carries the actual tool-prompt policy state and its required owner-isolated execution context.
    */
   export interface ToolPromptHookEventPayload extends JsonObject {
     /**

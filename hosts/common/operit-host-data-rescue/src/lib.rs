@@ -52,6 +52,7 @@ pub struct NativeRescueSession {
 impl NativeRescueSession {
     /// Opens exclusive maintenance access without parsing the startup configuration.
     pub fn open(default_runtime: PathBuf, secret_store: Option<Arc<dyn HostSecretStore>>) -> Result<Self, String> {
+        let default_runtime = absolute_root(&default_runtime)?;
         let lease = StorageLease::acquire(&default_runtime, true)?;
         Ok(Self { _lease: lease, default_runtime, secret_store, service: None })
     }
@@ -414,7 +415,7 @@ impl NativeRescueHost {
             };
             let relative = live.strip_prefix(&plan.target).map_err(text)?;
             let path = if relative.as_os_str().is_empty() { base.clone() } else { base.join(relative) };
-            for ancestor in path.ancestors() { reject_symlink(ancestor)?; }
+            reject_linked_descendants(base, &path)?;
             let metadata = fs::symlink_metadata(&path).map_err(text)?;
             if is_storage_link(&metadata) || metadata.is_dir() != node.directory || (!node.directory && !metadata.is_file()) || node_mode(&metadata) != node.unix_mode {
                 return Err(format!("Publication node metadata changed: {}", node.path));
@@ -432,7 +433,7 @@ impl NativeRescueHost {
             };
             let relative = live.strip_prefix(&plan.target).map_err(text)?;
             let path = base.join(relative);
-            for ancestor in path.ancestors() { reject_symlink(ancestor)?; }
+            reject_linked_descendants(base, &path)?;
             let actual = hash_file(&path, &expected.path)?;
             if actual.byte_length != expected.byte_length || actual.sha256 != expected.sha256 { return Err(format!("Pending import payload integrity check failed: {}", expected.path)); }
         }
@@ -770,13 +771,28 @@ fn is_storage_link(metadata: &std::fs::Metadata) -> bool {
     false
 }
 
-/// Validates an absolute data directory independently of business bootstrap parsing.
+/// Resolves ancestor aliases into a physical data root while rejecting links at the root itself.
 fn absolute_root(path: &Path) -> Result<PathBuf, String> {
     if !path.is_absolute() || path.components().any(|part| matches!(part, std::path::Component::ParentDir | std::path::Component::CurDir)) {
         return Err("Data roots must be normalized absolute directories".into());
     }
-    for ancestor in path.ancestors() { reject_symlink(ancestor)?; }
+    // Only the selected root must not be redirected. Platform storage prefixes are routinely links
+    // (Android: /data/user/0 <-> /data/data, macOS: /var -> /private/var), and every component
+    // below the root is still checked by checked_descendant.
+    reject_symlink(path)?;
     Ok(path.to_path_buf())
+}
+
+/// Rejects links between a trusted publication base and one exact payload.
+fn reject_linked_descendants(base: &Path, path: &Path) -> Result<(), String> {
+    reject_symlink(base)?;
+    let relative = path.strip_prefix(base).map_err(text)?;
+    let mut current = base.to_path_buf();
+    for part in relative.components() {
+        current.push(part.as_os_str());
+        reject_symlink(&current)?;
+    }
+    Ok(())
 }
 
 /// Resolves the fixed application-owned parent used for bootstrap and maintenance catalogs.

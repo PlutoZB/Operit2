@@ -190,10 +190,11 @@ class ComposeDslWebViewHostRegistry {
         (name, methods) => MapEntry(name, Map<String, String>.of(methods)),
       ),
     );
-    ClientLogger.i(
+    ClientLogger.v(
       'event=controller_bind context=$executionContextKey route=$routeInstanceId '
       'key=$controllerKey boundKeys=${scopedBindings.keys.join(',')}',
       tag: _composeDslWebViewLogTag,
+      verboseLevel: VerboseLevel.level4,
     );
   }
 
@@ -209,10 +210,11 @@ class ComposeDslWebViewHostRegistry {
     final current = scopedBindings[controllerKey];
     if (current?.controller == controller) {
       scopedBindings.remove(controllerKey);
-      ClientLogger.i(
+      ClientLogger.v(
         'event=controller_unbind context=$executionContextKey key=$controllerKey '
         'remainingKeys=${scopedBindings.keys.join(',')}',
         tag: _composeDslWebViewLogTag,
+        verboseLevel: VerboseLevel.level4,
       );
     }
     if (scopedBindings.isEmpty) {
@@ -226,9 +228,10 @@ class ComposeDslWebViewHostRegistry {
     }
     _bindings.remove(executionContextKey);
     _javascriptInterfaceActionIds.remove(executionContextKey);
-    ClientLogger.i(
+    ClientLogger.v(
       'event=controller_context_clear context=$executionContextKey',
       tag: _composeDslWebViewLogTag,
+      verboseLevel: VerboseLevel.level4,
     );
   }
 
@@ -375,29 +378,32 @@ class ComposeDslWebViewHostRegistry {
     final commandDetail = command == 'evaluateJavascript'
         ? 'scriptChars=${_string(commandPayload['script']).length}'
         : 'payloadKeys=${commandPayload.keys.join(',')}';
-    ClientLogger.d(
+    ClientLogger.v(
       'event=controller_command_start context=$executionContextKey '
       'key=$controllerKey command=$command $commandDetail '
       'bound=${binding != null}',
       tag: _composeDslWebViewLogTag,
+      verboseLevel: VerboseLevel.level3,
     );
     if (binding == null) {
       final boundKeys = _bindings[executionContextKey]?.keys.join(',') ?? '';
       if (command == 'getState') {
-        ClientLogger.d(
+        ClientLogger.v(
           'event=controller_command_pending_binding '
           'context=$executionContextKey key=$controllerKey command=$command '
           'boundKeys=$boundKeys',
           tag: _composeDslWebViewLogTag,
+          verboseLevel: VerboseLevel.level3,
         );
         return _bridgeSuccess(null);
       }
       if (command == 'addJavascriptInterface') {
-        ClientLogger.d(
+        ClientLogger.v(
           'event=controller_command_pending_binding '
           'context=$executionContextKey key=$controllerKey command=$command '
           'boundKeys=$boundKeys',
           tag: _composeDslWebViewLogTag,
+          verboseLevel: VerboseLevel.level3,
         );
         return _registerJavascriptInterfaceCommand(
           executionContextKey: executionContextKey,
@@ -406,11 +412,12 @@ class ComposeDslWebViewHostRegistry {
         );
       }
       if (command == 'removeJavascriptInterface') {
-        ClientLogger.d(
+        ClientLogger.v(
           'event=controller_command_pending_binding '
           'context=$executionContextKey key=$controllerKey command=$command '
           'boundKeys=$boundKeys',
           tag: _composeDslWebViewLogTag,
+          verboseLevel: VerboseLevel.level3,
         );
         return _unregisterJavascriptInterfaceCommand(
           executionContextKey: executionContextKey,
@@ -475,10 +482,11 @@ class ComposeDslWebViewHostRegistry {
           final script = _string(commandPayload['script']);
           final result = await controller.runJavaScriptReturningResult(script);
           final decoded = _decodePlainJsonValue(result);
-          ClientLogger.d(
+          ClientLogger.v(
             'event=controller_command_done context=$executionContextKey '
             'key=$controllerKey command=$command',
             tag: _composeDslWebViewLogTag,
+            verboseLevel: VerboseLevel.level3,
           );
           return _bridgeSuccess(decoded);
         case 'getState':
@@ -754,13 +762,26 @@ class _ComposeDslWebViewState extends State<ComposeDslWebView> {
     super.dispose();
   }
 
+  /// Linux hosts the WebView in a native GTK overlay above Flutter's entire
+  /// layer tree, so a covering route would otherwise paint behind it. Other
+  /// platforms composite platform views with Flutter and keep the view visible.
+  bool get _hidesPlatformViewUnderCoveringRoutes =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.linux;
+
   @override
   Widget build(BuildContext context) {
     final errorText = _error;
+    // Keep the page mounted but stop painting it while a dialog route is on
+    // top; the Linux widget hides its native overlay once it is not painted.
+    final route = ModalRoute.of(context);
+    final hidePlatformView =
+        _hidesPlatformViewUnderCoveringRoutes &&
+        route != null &&
+        !route.isCurrent;
     return Stack(
       fit: StackFit.expand,
       children: <Widget>[
-        _webViewWidget,
+        Offstage(offstage: hidePlatformView, child: _webViewWidget),
         if (_progress > 0 && _progress < 100)
           const Positioned(
             top: 0,

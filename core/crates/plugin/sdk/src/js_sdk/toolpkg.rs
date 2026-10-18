@@ -860,7 +860,7 @@ pub struct ToolPkgExecutionContext {
     /// Identifies the selected execution participant as an opaque plugin key.
     pub participantId: super::JsNullable<String>,
 }
-/// Exposes only the receiving registered package's immutable namespace for an actual tool-policy turn.
+/// Exposes only the receiving registered package's current execution context for an actual tool-policy turn.
 #[allow(non_snake_case)]
 pub struct ToolPkgToolExecutionContext {
     /// Retains the strict JSON-object contract required by enclosing hook metadata.
@@ -871,10 +871,10 @@ pub struct ToolPkgToolExecutionContext {
     pub participantId: super::JsNullable<String>,
     /// Identifies the authenticated registered package receiving this projection.
     pub extensionOwner: String,
-    /// Carries only this owner's frozen message object; null explicitly means no contribution.
-    pub messageExtension: super::JsNullable<ToolPkgJsonObject>,
+    /// Carries only this owner's current in-memory execution data; null explicitly means no contribution.
+    pub executionData: super::JsNullable<ToolPkgJsonObject>,
 }
-/// Carries a required isolated snapshot while retaining ordinary prompt metadata fields.
+/// Carries a required isolated execution context while retaining ordinary prompt metadata fields.
 pub struct ToolPkgToolHookMetadata {
     /// Preserves ordinary additional metadata without exposing sibling plugin namespaces.
     pub base_json_object: ToolPkgJsonObject,
@@ -887,6 +887,8 @@ pub struct ToolPkgHookMetadata {
     pub base_json_object: ToolPkgJsonObject,
     /// Carries the exact execution participant selected for this prompt request.
     pub executionContext: Option<ToolPkgExecutionContext>,
+    /// Identifies one send preparation across system composition and finalization; absent for independent estimates.
+    pub promptPreparationId: Option<String>,
 }
 /// Carries tool request, permission, execution, and result data.
 pub struct ToolPkgToolLifecycleEventPayload {
@@ -1027,7 +1029,7 @@ pub struct ToolPkgPromptHookEventPayload {
     pub metadata: Option<ToolPkgHookMetadata>,
 }
 
-/// Carries the actual tool-prompt policy state and its required owner-isolated execution snapshot.
+/// Carries the actual tool-prompt policy state and its required owner-isolated execution context.
 pub struct ToolPkgToolPromptHookEventPayload {
     /// Preserves additional JSON properties supplied with this prompt hook event payload.
     pub base_json_object: ToolPkgJsonObject,

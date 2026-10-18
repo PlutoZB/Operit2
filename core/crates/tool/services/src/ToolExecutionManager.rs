@@ -47,17 +47,17 @@ pub struct ToolRuntimeContext {
     pub toolExposureMode: ToolExposureMode,
     /// Identifies the native-authenticated configuration owner captured for this execution.
     pub extensionOwner: String,
-    /// Preserves that owner's complete opaque message snapshot without rereading current bindings.
-    pub messageExtension: serde_json::Map<String, serde_json::Value>,
+    /// Preserves current execution data for the active turn; never persisted on a message.
+    pub executionData: serde_json::Map<String, serde_json::Value>,
 }
 
 impl ToolRuntimeContext {
     /// Rejects unauthenticated or malformed turn identities before entering any policy dispatch.
-    pub fn validateSnapshot(&self) -> Result<(), String> {
+    pub fn validateExecutionContext(&self) -> Result<(), String> {
         if self.extensionOwner.trim().is_empty()
             || self.extensionOwner.trim() != self.extensionOwner
         {
-            return Err("Tool execution snapshot requires an exact authenticated extensionOwner".to_string());
+            return Err("Tool execution context requires an exact authenticated extensionOwner".to_string());
         }
         for (field, value) in [
             ("chatId", self.callerChatId.as_deref()),
@@ -65,7 +65,7 @@ impl ToolRuntimeContext {
         ] {
             if let Some(value) = value {
                 if value.trim().is_empty() || value.trim() != value {
-                    return Err(format!("Tool execution snapshot {field} must be exact nonblank text"));
+                    return Err(format!("Tool execution context {field} must be exact nonblank text"));
                 }
             }
         }
@@ -327,7 +327,7 @@ impl ToolExecutionManager {
             .map(|invocation| invocation.tool.name.clone())
             .collect::<Vec<_>>()
             .join(", ");
-        AppLogger::d(
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "tool.parse.complete responseChars={} toolCount={} tools=[{}]",
@@ -335,6 +335,7 @@ impl ToolExecutionManager {
                 invocations.len(),
                 toolNames
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_3,
         );
         invocations
     }
@@ -351,7 +352,7 @@ impl ToolExecutionManager {
         workspaceFolders: Vec<String>,
         toolExposureMode: ToolExposureMode,
         extensionOwner: String,
-        messageExtension: serde_json::Map<String, serde_json::Value>,
+        executionData: serde_json::Map<String, serde_json::Value>,
     ) -> Result<ToolExecutionBatch, String> {
         let runtimeContext = ToolRuntimeContext {
             callerChatId: callerChatId.clone(),
@@ -360,9 +361,9 @@ impl ToolExecutionManager {
             workspaceFolders: workspaceFolders.clone(),
             toolExposureMode: toolExposureMode.clone(),
             extensionOwner,
-            messageExtension,
+            executionData,
         };
-        runtimeContext.validateSnapshot()?;
+        runtimeContext.validateExecutionContext()?;
         Self::scopeToolRuntimeContext(runtimeContext, async move {
         let mut results = Vec::new();
         let mut routeChangeIntent = None;
@@ -371,7 +372,7 @@ impl ToolExecutionManager {
             .map(|invocation| invocation.tool.name.clone())
             .collect::<Vec<_>>()
             .join(", ");
-        AppLogger::d(
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "tool.execution.batch_start requestedCount={} tools=[{}] callerNameSet={} callerChatIdSet={} callerParticipantIdSet={} exposure={:?}",
@@ -382,6 +383,7 @@ impl ToolExecutionManager {
                 callerParticipantId.is_some(),
                 toolExposureMode
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_3,
         );
         toolHandler.registerDefaultTools();
         let jsPackageNames = packageManager
@@ -404,7 +406,7 @@ impl ToolExecutionManager {
 
         for invocation in injectedInvocations.iter().cloned() {
             let displayToolName = Self::resolveDisplayToolName(&invocation.tool);
-            AppLogger::d(
+            AppLogger::trace_detail(
                 TAG,
                 &format!(
                     "tool.execution.start tool={} params={} rawBytes={}",
@@ -419,13 +421,14 @@ impl ToolExecutionManager {
                     ToolExecutionPolicy::Ai { exposure: toolExposureMode.clone() },
                 )
                 .await?;
-            AppLogger::d(
+            AppLogger::v_with_level(
                 TAG,
                 &format!(
                     "tool.execution.raw_results tool={} rawResultCount={}",
                     displayToolName,
                     collected.len()
                 ),
+                operit_util::AppLogger::VERBOSE_LEVEL_3,
             );
             {
                 let last = collected.last().expect("collected not empty");
@@ -456,7 +459,7 @@ impl ToolExecutionManager {
                 if let Some(intent) = Self::routeChangeIntentForResult(&invocation.tool, last) {
                     routeChangeIntent = Some(intent);
                 }
-                AppLogger::d(
+                AppLogger::v_with_level(
                     TAG,
                     &format!(
                         "tool.execution.complete tool={} success={} rawResultCount={} combinedBytes={}",
@@ -465,13 +468,14 @@ impl ToolExecutionManager {
                         collected.len(),
                         finalResult.result.toString().len()
                     ),
+                    operit_util::AppLogger::VERBOSE_LEVEL_3,
                 );
                 results.push(finalResult);
             }
         }
 
         let batch = ToolExecutionBatch::new(results, routeChangeIntent);
-        AppLogger::d(
+        AppLogger::v_with_level(
             TAG,
             &format!(
                 "tool.execution.batch_complete requestedCount={} resultCount={} messageBytes={}",
@@ -479,6 +483,7 @@ impl ToolExecutionManager {
                 batch.results.len(),
                 batch.message.len()
             ),
+            operit_util::AppLogger::VERBOSE_LEVEL_3,
         );
         Ok(batch)
         }).await
@@ -806,7 +811,7 @@ mod tests {
             workspaceFolders: Vec::new(),
             toolExposureMode: ToolExposureMode::FULL,
             extensionOwner: owner.to_string(),
-            messageExtension: serde_json::json!({"turn": owner}).as_object().unwrap().clone(),
+            executionData: serde_json::json!({"turn": owner}).as_object().unwrap().clone(),
         }
     }
 
@@ -851,15 +856,15 @@ mod tests {
     #[test]
     fn execution_snapshot_requires_exact_authenticated_identity() {
         let valid = turn_snapshot("package.owner");
-        assert!(valid.validateSnapshot().is_ok());
+        assert!(valid.validateExecutionContext().is_ok());
         for owner in ["", " ", " package.owner", "package.owner "] {
             let mut invalid = valid.clone();
             invalid.extensionOwner = owner.to_string();
-            assert!(invalid.validateSnapshot().is_err());
+            assert!(invalid.validateExecutionContext().is_err());
         }
         let mut invalid = valid;
         invalid.callerParticipantId = Some(" participant ".to_string());
-        assert!(invalid.validateSnapshot().is_err());
+        assert!(invalid.validateExecutionContext().is_err());
     }
 
     #[test]

@@ -2155,6 +2155,7 @@ dependencies = [
  "sha2",
  "uuid",
  "wasmi",
+ "zeroize",
  "zip",
 ]
 

@@ -92,7 +92,7 @@ impl ToolPkgChatRuntimeHookBridge {
                     );
                     let manager = runtime.package_manager();
                     for hook in hooks {
-                        ChainLogger::info(
+                        ChainLogger::verbose_with_level(
                             PLUGIN_CHAIN,
                             "plugin.toolpkg.chat_runtime.run.start",
                             &[
@@ -101,6 +101,7 @@ impl ToolPkgChatRuntimeHookBridge {
                                 ("hookId", hook.hookId.clone()),
                                 ("function", hook.functionName.clone()),
                             ],
+                            operit_util::AppLogger::VERBOSE_LEVEL_3,
                         );
                         match manager
                             .runToolPkgMainHook(
@@ -117,7 +118,7 @@ impl ToolPkgChatRuntimeHookBridge {
                             )
                             .await
                         {
-                            Ok(_) => ChainLogger::info(
+                            Ok(_) => ChainLogger::verbose_with_level(
                                 PLUGIN_CHAIN,
                                 "plugin.toolpkg.chat_runtime.run.done",
                                 &[
@@ -125,6 +126,7 @@ impl ToolPkgChatRuntimeHookBridge {
                                     ("package", hook.containerPackageName.clone()),
                                     ("hookId", hook.hookId.clone()),
                                 ],
+                                operit_util::AppLogger::VERBOSE_LEVEL_3,
                             ),
                             Err(error) => ChainLogger::error(
                                 PLUGIN_CHAIN,

@@ -1,4 +1,5 @@
-use operit_store::PreferenceMerge::{PreferenceMergeCatalog, PreferenceMergeStore};
+use operit_host_api::PluginStorage::{StoragePreferencesMergeCatalog, StoragePreferencesMergeDescriptor};
+use operit_store::PreferenceMerge::PreferenceMergeStore;
 use std::path::PathBuf;
 
 use std::collections::HashSet;
@@ -90,19 +91,25 @@ impl ModelConfigManager {
             .withSchema(Self::PREFERENCES_VERSION, Self::migratePreferences)
     }
 
-    /// Declares this owner's entity identity, name and content metadata for Core merging.
-    pub(crate) fn spaceMergeCatalog() -> PreferenceMergeCatalog {
-        PreferenceMergeCatalog {
-            store: PreferenceMergeStore {
-                path: operit_util::RuntimeStorageLayout::MODEL_CONFIGS_PREFERENCES_PATH,
-                encrypted: true,
+    /// Declares this owner's catalog and references using the shared merge contract.
+    pub(crate) fn spaceMergeStore() -> PreferenceMergeStore {
+        let path = operit_util::RuntimeStorageLayout::MODEL_CONFIGS_PREFERENCES_PATH;
+        PreferenceMergeStore {
+            path: path.to_string(),
+            encrypted: true,
+            merge: StoragePreferencesMergeDescriptor {
+                version: 1,
+                catalog: Some(StoragePreferencesMergeCatalog {
+                    key_prefix: "provider_".to_string(),
+                    key_suffix: "".to_string(),
+                    identity_field: "id".to_string(),
+                    name_field: "name".to_string(),
+                    ignored_fields: vec!["createdAt".to_string(), "updatedAt".to_string()],
+                    retired_keys: vec!["provider_list".to_string()],
+                }),
+                references: vec![],
+                projection: None,
             },
-            keyPrefix: "provider_",
-            keySuffix: "",
-            identityField: "id",
-            nameField: "name",
-            ignoredFields: &["createdAt", "updatedAt"],
-            retiredKeys: &["provider_list"],
         }
     }
 

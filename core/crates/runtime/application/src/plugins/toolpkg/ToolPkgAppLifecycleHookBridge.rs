@@ -149,7 +149,7 @@ fn runAppLifecycleHook(
                 let hook = &hook;
                 let eventName = &eventName;
                 let manager = runtime.package_manager();
-                ChainLogger::info(
+                ChainLogger::verbose_with_level(
                     PLUGIN_CHAIN,
                     "plugin.toolpkg.app_lifecycle.run.start",
                     &[
@@ -158,6 +158,7 @@ fn runAppLifecycleHook(
                         ("hookId", hook.hookId.clone()),
                         ("function", hook.functionName.clone()),
                     ],
+                    operit_util::AppLogger::VERBOSE_LEVEL_3,
                 );
                 match manager
                     .runToolPkgMainHook(
@@ -174,7 +175,7 @@ fn runAppLifecycleHook(
                     )
                     .await
                 {
-                    Ok(_) => ChainLogger::info(
+                    Ok(_) => ChainLogger::verbose_with_level(
                         PLUGIN_CHAIN,
                         "plugin.toolpkg.app_lifecycle.run.done",
                         &[
@@ -182,6 +183,7 @@ fn runAppLifecycleHook(
                             ("package", hook.containerPackageName.clone()),
                             ("hookId", hook.hookId.clone()),
                         ],
+                        operit_util::AppLogger::VERBOSE_LEVEL_3,
                     ),
                     Err(error) => ChainLogger::error(
                         PLUGIN_CHAIN,

@@ -1,10 +1,24 @@
 //! Owned JSON-compatible values at the native engine boundary. No JSON text is
 //! generated on the ordinary path. Only JS handles on the owner thread are used.
+//!
+//! General bindings retain JSON value semantics (`toJSON`, boxed values, dates).
+//! Tool parameters use `snapshot` to validate plain data once and move its owned
+//! Rust tree into the binding; `writer` eagerly creates ordinary JS results.
+//! Engine allocation reuse is isolated in `javascript_allocator`.
 use rquickjs::{
-    convert::Coerced, function::This, object::Property, qjs, Array, Ctx, Exception, FromJs,
-    Function, IntoJs, Object, Persistent, Value,
+    convert::Coerced, function::This, qjs, Array, Ctx, Exception, FromJs, Function, IntoJs, Object,
+    Persistent, Value,
 };
 use serde_json::{Map, Number, Value as JsonValue};
+
+mod snapshot;
+#[cfg(test)]
+mod tests;
+mod writer;
+
+pub(crate) use snapshot::install_owned_snapshot;
+use snapshot::JsonScratch;
+pub(crate) use writer::to_js;
 
 const MAX_DEPTH: usize = 128;
 const MAX_NODES: usize = 1_000_000;
@@ -13,6 +27,9 @@ const MAX_NODES: usize = 1_000_000;
 /// are subsequently replaced by a plugin. Class ids are discovered, not hardcoded.
 pub(crate) struct JsonIntrinsics {
     prepare: Persistent<Function<'static>>,
+    plain_prototype: Persistent<Value<'static>>,
+    owned_class: std::cell::Cell<Option<qjs::JSClassID>>,
+    scratch: std::cell::RefCell<JsonScratch>,
     boolean_value: Persistent<Function<'static>>,
     bigint_value: Persistent<Function<'static>>,
     classes: [qjs::JSClassID; 5],
@@ -38,6 +55,9 @@ impl JsonIntrinsics {
         let is_array: Function = ctx.eval("Array.isArray")?;
         Ok(Self {
             prepare: Persistent::save(ctx, prepare),
+            plain_prototype: Persistent::save(ctx, ctx.eval::<Value, _>("Object.prototype")?),
+            owned_class: std::cell::Cell::new(None),
+            scratch: Default::default(),
             boolean_value: Persistent::save(ctx, boolean_value),
             bigint_value: Persistent::save(ctx, bigint_value),
             is_array: Persistent::save(ctx, is_array),
@@ -90,9 +110,19 @@ impl JsonIntrinsics {
                 "Tool parameters exceed structured bridge depth/node limit",
             ));
         }
+        if let Some(owned) = self.take_owned(ctx, &value, nodes, depth)? {
+            return Ok(Some(owned));
+        }
         // SerializeJSONProperty: toJSON is called once, before unboxing and
         // before detecting an ancestor cycle. Primitive BigInts can have toJSON.
-        if value.is_object() || value.is_big_int() {
+        if let Some(object) = value.as_object() {
+            // Read with the engine API directly. The ordinary plain-data path
+            // must not enter a JS helper for every object in a request tree.
+            let to_json: Value = object.get("toJSON")?;
+            if let Some(function) = to_json.as_function() {
+                value = function.call((This(value.clone()), key))?;
+            }
+        } else if value.is_big_int() {
             value = self.prepare.clone().restore(ctx)?.call((value, key))?;
         }
         let mut proxy_array = false;
@@ -213,12 +243,12 @@ impl JsonIntrinsics {
         } else {
             // Snapshot enumerable own keys before invoking getters. This matches
             // JSON.stringify when a getter mutates sibling properties.
-            let keys = object
-                .keys::<String>()
-                .collect::<rquickjs::Result<Vec<_>>>()?;
+            // The iterator snapshots own keys on creation and reads each value
+            // by its existing atom, avoiding a String -> atom lookup per field.
+            let properties = object.props::<String, Value>();
             let mut items = Map::new();
-            for key in keys {
-                let element: Value = object.get(key.as_str())?;
+            for property in properties {
+                let (key, element) = property?;
                 if let Some(element) = self.convert(ctx, element, &key, stack, nodes, depth + 1)? {
                     items.insert(key, element);
                 }
@@ -227,152 +257,5 @@ impl JsonIntrinsics {
         };
         stack.pop();
         Ok(Some(result))
-    }
-}
-
-/// Creates JS data properties, not assignments: a JSON key such as __proto__
-/// must not invoke an inherited setter or change the result object's prototype.
-pub(crate) fn to_js<'js>(ctx: &Ctx<'js>, value: &JsonValue) -> rquickjs::Result<Value<'js>> {
-    to_js_inner(ctx, value, 0, &mut 0)
-}
-
-fn to_js_inner<'js>(
-    ctx: &Ctx<'js>,
-    value: &JsonValue,
-    depth: usize,
-    nodes: &mut usize,
-) -> rquickjs::Result<Value<'js>> {
-    *nodes += 1;
-    if depth > MAX_DEPTH || *nodes > MAX_NODES {
-        return Err(Exception::throw_range(
-            ctx,
-            "Tool result exceeds structured bridge depth/node limit",
-        ));
-    }
-    match value {
-        JsonValue::Null => Ok(Value::new_null(ctx.clone())),
-        JsonValue::Bool(value) => value.into_js(ctx),
-        JsonValue::Number(value) => value.as_f64().unwrap_or(f64::NAN).into_js(ctx),
-        JsonValue::String(value) => value.into_js(ctx),
-        JsonValue::Array(values) => {
-            let array = Array::new(ctx.clone())?;
-            for (index, value) in values.iter().enumerate() {
-                array.prop(
-                    index as u32,
-                    Property::from(to_js_inner(ctx, value, depth + 1, nodes)?)
-                        .writable()
-                        .enumerable()
-                        .configurable(),
-                )?;
-            }
-            Ok(array.into_value())
-        }
-        JsonValue::Object(values) => {
-            let object = Object::new(ctx.clone())?;
-            for (key, value) in values {
-                object.prop(
-                    key.as_str(),
-                    Property::from(to_js_inner(ctx, value, depth + 1, nodes)?)
-                        .writable()
-                        .enumerable()
-                        .configurable(),
-                )?;
-            }
-            Ok(object.into_value())
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rquickjs::{Context, Runtime};
-
-    #[test]
-    fn structured_parameters_match_json_stringify_semantics() {
-        let runtime = Runtime::new().unwrap();
-        let context = Context::full(&runtime).unwrap();
-        context.with(|ctx| {
-            let intrinsics = JsonIntrinsics::new(&ctx).unwrap();
-            for expression in [
-                "({text:'引号\\\"\\n\\u2028', flag:true, nil:null, integer:42, large:1e16})",
-                "({rounded:18446744073709550000, negative:-9223372036854775808, exp:1e21, huge:1.79e308})",
-                "({drop:undefined, fn:function(){}, symbol:Symbol('x'), nan:NaN, inf:Infinity})",
-                "({array:[undefined, function(){}, Symbol('x'), NaN, , 5], nested:{a:1}})",
-                "({date:new Date('2020-01-01T00:00:00Z'), n:new Number(3), s:new String('x'), b:new Boolean(false)})",
-                "({value:{toJSON(key){return {key:key, text:'done'};}}})",
-                "({value: (()=>{ var f=function(k){return k;}; f.call=null; return {toJSON:f}; })()})",
-                "({a:1, get b(){delete this.a; this.c=3; return 2;}})",
-                "({shared:(()=>{var a={v:2};return [a,a];})()})",
-                "({__proto__:null, ['__proto__']:{polluted:true}, ['constructor']:'plain'})",
-                "({boxed:(()=>{var n=new Number(3);n.valueOf=()=>5;return n;})()})",
-                "({array:new Proxy([1,,3],{})})",
-                "({array:new Proxy([1,2,3],{get(t,k){return k==='length'?2.9:Reflect.get(t,k);}})})",
-                "({typed:new Uint8Array([1,2,3]), map:new Map([['x',1]])})",
-                "({get a(){return undefined;}, get b(){return null;}})",
-                "({value:{toJSON(){return function(){};}}})",
-            ] {
-                // Evaluate separately because getters can mutate the object.
-                let expected: String = ctx.eval(format!("JSON.stringify({expression})")).unwrap();
-                let value: Value = ctx.eval(expression).unwrap();
-                let actual = intrinsics.from_js(&ctx, value).unwrap().unwrap();
-                let expected: JsonValue = serde_json::from_str(&expected).unwrap();
-                assert_eq!(actual, expected, "{expression}");
-            }
-        });
-    }
-
-    #[test]
-    fn cycles_bigints_getters_and_depth_are_rejected_without_poisoning_context() {
-        let runtime = Runtime::new().unwrap();
-        let context = Context::full(&runtime).unwrap();
-        context.with(|ctx| {
-            let intrinsics = JsonIntrinsics::new(&ctx).unwrap();
-            for source in [
-                "(()=>{let x={};x.self=x;return x;})()",
-                "({value:1n})",
-                "({value:Object(1n)})",
-                "({get value(){throw new Error('getter failure');}})",
-                "(()=>{let x={};for(let i=0;i<140;i++)x={x};return x;})()",
-                "({value:new Array(1000001)})",
-            ] {
-                let value: Value = ctx.eval(source).unwrap();
-                assert!(intrinsics.from_js(&ctx, value).is_err(), "{source}");
-                ctx.catch();
-                assert_eq!(ctx.eval::<i32, _>("1+1").unwrap(), 2);
-            }
-            let value: Value = ctx.eval("({value:{toJSON(){return 4;}}})").unwrap();
-            assert_eq!(
-                intrinsics.from_js(&ctx, value).unwrap(),
-                Some(serde_json::json!({"value":4}))
-            );
-        });
-    }
-
-    #[test]
-    fn result_arrays_do_not_invoke_inherited_index_setters() {
-        let runtime = Runtime::new().unwrap();
-        let context = Context::full(&runtime).unwrap();
-        context.with(|ctx| {
-            ctx.eval::<(), _>("globalThis.setterCalls=0; Object.defineProperty(Array.prototype,'0',{set(){setterCalls++;},configurable:true});").unwrap();
-            let result = to_js(&ctx, &serde_json::json!([7, {"nested":[8]}])).unwrap();
-            ctx.globals().set("result", result).unwrap();
-            assert_eq!(ctx.eval::<i32, _>("setterCalls").unwrap(), 0);
-            assert!(ctx.eval::<bool, _>("Object.hasOwn(result,'0') && Object.hasOwn(result[1].nested,'0')").unwrap());
-            assert_eq!(ctx.eval::<String, _>("JSON.stringify(result)").unwrap(), "[7,{\"nested\":[8]}]");
-        });
-    }
-
-    #[test]
-    fn results_preserve_proto_keys_as_own_data_properties() {
-        let runtime = Runtime::new().unwrap();
-        let context = Context::full(&runtime).unwrap();
-        context.with(|ctx| {
-            let value = serde_json::json!({"__proto__":{"polluted":true}, "text":"\"\n\u{2028}中"});
-            ctx.globals().set("result", to_js(&ctx, &value).unwrap()).unwrap();
-            assert!(ctx.eval::<bool,_>("Object.getPrototypeOf(result)===Object.prototype && Object.hasOwn(result,'__proto__') && result.polluted===undefined").unwrap());
-            let serialized: String = ctx.eval("JSON.stringify(result)").unwrap();
-            assert_eq!(serde_json::from_str::<JsonValue>(&serialized).unwrap(), value);
-        });
     }
 }

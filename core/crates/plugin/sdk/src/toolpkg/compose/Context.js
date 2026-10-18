@@ -50,7 +50,7 @@ var OperitComposeDslRuntime = function () {
           OperitComposeReactive.stateChanged(runtime.ctx, key);
         });
       }
-      if (next.theme !== undefined) theme.update(next.theme);
+      if (next.theme !== undefined && theme.update(next.theme)) OperitComposeReactive.invalidateRoot(ctx);
       if (next.__operit_call_runtime) runtime.callRuntime = next.__operit_call_runtime;
     };
     runtime.ctx = ctx;

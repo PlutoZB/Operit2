@@ -10,6 +10,7 @@ var OperitComposeReactive = function () {
       dirty: new Set(),
       current: null,
       sequence: 0,
+      contentRevision: 0,
       root: null,
       entry: null,
       effects: new Map(),
@@ -52,6 +53,7 @@ var OperitComposeReactive = function () {
 
   /// Records a state write and the explicit broad dependency used by opaque execution units.
   function stateChanged(ctx, key) {
+    invalidateContent(ctx);
     publish(ctx, 'state:' + key);
     publish(ctx, '*');
   }
@@ -124,6 +126,36 @@ var OperitComposeReactive = function () {
     return task;
   }
 
+  /// Owns subscriptions and effects inside a memo even when its factory is skipped by its parent.
+  function memo(ctx, key, reusable, execute) {
+    var graph = graphs.get(ctx);
+    var parent = graph.current;
+    if (!parent) return execute();
+    var id = parent.key + '/memo:' + key.length + ':' + key;
+    var task = graph.tasks.get(id);
+    var retained = !!task;
+    if (!task) {
+      task = {
+        key: id,
+        order: graph.sequence++,
+        dependencies: new Set(),
+        counts: new Map(),
+        execute: execute,
+        value: undefined,
+        parent: parent,
+        children: new Set(),
+        kind: 'memo'
+      };
+      graph.tasks.set(id, task);
+    }
+    parent.usedChildren.add(task);
+    if (!retained || !reusable) {
+      task.execute = execute;
+      run(ctx, task);
+    }
+    return task.value;
+  }
+
   /// Declares an independently compiled lexical frame and removes its enclosing broad subscription.
   function frame(ctx, site) {
     var graph = graphs.get(ctx);
@@ -162,7 +194,8 @@ var OperitComposeReactive = function () {
   }
 
   /// Preserves node identity while updating its constructor arguments in a subscribed UI unit.
-  function expression(frame, site, dependencies, argumentsFactory, factory) {
+  function expression(frame, site, dependencies, argumentsFactory, factory, template) {
+    OperitComposeGeneration.created(frame.ctx);
     var graph = graphs.get(frame.ctx);
     var owner = graph.current;
     var task = unit(frame.ctx, site, dependencies,
@@ -170,10 +203,11 @@ var OperitComposeReactive = function () {
     function () {
       graph.metrics.expressionRuns += 1;
       if (!this.entry) this.entry = {
-        callbacks: new Map(),
         initialized: false
       };
-      return OperitComposeGeneration.evaluate(this.entry, argumentsFactory(), factory);
+      return template
+        ? OperitComposeGeneration.evaluateTemplate(this.entry, frame.ctx, argumentsFactory(), factory)
+        : OperitComposeGeneration.evaluate(this.entry, argumentsFactory(), factory);
     }, 'expression');
     // Parent constructors need a child subscription only if the child replaces its handle.
     var dependency = 'unit:' + task.key;
@@ -181,9 +215,17 @@ var OperitComposeReactive = function () {
     return task.value;
   }
 
+  /// Uses the same dependency task ownership for compiler-hoisted UI templates.
+  function expressionTemplate(frame, site, dependencies, valuesFactory, factory) {
+    return expression(frame, site, dependencies, valuesFactory, factory, true);
+  }
+
   /// Executes the initial entry once, then drains only dependency-indexed execution units.
-  function render(ctx, entry) {
+  function render(ctx, entry, refreshOpaqueRoot) {
     var graph = graphs.get(ctx);
+    // Ordinary JS closures and refs have no observable stability contract. Refresh
+    // them on explicit renders; a trusted range event changes layout state only.
+    if (refreshOpaqueRoot !== false) invalidateContent(ctx);
     if (graph.entry !== entry) {
       dispose(ctx);
       graph.entry = entry;
@@ -196,7 +238,7 @@ var OperitComposeReactive = function () {
         /// Executes the original entry as an explicitly subscribed root unit.
         execute: function () {
           graph.metrics.rootRuns += 1;
-          OperitComposeGeneration.begin(ctx);
+          OperitComposeGeneration.begin(ctx, entry);
           try {
             var value = entry(ctx);
             if (value && typeof value.then === 'function') return value.then(
@@ -224,8 +266,10 @@ var OperitComposeReactive = function () {
       subscribe(graph, graph.root, ['*']);
       return run(ctx, graph.root);
     }
-    // Broad execution units retain the original per-response evaluation semantics.
-    publish(ctx, '*');
+    // Eager, final and explicit host renders also observe ordinary JS closures.
+    // Intermediate state notifications drain only work not already consumed by
+    // another command (for example a list viewport update in this same context).
+    if (refreshOpaqueRoot !== false) publish(ctx, '*');
     while (graph.dirty.size > 0) {
       var next = null;
       graph.dirty.forEach(
@@ -252,10 +296,21 @@ var OperitComposeReactive = function () {
     graph.tasks.delete(task.key);
   }
 
-  /// Invalidates the root after host input, theme, or viewport state changes.
-  function invalidateRoot(ctx) {
+  /// Invalidates cached content on state/input changes and opaque business callbacks.
+  function invalidateContent(ctx) {
+    graphs.get(ctx).contentRevision += 1;
+  }
+
+  /// Reopens the root for a range change while preserving unchanged item content.
+  function invalidateViewport(ctx) {
     var graph = graphs.get(ctx);
     if (graph.root) graph.dirty.add(graph.root);
+  }
+
+  /// Host inputs, theme changes and source replacement invalidate content as well.
+  function invalidateRoot(ctx) {
+    invalidateContent(ctx);
+    invalidateViewport(ctx);
   }
 
   /// Releases all dependency subscriptions when replacing the root program.
@@ -295,12 +350,17 @@ var OperitComposeReactive = function () {
   }
   return {
     attach: attach,
+    memo: memo,
     effect: effect,
     frame: frame,
     state: state,
     derived: derived,
     expression: expression,
+    expressionTemplate: expressionTemplate,
     invalidateRoot: invalidateRoot,
+    invalidateViewport: invalidateViewport,
+    invalidateContent: invalidateContent,
+    contentRevision: function (ctx) { return graphs.get(ctx).contentRevision; },
     stateChanged: stateChanged,
     render: render,
     dispose: dispose,

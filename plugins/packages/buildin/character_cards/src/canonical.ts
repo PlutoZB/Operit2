@@ -51,8 +51,6 @@ export interface CharacterRepository {
   updateCharacter(card: Card): Promise<Card>;
   /** Removes the character and its owned memory space without changing the active actor. */
   deleteCharacter(id: string): Promise<void>;
-  /** Restores the explicit product default character, not a recovery record. */
-  resetDefaultCharacter(): Promise<Card>;
   /** Lists complete groups. */
   listGroups(): Promise<Group[]>;
   /** Requires an exact existing group. */
@@ -201,6 +199,10 @@ export interface CharacterRepositoryOwner extends Pick<
   | "listGroups"
   | "getCharacter"
   | "getGroup"
+  | "getTag"
+  | "getStore"
+  | "listModels"
+  | "listTtsConfigs"
   | "listTags"
   | "listStores"
   | "readMemorySettings"

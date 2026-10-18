@@ -1563,6 +1563,11 @@ impl PartialEq for Preferences {
 impl Eq for Preferences {}
 
 impl Preferences {
+    /// Identifies the exact immutable snapshot, including intervening writes that restore old values.
+    pub(crate) fn sharesSnapshot(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.values, &other.values)
+    }
+
     /// Reads a preference value by key.
     pub fn get(&self, key: &PreferencesKey) -> Option<&Value> {
         self.values.get(&key.name)
@@ -2089,6 +2094,7 @@ impl PreferencesSyncedEntry {
             }
             let payload: PreferencesSyncTransactionPayload =
                 serde_json::from_value(operation.payload.clone())?;
+            validatePluginPreferenceSyncPath(&payload.storagePath)?;
             if payload.formatVersion != 2 || payload.entries.len() < 2 {
                 return Err(PreferencesDataStoreError::Message(
                     "Invalid preference transaction version or entry count".into(),
@@ -2137,6 +2143,7 @@ impl PreferencesSyncedEntry {
         }
         let payload: PreferencesSyncEntryPayload =
             serde_json::from_value(operation.payload.clone())?;
+        validatePluginPreferenceSyncPath(&payload.storagePath)?;
         match payload.formatVersion {
             1 => {}
             2 => {
@@ -2632,37 +2639,59 @@ impl PreferencesDataStore {
     where
         F: Fn(&str, &str) -> bool,
     {
-        let incomingEntries = incoming
-            .iter()
-            .map(PreferencesSyncedEntry::fromOperation)
-            .collect::<Result<Vec<_>, _>>()?;
-        let touchedPaths = incomingEntries
-            .iter()
-            .map(|entry| entry.storagePath.clone())
+        let batch = Self::prepareSyncedEntries(history, incoming)?;
+        Self::filterSyncedEntries(&batch, retain)
+    }
+
+    /// Decodes each immutable operation once and orders the prepared batch for shared consumers.
+    pub(crate) fn prepareSyncedEntries<'a>(
+        history: &'a [SyncOperation],
+        incoming: &'a [SyncOperation],
+    ) -> Result<Vec<(&'a SyncOperation, PreferencesSyncedEntry)>, PreferencesDataStoreError> {
+        let incomingEntries = incoming.iter().map(|operation| {
+            PreferencesSyncedEntry::fromOperation(operation).map(|entry| (operation, entry))
+        }).collect::<Result<Vec<_>, _>>()?;
+        let touchedPaths = incomingEntries.iter().map(|(_, entry)| entry.storagePath.clone())
             .collect::<BTreeSet<_>>();
+        let historicalEntries = history.iter().map(|operation| {
+            PreferencesSyncedEntry::fromOperation(operation).map(|entry| (operation, entry))
+        });
         let mut operations = BTreeMap::new();
-        for operation in history.iter().chain(incoming) {
-            let mut entry = PreferencesSyncedEntry::fromOperation(operation)?;
-            if !touchedPaths.contains(&entry.storagePath) {
-                continue;
-            }
-            if !entry.retainKeys(&retain) {
-                continue;
-            }
-            if let Some(existing) = operations.insert(operation.opId.clone(), (operation, entry)) {
+        for candidate in historicalEntries.chain(incomingEntries.into_iter().map(Ok)) {
+            let (operation, entry) = candidate?;
+            if !touchedPaths.contains(&entry.storagePath) { continue; }
+            if let Some(existing) = operations.insert(operation.opId.as_str(), (operation, entry)) {
                 if existing.0 != operation {
-                    return Err(PreferencesDataStoreError::Message(
-                        "Conflicting immutable preference operation".into(),
-                    ));
+                    return Err(PreferencesDataStoreError::Message("Conflicting immutable preference operation".into()));
                 }
             }
         }
+        let mut ordered = operations.into_values().collect::<Vec<_>>();
+        ordered.sort_by(|left, right| {
+            crate::SyncOperationStore::SyncOperationOrder::fromOperation(left.0)
+                .cmp(&crate::SyncOperationStore::SyncOperationOrder::fromOperation(right.0))
+        });
+        Ok(ordered)
+    }
+
+    /// Selects retained keys and applicable schema versions from an already ordered batch.
+    pub(crate) fn filterSyncedEntries<F>(
+        batch: &[(&SyncOperation, PreferencesSyncedEntry)],
+        retain: F,
+    ) -> Result<Vec<PreferencesSyncedEntry>, PreferencesDataStoreError>
+    where
+        F: Fn(&str, &str) -> bool,
+    {
+        let operations = batch.iter().filter_map(|(operation, entry)| {
+            let mut entry = entry.clone();
+            entry.retainKeys(&retain).then_some((*operation, entry))
+        }).collect::<Vec<_>>();
         let mut schemaVersions: BTreeMap<(&str, &str), u32> = BTreeMap::new();
         let mut nativeVersions: BTreeMap<
             (&str, &str),
             crate::SyncOperationStore::SyncOperationOrder,
         > = BTreeMap::new();
-        for (operation, entry) in operations.values() {
+        for (operation, entry) in &operations {
             if let Some(version) = entry.schemaVersion {
                 for key in entry.keys() {
                     schemaVersions
@@ -2689,7 +2718,7 @@ impl PreferencesDataStore {
             }
         }
         let mut ordered = Vec::new();
-        for (operation, entry) in operations.values() {
+        for (operation, entry) in &operations {
             if entry.formatVersion != 2 {
                 if entry.keys().contains(&PREFERENCES_SCHEMA_VERSION_KEY_NAME) {
                     continue;
@@ -2719,15 +2748,7 @@ impl PreferencesDataStore {
             }
             ordered.push((operation, entry));
         }
-        ordered.sort_by(|left, right| {
-            crate::SyncOperationStore::SyncOperationOrder::fromOperation(left.0)
-                .cmp(&crate::SyncOperationStore::SyncOperationOrder::fromOperation(right.0))
-        });
-        let entries = ordered
-            .into_iter()
-            .map(|(_, entry)| entry.clone())
-            .collect::<Vec<_>>();
-        Ok(entries)
+        Ok(ordered.into_iter().map(|(_, entry)| entry.clone()).collect())
     }
 
     /// Validates every preferences file in one sync batch before writing any of
@@ -2954,7 +2975,7 @@ impl PreferencesDataStore {
 
     #[allow(non_snake_case)]
     /// Reads the schema version stored in a preferences snapshot, treating legacy files as version zero.
-    fn readSchemaVersion(preferences: &Preferences) -> Result<u32, PreferencesDataStoreError> {
+    pub(crate) fn readSchemaVersion(preferences: &Preferences) -> Result<u32, PreferencesDataStoreError> {
         let Some(value) = preferences.get(&Self::schemaVersionKey()) else {
             return Ok(0);
         };
@@ -2972,7 +2993,7 @@ impl PreferencesDataStore {
 
     #[allow(non_snake_case)]
     /// Returns the reserved key used to persist a preferences schema version.
-    fn schemaVersionKey() -> PreferencesKey {
+    pub(crate) fn schemaVersionKey() -> PreferencesKey {
         stringPreferencesKey(PREFERENCES_SCHEMA_VERSION_KEY_NAME)
     }
 
@@ -3215,7 +3236,8 @@ impl PreferencesDataStore {
         previous: &Preferences,
         preferences: &Preferences,
     ) -> Result<(), PreferencesDataStoreError> {
-        self.recordSyncOperationsInternal(previous, preferences, false, false)?;
+        let schemaChanged = Self::readSchemaVersion(previous)? != Self::readSchemaVersion(preferences)?;
+        self.recordSyncOperationsInternal(previous, preferences, false, schemaChanged)?;
         self.writeStoredPreferencesUnlocked(preferences)?;
         Ok(())
     }
@@ -3353,6 +3375,8 @@ impl PreferencesDataStore {
         self.changeSignal.changed.notify_all();
         drop(version);
         notifyPreferencesDataStoreSubscribers(&self.changeSignal);
+        // Wake host SDK observers after publishing the new cache, including native edits and replay.
+        crate::SyncOperationStore::publishSyncMutation();
     }
 }
 
@@ -3470,6 +3494,23 @@ fn decodePreferencesSyncedMutation(
             "unsupported preference sync operation: {other}"
         ))),
     }
+}
+
+/// Enforces plugin data ownership without changing the separate native preference namespace contract.
+fn validatePluginPreferenceSyncPath(path: &str) -> Result<(), PreferencesDataStoreError> {
+    use operit_util::RuntimeStorageLayout::{runtimeStorageOwnership, RuntimeStorageOwnership};
+    if path.starts_with("runtime/plugin_data/") {
+        let canonical = operit_util::PluginStoragePaths::resolveStoragePath(path)
+            .map_err(PreferencesDataStoreError::Message)?;
+        if canonical != path || !path.ends_with(".preferences.json") {
+            return Err(PreferencesDataStoreError::Message("Invalid synchronized plugin preference path".into()));
+        }
+        match runtimeStorageOwnership(path).map_err(PreferencesDataStoreError::Message)? {
+            RuntimeStorageOwnership::Space => {},
+            RuntimeStorageOwnership::CoreNode | RuntimeStorageOwnership::Ephemeral => return Err(PreferencesDataStoreError::Message("Synchronized preferences require Space-owned storage".into())),
+        }
+    }
+    Ok(())
 }
 
 /// Encodes a preference entry identity without delimiter or path parsing.
