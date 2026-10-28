@@ -130,7 +130,7 @@ jobs:
       - name: Install Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: "24.x"
 
       - name: Install Java
         uses: actions/setup-java@v6
