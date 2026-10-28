@@ -34,12 +34,25 @@ impl TtsConfigManager {
             .withSchema(Self::PREFERENCES_VERSION, Self::migratePreferences)
     }
 
+    /// Decodes historical record encodings without running new-store initialization.
+    fn decodeSyncedEntry(entry: &mut operit_store::PreferencesDataStore::PreferencesSyncedEntry) -> Result<(), PreferencesDataStoreError> {
+        entry.decodeHistoricalValues(|version, values| {
+            if version > Self::PREFERENCES_VERSION {
+                return Err(PreferencesDataStoreError::SchemaVersionTooNew { actual: version, expected: Self::PREFERENCES_VERSION });
+            }
+            for version in version.max(1)..Self::PREFERENCES_VERSION { Self::migratePreferences(version, values)?; }
+            Ok(())
+        })
+    }
+
     /// Declares this owner's catalog and references using the shared merge contract.
     pub(crate) fn spaceMergeStore() -> PreferenceMergeStore {
         let path = operit_util::RuntimeStorageLayout::TTS_CONFIGS_PREFERENCES_PATH;
         PreferenceMergeStore {
             path: path.to_string(),
             encrypted: true,
+            storageVersion: Some(3),
+            decode: Some(Self::decodeSyncedEntry),
             merge: StoragePreferencesMergeDescriptor {
                 version: 1,
                 catalog: Some(StoragePreferencesMergeCatalog {

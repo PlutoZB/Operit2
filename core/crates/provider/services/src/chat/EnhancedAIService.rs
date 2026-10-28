@@ -63,6 +63,19 @@ use operit_util::MarkdownRenderStream::MarkdownStreamEvent;
 
 const TAG: &str = "EnhancedAIService";
 
+/// Carries the finalized result of one tool or warning round to the next model request.
+struct ToolResultContinuation {
+    results: Vec<ToolResult>,
+    message: String,
+}
+
+/// Describes the next action without retaining a previous round's execution future.
+enum ResponseRoundAction {
+    Complete,
+    ExecuteTools(Vec<ToolInvocation>),
+    Continue(ToolResultContinuation),
+}
+
 pub struct EnhancedAIService {
     pub multi_service_manager: MultiServiceManager,
     pub init_scope: InitScopeMirror,
@@ -488,7 +501,9 @@ impl PromptHistoryHookDispatcher for RuntimePromptHistoryHooks {
     fn dispatch_prompt_history_hooks(
         &self,
         context: HistoryHookContext,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = HistoryHookContext> + Send + '_>> {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<HistoryHookContext, String>> + Send + '_>,
+    > {
         Box::pin(async move {
             let dispatched = PromptHookRegistry::dispatchPromptHistoryHooks(PromptHookContext {
                 stage: context.stage.clone(),
@@ -505,11 +520,10 @@ impl PromptHistoryHookDispatcher for RuntimePromptHistoryHooks {
                 model_parameters: Vec::new(),
                 available_tools: Vec::new(),
                 metadata: btree_to_value_map(&context.metadata),
-                on_hook_timeout: None,
             })
-            .await;
+            .await?;
 
-            HistoryHookContext {
+            Ok(HistoryHookContext {
                 stage: dispatched.stage,
                 chat_id: dispatched.chat_id,
                 prompt_function_type: dispatched
@@ -522,7 +536,7 @@ impl PromptHistoryHookDispatcher for RuntimePromptHistoryHooks {
                 prepared_history: dispatched.prepared_history,
                 use_english: dispatched.use_english,
                 metadata: value_to_btree_map(dispatched.metadata),
-            }
+            })
         })
     }
 }
@@ -758,14 +772,15 @@ impl EnhancedAIService {
         Ok(windowSize)
     }
 
+    /// Applies final prompt hooks and preserves execution failures for the caller.
     pub async fn applyPromptFinalizeHooks<F, Fut>(
         &self,
         initialContext: PromptHookContext,
         dispatchHooks: F,
-    ) -> PromptHookContext
+    ) -> Result<PromptHookContext, String>
     where
         F: FnOnce(PromptHookContext) -> Fut,
-        Fut: std::future::Future<Output = PromptHookContext>,
+        Fut: std::future::Future<Output = Result<PromptHookContext, String>>,
     {
         dispatchHooks(initialContext).await
     }
@@ -1183,11 +1198,11 @@ impl EnhancedAIService {
         self.sendMessageWithRuntime(options, runtime).await
     }
 
-    /// Resolves a fresh conversation execution after the native owner-specific canonical record read; historical snapshots use explicit revision resolution.
-    pub async fn resolveChatConfigurationForOptions(
+    /// Builds the canonical request shared by execution and current-participant context estimates.
+    pub fn chatConfigurationRequestForOptions(
         &self,
         options: &SendMessageOptions,
-    ) -> Result<ChatConfigurationResult, AiServiceError> {
+    ) -> Result<ChatConfigurationRequest, AiServiceError> {
         let support = self.provider_runtime_context.support();
         let defaultModelBinding = match (
             options.chatProviderIdOverride.as_ref(),
@@ -1213,20 +1228,28 @@ impl EnhancedAIService {
                 ))
             }
         };
-        support
-            .resolveChatConfiguration(ChatConfigurationRequest {
-                purpose: ChatConfigurationPurpose::Execution,
-                chatId: options.chatId.clone(),
-                // The native API replaces this unresolved field with the selected owner's actual record before invoking the plugin.
-                chatExtension: None,
-                // Fresh execution has no requested historical revision; stored message resolution supplies its exact snapshot separately.
-                participantId: options.executionParticipantId.clone(),
-                promptFunctionType: options.promptFunctionType.clone(),
-                defaultModelBinding,
-                defaultTtsConfigId: support
-                    .defaultTtsConfigId()
-                    .map_err(AiServiceError::RequestFailed)?,
-            })
+        Ok(ChatConfigurationRequest {
+            purpose: ChatConfigurationPurpose::Execution,
+            chatId: options.chatId.clone(),
+            // The native API reads this owner's current canonical conversation record.
+            chatExtension: None,
+            participantId: options.executionParticipantId.clone(),
+            promptFunctionType: options.promptFunctionType.clone(),
+            defaultModelBinding,
+            defaultTtsConfigId: support
+                .defaultTtsConfigId()
+                .map_err(AiServiceError::RequestFailed)?,
+        })
+    }
+
+    /// Resolves a fresh execution from the current conversation binding and explicit participant.
+    pub async fn resolveChatConfigurationForOptions(
+        &self,
+        options: &SendMessageOptions,
+    ) -> Result<ChatConfigurationResult, AiServiceError> {
+        self.provider_runtime_context
+            .support()
+            .resolveChatConfiguration(self.chatConfigurationRequestForOptions(options)?)
             .await
             .map_err(AiServiceError::RequestFailed)
     }
@@ -1637,7 +1660,8 @@ impl EnhancedAIService {
                 },
                 PromptHookRegistry::dispatchPromptFinalizeHooks,
             )
-            .await;
+            .await
+            .map_err(AiServiceError::RequestFailed)?;
         lifecycle.push(SendMessageLifecycleStage::BeforeFinalizePromptHook);
         if let Some(processedInput) = beforeFinalizeContext.processed_input.clone() {
             finalProcessedInput = processedInput;
@@ -1654,7 +1678,8 @@ impl EnhancedAIService {
                 },
                 PromptHookRegistry::dispatchPromptFinalizeHooks,
             )
-            .await;
+            .await
+            .map_err(AiServiceError::RequestFailed)?;
         lifecycle.push(SendMessageLifecycleStage::BeforeSendToModelHook);
         if let Some(processedInput) = beforeSendContext.processed_input.clone() {
             finalProcessedInput = processedInput;
@@ -1835,12 +1860,22 @@ impl EnhancedAIService {
                             responseRevisions.savepoint(&event.id);
                         }
                         operit_util::stream::RevisableTextStream::TextStreamEventType::Rollback => {
-                            let content = responseRevisions
-                                .rollback(&event.id)
-                                .expect("response rollback must reference an active savepoint")
-                                .to_owned();
-                            execContext.streamBuffer = content.clone();
-                            execContext.roundManager.updateContent(content);
+                            match responseRevisions.rollback(&event.id) {
+                                Some(content) => {
+                                    let content = content.to_owned();
+                                    execContext.streamBuffer = content.clone();
+                                    execContext.roundManager.updateContent(content);
+                                }
+                                None => {
+                                    AppLogger::w(
+                                        TAG,
+                                        &format!(
+                                            "response rollback savepoint missing; keeping current content id={}",
+                                            event.id
+                                        ),
+                                    );
+                                }
+                            }
                         }
                     }
                     responseStream.emit_revision(event);
@@ -2082,8 +2117,8 @@ impl EnhancedAIService {
     }
 
     #[allow(clippy::too_many_arguments)]
-    /// Applies tool execution results to the current assistant response round.
-    pub async fn processToolResults(
+    /// Applies finalized results and collects exactly one model response round.
+    async fn processToolResults(
         &mut self,
         collector: &SharedAiResponseStream,
         results: Vec<operit_tools::ConversationMarkupManager::ToolResult>,
@@ -2101,12 +2136,10 @@ impl EnhancedAIService {
         participantId: Option<String>,
         chatId: Option<String>,
         onToolInvocation: Option<Arc<dyn Fn(String) + Send + Sync>>,
-        notifyReplyOverride: Option<bool>,
         chatProviderIdOverride: Option<String>,
         chatModelIdOverride: Option<String>,
         stream: bool,
         toolResultMessage: String,
-        disableWarning: bool,
         callbacks: Option<Arc<dyn SendMessageCallbacks + Send + Sync>>,
         runtime: &mut SendMessageRuntime,
     ) -> Result<(), AiServiceError> {
@@ -2252,8 +2285,19 @@ impl EnhancedAIService {
                         tokenUsageThreshold
                     ),
                 );
+                // Compaction ends this execution before normal completion publishes its metrics.
+                let tokenSnapshot = self.captureCurrentTurnTokenSnapshot();
+                {
+                    let mut shared = self.shared_state();
+                    shared.last_turn_token_snapshot = Some(tokenSnapshot);
+                    shared.last_turn_context_window = Some(currentTokens);
+                    shared.last_reply_content = Some(context.roundManager.getDisplayContent());
+                }
                 if let Some(callback) = onTokenLimitExceeded {
                     callback();
+                }
+                if let Some(callbacks) = callbacks.as_ref() {
+                    callbacks.onTokenLimitExceeded();
                 }
                 self.invalidateExecutionContext(
                     context,
@@ -2360,12 +2404,22 @@ impl EnhancedAIService {
                             responseRevisions.savepoint(&event.id);
                         }
                         operit_util::stream::RevisableTextStream::TextStreamEventType::Rollback => {
-                            let content = responseRevisions
-                                .rollback(&event.id)
-                                .expect("response rollback must reference an active savepoint")
-                                .to_owned();
-                            context.streamBuffer = content.clone();
-                            context.roundManager.updateContent(content);
+                            match responseRevisions.rollback(&event.id) {
+                                Some(content) => {
+                                    let content = content.to_owned();
+                                    context.streamBuffer = content.clone();
+                                    context.roundManager.updateContent(content);
+                                }
+                                None => {
+                                    AppLogger::w(
+                                        TAG,
+                                        &format!(
+                                            "response rollback savepoint missing; keeping current content id={}",
+                                            event.id
+                                        ),
+                                    );
+                                }
+                            }
                         }
                     }
                     collector.emit_revision(event);
@@ -2448,36 +2502,11 @@ impl EnhancedAIService {
             operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
 
-        Box::pin(self.processStreamCompletion(
-            collector,
-            context,
-            functionType,
-            promptFunctionType,
-            enableThinking,
-            onNonFatalError,
-            onTokenLimitExceeded,
-            maxTokens,
-            tokenUsageThreshold,
-            isSubTask,
-            participantName,
-            avatarUri,
-            participantId,
-            chatId,
-            onToolInvocation,
-            notifyReplyOverride,
-            chatProviderIdOverride,
-            chatModelIdOverride,
-            stream,
-            disableWarning,
-            callbacks.clone(),
-            runtime,
-        ))
-        .await?;
         Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
-    /// Completes one model round using the already resolved execution profile.
+    /// Drives model and tool rounds iteratively so completed rounds release their futures.
     pub async fn processStreamCompletion(
         &mut self,
         collector: &SharedAiResponseStream,
@@ -2503,8 +2532,90 @@ impl EnhancedAIService {
         callbacks: Option<Arc<dyn SendMessageCallbacks + Send + Sync>>,
         runtime: &mut SendMessageRuntime,
     ) -> Result<(), AiServiceError> {
+        loop {
+            if !self.isExecutionContextActive(context) {
+                return Ok(());
+            }
+
+            let continuation = match self.completeResponseRound(
+                collector,
+                context,
+                onNonFatalError,
+                isSubTask,
+                participantName.clone(),
+                avatarUri.clone(),
+                chatId.clone(),
+                notifyReplyOverride,
+                disableWarning,
+            ) {
+                ResponseRoundAction::Complete => return Ok(()),
+                ResponseRoundAction::Continue(continuation) => continuation,
+                ResponseRoundAction::ExecuteTools(invocations) => {
+                    let Some(continuation) = self
+                        .handleToolInvocation(
+                            collector,
+                            invocations,
+                            context,
+                            isSubTask,
+                            participantName.clone(),
+                            participantId.clone(),
+                            chatId.clone(),
+                            onToolInvocation.clone(),
+                            runtime,
+                        )
+                        .await?
+                    else {
+                        return Ok(());
+                    };
+                    continuation
+                }
+            };
+
+            // Finish this request before inspecting and dispatching the next response round.
+            self.processToolResults(
+                collector,
+                continuation.results,
+                context,
+                functionType.clone(),
+                promptFunctionType.clone(),
+                enableThinking,
+                onNonFatalError,
+                onTokenLimitExceeded,
+                maxTokens,
+                tokenUsageThreshold,
+                isSubTask,
+                participantName.clone(),
+                avatarUri.clone(),
+                participantId.clone(),
+                chatId.clone(),
+                onToolInvocation.clone(),
+                chatProviderIdOverride.clone(),
+                chatModelIdOverride.clone(),
+                stream,
+                continuation.message,
+                callbacks.clone(),
+                runtime,
+            )
+            .await?;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    /// Finalizes the current response or returns the next tool or warning action.
+    fn completeResponseRound(
+        &mut self,
+        collector: &SharedAiResponseStream,
+        context: &mut MessageExecutionContext,
+        onNonFatalError: Option<fn(String)>,
+        isSubTask: bool,
+        participantName: Option<String>,
+        avatarUri: Option<String>,
+        chatId: Option<String>,
+        notifyReplyOverride: Option<bool>,
+        disableWarning: bool,
+    ) -> ResponseRoundAction {
         if !self.isExecutionContextActive(context) {
-            return Ok(());
+            return ResponseRoundAction::Complete;
         }
 
         let content = context.streamBuffer.trim().to_string();
@@ -2537,9 +2648,8 @@ impl EnhancedAIService {
                 participantName,
                 avatarUri,
                 notifyReplyOverride,
-                callbacks,
             );
-            return Ok(());
+            return ResponseRoundAction::Complete;
         }
 
         let contentWithoutThinking = ChatUtils::remove_thinking_content(&content);
@@ -2562,9 +2672,8 @@ impl EnhancedAIService {
                     participantName,
                     avatarUri,
                     notifyReplyOverride,
-                    callbacks,
                 );
-                return Ok(());
+                return ResponseRoundAction::Complete;
             }
             let pureThinkingWarning =
                 ConversationMarkupManager::createWarningStatus(ENHANCED_PURE_THINKING_ONLY_WARNING);
@@ -2572,33 +2681,10 @@ impl EnhancedAIService {
                 .roundManager
                 .appendContent(&format!("\n{pureThinkingWarning}"));
             collector.emit_chunk(pureThinkingWarning.clone());
-            return Box::pin(self.processToolResults(
-                collector,
-                Vec::new(),
-                context,
-                functionType,
-                promptFunctionType,
-                enableThinking,
-                onNonFatalError,
-                onTokenLimitExceeded,
-                maxTokens,
-                tokenUsageThreshold,
-                isSubTask,
-                participantName,
-                avatarUri,
-                participantId,
-                chatId,
-                onToolInvocation,
-                notifyReplyOverride,
-                chatProviderIdOverride.clone(),
-                chatModelIdOverride,
-                stream,
-                pureThinkingWarning,
-                disableWarning,
-                callbacks.clone(),
-                runtime,
-            ))
-            .await;
+            return ResponseRoundAction::Continue(ToolResultContinuation {
+                results: Vec::new(),
+                message: pureThinkingWarning,
+            });
         }
 
         let finalContent = self.enhanceToolDetection(&content);
@@ -2639,7 +2725,7 @@ impl EnhancedAIService {
         );
 
         if !self.isExecutionContextActive(context) {
-            return Ok(());
+            return ResponseRoundAction::Complete;
         }
 
         context.conversationHistory.push(PromptTurn {
@@ -2650,7 +2736,7 @@ impl EnhancedAIService {
         });
 
         if !self.isExecutionContextActive(context) {
-            return Ok(());
+            return ResponseRoundAction::Complete;
         }
 
         if !extractedToolInvocations.is_empty() {
@@ -2665,32 +2751,7 @@ impl EnhancedAIService {
                 ),
                 operit_util::AppLogger::VERBOSE_LEVEL_2,
             );
-            return Box::pin(self.handleToolInvocation(
-                collector,
-                extractedToolInvocations,
-                context,
-                functionType,
-                promptFunctionType,
-                enableThinking,
-                onNonFatalError,
-                onTokenLimitExceeded,
-                maxTokens,
-                tokenUsageThreshold,
-                isSubTask,
-                participantName,
-                avatarUri,
-                participantId,
-                chatId,
-                onToolInvocation,
-                notifyReplyOverride,
-                chatProviderIdOverride,
-                chatModelIdOverride,
-                stream,
-                disableWarning,
-                callbacks.clone(),
-                runtime,
-            ))
-            .await;
+            return ResponseRoundAction::ExecuteTools(extractedToolInvocations);
         }
 
         AppLogger::v_with_level(
@@ -2713,41 +2774,26 @@ impl EnhancedAIService {
             participantName,
             avatarUri,
             notifyReplyOverride,
-            callbacks,
         );
-        Ok(())
+        ResponseRoundAction::Complete
     }
 
     #[allow(clippy::too_many_arguments)]
-    /// Executes a nonempty invocation batch and continues with its finalized result message.
-    pub async fn handleToolInvocation(
+    /// Executes one nonempty batch and returns its continuation unless execution stops.
+    async fn handleToolInvocation(
         &mut self,
         collector: &SharedAiResponseStream,
         toolInvocations: Vec<operit_tools::ToolExecutionManager::ToolInvocation>,
         context: &mut MessageExecutionContext,
-        functionType: FunctionType,
-        promptFunctionType: PromptFunctionType,
-        enableThinking: bool,
-        onNonFatalError: Option<fn(String)>,
-        onTokenLimitExceeded: Option<fn()>,
-        maxTokens: i32,
-        tokenUsageThreshold: f64,
         isSubTask: bool,
         participantName: Option<String>,
-        avatarUri: Option<String>,
         participantId: Option<String>,
         chatId: Option<String>,
         onToolInvocation: Option<Arc<dyn Fn(String) + Send + Sync>>,
-        notifyReplyOverride: Option<bool>,
-        chatProviderIdOverride: Option<String>,
-        chatModelIdOverride: Option<String>,
-        stream: bool,
-        disableWarning: bool,
-        callbacks: Option<Arc<dyn SendMessageCallbacks + Send + Sync>>,
         runtime: &mut SendMessageRuntime,
-    ) -> Result<(), AiServiceError> {
+    ) -> Result<Option<ToolResultContinuation>, AiServiceError> {
         if !self.isExecutionContextActive(context) {
-            return Ok(());
+            return Ok(None);
         }
 
         if toolInvocations.is_empty() {
@@ -2787,7 +2833,7 @@ impl EnhancedAIService {
         }
 
         if !self.isExecutionContextActive(context) {
-            return Ok(());
+            return Ok(None);
         }
 
         self.tool_handler.registerDefaultTools();
@@ -2841,7 +2887,7 @@ impl EnhancedAIService {
         );
 
         if !self.isExecutionContextActive(context) {
-            return Ok(());
+            return Ok(None);
         }
 
         let content = format!("\n{toolResultMessage}\n");
@@ -2857,38 +2903,13 @@ impl EnhancedAIService {
                     context.executionId, context.roundManager.roundIndex, targetNodeId
                 ),
             );
-            return Ok(());
+            return Ok(None);
         }
 
-        Box::pin(self.processToolResults(
-            collector,
-            allToolResults,
-            context,
-            functionType,
-            promptFunctionType,
-            enableThinking,
-            onNonFatalError,
-            onTokenLimitExceeded,
-            maxTokens,
-            tokenUsageThreshold,
-            isSubTask,
-            participantName,
-            avatarUri,
-            participantId,
-            chatId,
-            onToolInvocation,
-            notifyReplyOverride,
-            chatProviderIdOverride.clone(),
-            chatModelIdOverride,
-            stream,
-            toolResultMessage,
-            disableWarning,
-            callbacks.clone(),
-            runtime,
-        ))
-        .await?;
-
-        Ok(())
+        Ok(Some(ToolResultContinuation {
+            results: allToolResults,
+            message: toolResultMessage,
+        }))
     }
 
     fn enhanceToolDetection(&self, content: &str) -> String {
@@ -2944,7 +2965,7 @@ impl EnhancedAIService {
     }
 
     #[allow(clippy::too_many_arguments)]
-    /// Retains the completed reply and dispatches its existing completion callbacks.
+    /// Retains the completed reply and publishes its completion notification.
     fn finalizeAssistantResponse(
         &mut self,
         context: &mut MessageExecutionContext,
@@ -2955,12 +2976,8 @@ impl EnhancedAIService {
         participantName: Option<String>,
         avatarUri: Option<String>,
         notifyReplyOverride: Option<bool>,
-        callbacks: Option<Arc<dyn SendMessageCallbacks + Send + Sync>>,
     ) {
         self.shared_state().last_reply_content = Some(content.to_string());
-        if let Some(callbacks) = callbacks {
-            callbacks.onTokenLimitExceeded();
-        }
         self.notifyReplyCompleted(chatId, participantName, avatarUri, notifyReplyOverride);
     }
 

@@ -215,7 +215,6 @@ impl FramedPeerConnection {
 }
 #[async_trait]
 impl PeerConnection for FramedPeerConnection {
-    fn requiresSessionReuse(&self) -> bool { matches!(self.framing, FrameMode::Serial { .. }) }
 
     fn source(&self) -> &PeerEndpoint {
         &self.source

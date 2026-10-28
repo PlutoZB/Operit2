@@ -40,7 +40,7 @@ test('display and model history share the finalized invocation batch message', (
   assert.match(enhanced, /message: toolResultMessage/u);
   assert.match(enhanced, /format!\("\\n\{toolResultMessage\}\\n"\)/u);
   assert.match(enhanced, /content: toolResultMessage/u);
-  assert.match(enhanced, /stream,\s+toolResultMessage,\s+disableWarning/u);
+  assert.match(enhanced, /stream,\s+continuation\.message,\s+callbacks\.clone\(\)/u);
   assert.doesNotMatch(enhanced, /buildToolResultMessage|toolResultMessageOverride|toolResultOverrideMessage/u);
 });
 
@@ -50,11 +50,68 @@ test('pure-thinking warnings continue directly and actual dispatch rejects empty
   const start = enhanced.indexOf('let pureThinkingWarning =');
   const end = enhanced.indexOf('let finalContent =', start);
   const warning = enhanced.slice(start, end);
-  assert.match(warning, /self\.processToolResults\(/u);
+  assert.match(warning, /ResponseRoundAction::Continue\(ToolResultContinuation\s*\{\s*results: Vec::new\(\),\s*message: pureThinkingWarning,/u);
   assert.doesNotMatch(warning, /handleToolInvocation|conversationHistory\.push/u);
-  const dispatch = enhanced.slice(enhanced.indexOf('pub async fn handleToolInvocation('));
+  const dispatch = enhanced.slice(enhanced.indexOf('async fn handleToolInvocation('));
   assert.match(dispatch, /if toolInvocations\.is_empty\(\) \{\s+return Err/u);
   assert.doesNotMatch(enhanced, /chat\.response\.raw/u);
+});
+
+/** Extracts a service method body at its implementation-level closing brace. */
+function serviceMethod(enhanced, name) {
+  const start = enhanced.indexOf(`fn ${name}(`);
+  const end = enhanced.indexOf('\n    }', start);
+  assert.ok(start >= 0 && end > start, `missing method ${name}`);
+  return enhanced.slice(start, end);
+}
+
+/** Any call cycle in the round driver would restore the native stack overflow. */
+test('tool and warning continuations use an iterative driver with an acyclic call graph', () => {
+  const enhanced = source(providers + 'EnhancedAIService.rs');
+  const methods = new Map([
+    'processStreamCompletion',
+    'completeResponseRound',
+    'handleToolInvocation',
+    'processToolResults',
+  ].map(name => [name, serviceMethod(enhanced, name)]));
+  const edges = new Map([...methods].map(([name, body]) => [
+    name,
+    [...body.matchAll(/self\s*\.\s*(\w+)\s*\(/gu)]
+      .map(match => match[1])
+      .filter(callee => methods.has(callee)),
+  ]));
+  assert.deepEqual(new Set(edges.get('processStreamCompletion')), new Set([
+    'completeResponseRound', 'handleToolInvocation', 'processToolResults',
+  ]));
+  assert.match(methods.get('processStreamCompletion'), /loop \{\s+if !self\.isExecutionContextActive\(context\)/u);
+  for (const start of methods.keys()) {
+    const pending = [...edges.get(start)];
+    const visited = new Set();
+    while (pending.length > 0) {
+      const current = pending.pop();
+      assert.notEqual(current, start, `recursive response round through ${start}`);
+      if (!visited.has(current)) {
+        visited.add(current);
+        pending.push(...edges.get(current));
+      }
+    }
+  }
+});
+
+/** Cancellation and route handoff must stop the driver before another model request. */
+test('cancelled and rerouted tool batches end the iterative continuation', () => {
+  const enhanced = source(providers + 'EnhancedAIService.rs');
+  const driver = serviceMethod(enhanced, 'processStreamCompletion');
+  const dispatch = serviceMethod(enhanced, 'handleToolInvocation');
+  assert.match(driver, /let Some\(continuation\) = self[\s\S]*?\.handleToolInvocation\([\s\S]*?\.await\?\s+else \{\s+return Ok\(\(\)\);/u);
+  assert.match(dispatch, /if !self\.isExecutionContextActive\(context\) \{\s+return Ok\(None\);/u);
+  const routePause = dispatch.indexOf('if let Some(targetNodeId) = routeChangeTargetNodeId');
+  const continuation = dispatch.indexOf('Ok(Some(ToolResultContinuation');
+  assert.ok(routePause >= 0 && continuation > routePause);
+  assert.match(dispatch.slice(routePause, continuation), /return Ok\(None\);/u);
+  assert.match(dispatch, /pendingRouteChange = Some\(routeChangeIntent\)/u);
+  const request = serviceMethod(enhanced, 'processToolResults');
+  assert.match(request, /self\.invalidateExecutionContext\(\s+context,\s+"processToolResults\.tokenLimit"/u);
 });
 
 /** Both asynchronous OpenAI request paths must preserve the failure before channel closure. */

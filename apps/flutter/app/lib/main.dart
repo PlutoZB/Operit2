@@ -4,7 +4,8 @@ import 'dart:ui' show PlatformDispatcher;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:desktop_widgets/desktop_widgets.dart';
-import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
+import 'package:operit_keep_alive/operit_keep_alive.dart';
+import 'package:operit_ui/operit_ui.dart' show prepareLiquidGlass;
 
 import 'core/application/CoreApplicationService.dart';
 import 'core/bridge/PlatformCoreProxy.dart';
@@ -96,7 +97,7 @@ void main(List<String> arguments) async {
         );
       }
       final glassStopwatch = Stopwatch()..start();
-      await LiquidGlassWidgets.initialize();
+      await prepareLiquidGlass();
       ClientLogger.v(
         'liquid glass initialized elapsedMs=${glassStopwatch.elapsedMilliseconds}',
         tag: _appStartupLogTag,
@@ -118,6 +119,15 @@ void main(List<String> arguments) async {
           );
           switch (windowArguments) {
             case MainWindowArguments():
+              await OperitKeepAlive.instance.initialize(
+                const KeepAliveOptions(
+                  applicationName: 'Operit2',
+                  androidServiceClassName: 'app.operit.OperitCoreService',
+                  openLabel: '打开 Operit2',
+                  exitLabel: '退出 Operit2',
+                  quitMessage: '退出将停止后台任务。确定退出 Operit2？',
+                ),
+              );
               final coreStopwatch = Stopwatch()..start();
               CoreApplicationService.instance.initialize();
               ClientLogger.v(
@@ -181,17 +191,7 @@ void _runMainWindow() {
     tag: _appStartupLogTag,
     verboseLevel: VerboseLevel.level1,
   );
-  runApp(
-    LiquidGlassWidgets.wrap(
-      respectSystemAccessibility: false,
-      theme: GlassThemeData.simple(
-        blur: 2.5,
-        thickness: 36,
-        quality: GlassQuality.standard,
-      ),
-      child: const OperitApp(),
-    ),
-  );
+  runApp(const OperitApp());
 }
 
 /// Starts a detached chat window after runtime configuration is loaded.
@@ -201,17 +201,7 @@ void _runDetachedChatWindow(DetachedChatWindowArguments arguments) {
     tag: _appStartupLogTag,
     verboseLevel: VerboseLevel.level1,
   );
-  runApp(
-    LiquidGlassWidgets.wrap(
-      respectSystemAccessibility: false,
-      theme: GlassThemeData.simple(
-        blur: 2.5,
-        thickness: 36,
-        quality: GlassQuality.standard,
-      ),
-      child: DetachedChatWindowApp(arguments: arguments),
-    ),
-  );
+  runApp(DetachedChatWindowApp(arguments: arguments));
 }
 
 /// Routes Flutter framework diagnostics through the client logger.

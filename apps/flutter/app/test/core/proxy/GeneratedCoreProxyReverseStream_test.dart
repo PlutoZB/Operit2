@@ -141,7 +141,7 @@ void main() {
       expect(await secondStream.map((event) => event.value).toList(), <String?>[
         'hello',
       ]);
-      expect(proxy.embeddedWatchOpenCount, 1);
+      expect(proxy.embeddedWatchOpenCount, 2);
     },
   );
 

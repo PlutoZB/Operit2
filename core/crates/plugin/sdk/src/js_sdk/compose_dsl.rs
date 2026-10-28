@@ -2320,6 +2320,8 @@ pub enum ComposeAnimationCurve {
 }
 /// Generic implicit transition options; animation frames are rendered by the host.
 pub struct ComposeBoxAnimation {
+    /// Animates intrinsic child size changes, including inserting or removing content.
+    pub animateContentSize: Option<bool>,
     /// Transition duration in milliseconds; zero applies changes immediately.
     pub durationMillis: Option<u32>,
     /// Easing curve, defaulting to linear.
@@ -2398,6 +2400,25 @@ pub struct MarkdownProps {
     /// Tag used to associate incremental Markdown updates with one stream.
     pub streamTagName: Option<String>,
 }
+/// Optional native input decoration overrides; omitted fields inherit the host theme.
+pub struct ComposeTextFieldDecoration {
+    /// Uses compact vertical layout for the input decoration.
+    pub isDense: Option<bool>,
+    /// Paints the input container with its fill color.
+    pub filled: Option<bool>,
+    /// Background paint inside the input border.
+    pub fillColor: Option<ComposeColor>,
+    /// Rounded outline radius; the resting outline is hidden unless borderColor is supplied.
+    pub cornerRadius: Option<f64>,
+    /// Resting outline color.
+    pub borderColor: Option<ComposeColor>,
+    /// Outline color while the field has focus.
+    pub focusedBorderColor: Option<ComposeColor>,
+    /// Insets around editable input content.
+    pub contentPadding: Option<ComposePadding>,
+    /// Typography and color overrides for the placeholder.
+    pub hintStyle: Option<ComposeTextFieldStyle>,
+}
 /// State, decoration, validation, and typography for an editable text field.
 /// Standard themed input frame for arbitrary plugin-owned content.
 /// Controlled horizontally swipeable pages.
@@ -2424,6 +2445,8 @@ pub struct InputDecoratorProps {
 }
 /// State, decoration, validation, and typography for an editable text field.
 pub struct TextFieldProps {
+    /// Optional native input decoration overrides.
+    pub decoration: Option<ComposeTextFieldDecoration>,
     /// Optional width constraint for suffix icon content.
     pub suffixIconWidth: Option<f64>,
     /// Optional height constraint for suffix icon content.
@@ -2526,6 +2549,27 @@ pub struct LoadingIndicatorProps {
     pub size: Option<f64>,
     pub color: Option<ComposeColor>,
 }
+/// Controlled Material slider with explicit bounds and independent drag completion.
+pub struct SliderProps {
+    /// Shared layout and identity properties.
+    pub base_compose_common_props: ComposeCommonProps,
+    /// Current value within the declared bounds.
+    pub value: f64,
+    /// Inclusive lower bound.
+    pub min: f64,
+    /// Inclusive upper bound.
+    pub max: f64,
+    /// Optional number of evenly spaced intervals.
+    pub divisions: Option<i32>,
+    /// Value label shown during interaction.
+    pub label: Option<String>,
+    /// Whether the slider accepts interaction.
+    pub enabled: Option<bool>,
+    /// Receives each local value change.
+    pub onValueChange: Arc<dyn Fn(f64) -> () + Send + Sync>,
+    /// Receives the final drag value for durable settings writes.
+    pub onValueChangeFinished: Option<Arc<dyn Fn(f64) -> () + Send + Sync>>,
+}
 /// Controlled state and colors for a binary sliding switch.
 pub struct SwitchProps {
     /// Shared node layout, drawing, identity, and lifecycle properties.
@@ -2616,12 +2660,27 @@ pub struct IconButtonProps {
     /// Outline used for interaction feedback and clipping.
     pub shape: Option<ComposeShape>,
 }
+/// Global surface layer whose material treatment follows the host theme settings.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum ComposeThemeSurfaceLayer {
+    /// Broad background panels.
+    #[serde(rename = "panel")]
+    Panel,
+    /// Cards above the page background.
+    #[serde(rename = "card")]
+    Card,
+    /// Controls and rows nested inside a card.
+    #[serde(rename = "control")]
+    Control,
+}
 /// Elevated or outlined Material container for grouped content.
 pub struct CardProps {
     /// Shared node layout, drawing, identity, and lifecycle properties.
     pub base_compose_common_props: ComposeCommonProps,
     /// Child nodes rendered inside the card container.
     pub content: Option<ComposeChildren>,
+    /// Uses global transparency and blur for this layer; requires containerColor and has no elevation.
+    pub themeSurface: Option<ComposeThemeSurfaceLayer>,
     /// Background color of the card surface.
     pub containerColor: Option<ComposeColor>,
     /// Opacity multiplier applied to the card background.
@@ -2743,6 +2802,10 @@ pub struct SnackbarHostProps {
 pub struct AiChatProps {
     /// Shared node layout, drawing, identity, and lifecycle properties.
     pub base_compose_common_props: ComposeCommonProps,
+    /// Identifies the conversation shown in a local embedded chat runtime without changing the main selection.
+    pub chatId: Option<String>,
+    /// Controls the native composer; false leaves sending and cancellation to the surrounding workflow.
+    pub showInput: Option<bool>,
 }
 /// Properties for a responsive trailing panel controlled by the Compose screen.
 pub struct AdaptiveSidePanelProps {
@@ -3086,6 +3149,8 @@ pub struct ComposeUiFactoryRegistry {
     pub HorizontalPager: ComposeNodeFactory<HorizontalPagerProps>,
     /// Creates a controlled binary switch.
     pub Switch: ComposeNodeFactory<SwitchProps>,
+    /// Factory used to construct a bounded native Material slider.
+    pub Slider: ComposeNodeFactory<SliderProps>,
     /// Creates a controlled checkbox.
     pub Checkbox: ComposeNodeFactory<CheckboxProps>,
     /// Creates a standard Material button.
@@ -3180,12 +3245,14 @@ pub struct ComposeFilePickerOptions {
     pub allowMultiple: Option<bool>,
     /// MIME types accepted by the document selector.
     pub mimeTypes: Option<Vec<String>>,
+    /// Includes base64 file contents when set; the host rejects files larger than this positive byte limit before reading.
+    pub maxContentBytes: Option<u64>,
 }
 /// File metadata returned by the host picker.
 pub struct ComposePickedFile {
-    /// URI representing the selected document or media item.
+    /// URI reference to the selected resource in the VFS; equal to path.
     pub uri: String,
-    /// Platform file path or browser object URL for the selected item.
+    /// Canonical VFS path accepted by file tools; selected files remain available until runtime cleanup.
     pub path: String,
     /// Display name reported by the content provider.
     pub name: Option<String>,
@@ -3193,6 +3260,8 @@ pub struct ComposePickedFile {
     pub mimeType: Option<String>,
     /// File size in bytes.
     pub size: f64,
+    /// Selected file contents when maxContentBytes was requested; no source path access is required.
+    pub contentBase64: Option<String>,
 }
 /// Outcome of a host file-picker request.
 pub struct ComposeFilePickerResult {

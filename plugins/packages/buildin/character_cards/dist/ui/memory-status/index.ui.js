@@ -1,4 +1,3 @@
-// @operit-compose-artifact 2
 "use strict";
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -27,14 +26,14 @@ module.exports = __toCommonJS(index_ui_exports);
 
 // src/validation.ts
 function assertObject(value, label) {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} \u5FC5\u987B\u662F\u5BF9\u8C61`);
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} 必须是对象`);
 }
 function assertString(value, label) {
-  if (typeof value !== "string") throw new Error(`${label} \u5FC5\u987B\u662F\u5B57\u7B26\u4E32`);
+  if (typeof value !== "string") throw new Error(`${label} 必须是字符串`);
 }
 function requireId(value, label) {
   assertString(value, label);
-  if (value.trim() === "" || value !== value.trim()) throw new Error(`${label} \u65E0\u6548`);
+  if (value.trim() === "" || value !== value.trim()) throw new Error(`${label} 无效`);
   return value;
 }
 
@@ -88,6 +87,10 @@ function number(value, path) {
 }
 function integer(value, path) {
   if (typeof value !== "number" || !Number.isSafeInteger(value)) throw new Error(`${path} must be a safe integer`);
+}
+function nonnegativeInteger(value, path) {
+  integer(value, path);
+  nonnegative(value, path);
 }
 function messageVariant(value, path) {
   integer(value, path);
@@ -209,8 +212,10 @@ var contentOnly = shape({ content: required(text) });
 var format = enumeration("operit", "tavern");
 var memoryQueryRequest = shape({ participantId: required(nonblank), query: required(nonblank), limit: required(nonnegative), snapshotId: required(nullable(nonblank)) });
 var validators = {
-  "memory.searchWithOptions": shape({ ownerKey: required(owner), query: required(text), folderPath: required(nullable(text)), relevanceThreshold: required(nonnegative), createdAtStartMs: required(nullable(integer)), createdAtEndMs: required(nullable(integer)) }),
+  "memory.chunks": shape({ ownerKey: required(owner), memoryId: required(nonblank), query: required(nonblank), count: required(nonnegativeInteger) }),
+  "memory.searchWithOptions": shape({ limit: optional(integer), excludeIds: optional(strings), ownerKey: required(owner), query: required(nonblank), folderPath: required(nullable(text)), relevanceThreshold: required(nonnegative), createdAtStartMs: required(nullable(integer)), createdAtEndMs: required(nullable(integer)) }),
   "memory.chat.list": ownerOnly,
+  "memory.chat.pruneMissing": ownerOnly,
   "memory.chat.update": shape({ ownerKey: required(owner), chatId: required(nonblank) }),
   "memory.categorize": ownerOnly,
   "memory.rebuild.start": shape({ ownerKey: required(owner), rebuild: required(shape({ chatIds: required(strings), windowMessageCount: required(integer), fromInclusive: required(nullable(integer)), toInclusive: required(nullable(integer)) })) }),
@@ -218,7 +223,10 @@ var validators = {
   "memory.rebuild.cancel": ownerOnly,
   "memory.embeddings.rebuild": ownerOnly,
   "memory.candidate.enqueue": shape({ chatId: required(nonblank), timestamp: required(integer), variantIndex: required(messageVariant), sourceType: required(enumeration("reply_finalized_auto", "selected_user_message")), ownerKey: required(nullable(owner)) }),
+  "memory.candidates.retryFailed": ownerOnly,
+  "memory.candidates.clearFailed": ownerOnly,
   "chat.configuration.resolve": parseChatConfigurationRequest,
+  "chat.configuration.binding.find": shape({ chatId: required(nonblank) }),
   "chat.configuration.binding.read": shape({ chatId: required(nonblank) }),
   "chat.configuration.binding.write": shape({ chatId: required(nonblank), selection: required(nonblank) }),
   "chat.configuration.binding.delete": shape({ chatId: required(nonblank) }),
@@ -317,7 +325,12 @@ function Screen(ctx) {
   function close() {
     return { type: "toolpkg.presentation.cancel", requestId };
   }
-  return OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-status/index.ui.js:16437",[input.description,close,close],__operitUiTemplate_16437);
+  return ctx.UI.AlertDialog({
+    key: "memory-status",
+    title: "记忆状态",
+    text: input.description,
+    confirmText: "关闭",
+    onConfirm: close,
+    onDismissRequest: close
+  });
 }
-
-function __operitUiTemplate_16437(__ctx,__values){return __ctx.UI.AlertDialog({key:"memory-status",title:"\u8BB0\u5FC6\u72B6\u6001",text:__values[0],confirmText:"\u5173\u95ED",onConfirm:__values[1],onDismissRequest:__values[2]}); }

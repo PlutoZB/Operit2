@@ -253,6 +253,8 @@ pub struct SdkToolPkgChatComposerSlotRuntime {
     pub slot: String,
     #[serde(rename = "screen")]
     pub screen: String,
+    #[serde(rename = "screenExport")]
+    pub screenExport: Option<String>,
     #[serde(rename = "order")]
     pub order: i32,
     #[serde(rename = "keepAlive")]
@@ -264,6 +266,8 @@ pub struct SdkToolPkgChatComposerSlotRuntime {
 pub struct SdkToolPkgChatMessageMenuDialogRuntime {
     #[serde(rename = "screen")]
     pub screen: String,
+    #[serde(rename = "screenExport")]
+    pub screenExport: Option<String>,
     #[serde(rename = "title")]
     pub title: SdkLocalizedText,
 }
@@ -364,6 +368,8 @@ pub struct SdkToolPkgContainerRuntime {
     pub chatMessageMenuItems: Vec<SdkToolPkgChatMessageMenuItemRuntime>,
     #[serde(rename = "chatRuntimeHooks")]
     pub chatRuntimeHooks: Vec<SdkToolPkgFunctionHookRuntime>,
+    #[serde(rename = "chatResponseHooks")]
+    pub chatResponseHooks: Vec<SdkToolPkgFunctionHookRuntime>,
     #[serde(rename = "hostEventHooks")]
     pub hostEventHooks: Vec<SdkToolPkgHostEventHookRuntime>,
     #[serde(rename = "toolLifecycleHooks")]

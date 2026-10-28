@@ -59,9 +59,6 @@ pub trait PeerConnection: Send + Sync {
     fn source(&self) -> &PeerEndpoint;
     fn target(&self) -> &PeerEndpoint;
     fn transport(&self) -> PeerTransport;
-    /// Exclusive carriers need one reusable authenticated session, not a new
-    /// connection for each operation. This is an I/O property, not permission.
-    fn requiresSessionReuse(&self) -> bool { false }
     /// 实际接入来源；不是客户端自报身份/地址。
     fn remoteAddress(&self) -> Option<std::net::SocketAddr> { None }
 
@@ -75,6 +72,9 @@ pub trait PeerConnection: Send + Sync {
 /// Accepts connections only; accepting never implies successful authentication or pairing.
 #[async_trait]
 pub trait PeerListener: Send + Sync {
+    /// Actual bound socket for network listeners, including the Host-selected port.
+    /// Non-network transports have no socket address.
+    fn localAddress(&self) -> Option<String> { None }
     /// Accepted connections use source = local endpoint, target = remote endpoint.
     /// None means the listener has closed. Remote identity remains untrusted runtime input.
     async fn accept(&self) -> Result<Option<Arc<dyn PeerConnection>>, String>;
@@ -86,10 +86,6 @@ pub trait PeerListener: Send + Sync {
 /// 传输契约；I/O 使用显式传入的 Host。
 #[async_trait]
 pub trait PeerLink: Send + Sync {
-    /// Connections sharing this key compete for the same exclusive endpoint.
-    /// None preserves independent connections for ordinary network transports.
-    fn exclusiveEndpointKey(&self, _target: &PeerEndpoint, _transport: PeerTransport) -> Option<String> { None }
-
     async fn connect(
         &self,
         host: Arc<HostManager>,

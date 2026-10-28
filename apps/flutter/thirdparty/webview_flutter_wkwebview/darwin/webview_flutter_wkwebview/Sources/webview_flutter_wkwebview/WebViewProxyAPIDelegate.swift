@@ -4,11 +4,20 @@
 
 import WebKit
 
+#if os(iOS)
+  #if SWIFT_PACKAGE
+    import OperitWebViewSafety
+  #endif
+  typealias OperitPlatformWebView = OperitSafeWebView
+#else
+  typealias OperitPlatformWebView = WKWebView
+#endif
+
 #if os(macOS)
   import AppKit
 #endif
 
-class WebViewImpl: WKWebView {
+class WebViewImpl: OperitPlatformWebView {
   let api: PigeonApiProtocolWKWebView
   unowned let registrar: ProxyAPIRegistrar
 
@@ -26,10 +35,6 @@ class WebViewImpl: WKWebView {
       operitSetBackgroundColor(.clear)
     #endif
     WebViewTheme.register(self)
-    #if os(iOS)
-      scrollView.contentInsetAdjustmentBehavior = .never
-      scrollView.automaticallyAdjustsScrollIndicatorInsets = false
-    #endif
   }
 
   required init?(coder: NSCoder) {
@@ -44,28 +49,6 @@ class WebViewImpl: WKWebView {
       withApi: (api as! PigeonApiWKWebView).pigeonApiNSObject, registrar: registrar,
       instance: self as NSObject,
       forKeyPath: keyPath, of: object, change: change, context: context)
-  }
-
-  override var frame: CGRect {
-    get {
-      return super.frame
-    }
-    set {
-      super.frame = newValue
-      #if os(iOS)
-        // Prevents the contentInsets from being adjusted by iOS and gives control to Flutter.
-        scrollView.contentInset = .zero
-
-        // Adjust contentInset to compensate the adjustedContentInset so the sum will
-        //  always be 0.
-        if scrollView.adjustedContentInset != .zero {
-          let insetToAdjust = scrollView.adjustedContentInset
-          scrollView.contentInset = UIEdgeInsets(
-            top: -insetToAdjust.top, left: -insetToAdjust.left, bottom: -insetToAdjust.bottom,
-            right: -insetToAdjust.right)
-        }
-      #endif
-    }
   }
 }
 

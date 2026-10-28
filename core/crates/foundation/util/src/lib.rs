@@ -24,6 +24,7 @@ pub mod LocationUtils;
 pub mod MarkdownRenderStream;
 pub mod MediaBase64Limiter;
 pub mod MediaPoolManager;
+pub mod MediaRegistration;
 pub mod NetworkUtils;
 pub mod OCRUtils;
 pub mod OperitPaths;

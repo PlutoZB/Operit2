@@ -60,7 +60,7 @@ use operit_model::ModelConfigData::{
     ApiProviderType, ModelCapabilities, ModelConfigDefaults, ModelContextSpec, ModelProfile,
     ModelRequestSpec, ModelSummarySettings, ProviderProfile,
 };
-use operit_model::ModelParameter::{CustomParameterData, ModelParameter, ParameterCategory};
+use operit_model::ModelParameter::{ModelParameter, ParameterCategory};
 use operit_model::OperitChatArchive::{
     OperitArchivedChat, OperitArchivedMessage, OperitArchivedMessageVariant, OperitChatArchive,
     ARCHIVE_TYPE, CURRENT_FORMAT_VERSION,
@@ -655,6 +655,7 @@ impl Operit1SnapshotImportManager {
                 }
                 "payload/files/datastore/github_auth_preferences.preferences_pb" => {
                     use crate::data::preferences::GitHubAuthPreferences::GitHubAuthPreferences;
+                    migrateOperit1GitHubUserInfo(&mut adopted)?;
                     GitHubAuthPreferences::migratePreferences(1, &mut adopted)
                         .map_err(|error| error.to_string())?;
                     (*GitHubAuthPreferences::store(self.storageHost.clone())).clone()
@@ -668,6 +669,13 @@ impl Operit1SnapshotImportManager {
                 if !matches!(value, Operit1PreferenceValue::String(_)) {
                     let (key, value) = value.toTargetNativePreferenceEntry(key, fileImportPlan)?;
                     adopted.set(&stringPreferencesKey(&key), value);
+                }
+            }
+            if entryName == ENTRY_USER_PREFERENCES {
+                use crate::data::preferences::UserPreferencesManager::UserPreferencesManager;
+                for version in [2, 3] {
+                    UserPreferencesManager::migratePreferences(version, &mut adopted)
+                        .map_err(|error| error.to_string())?;
                 }
             }
             store

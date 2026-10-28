@@ -1,8 +1,8 @@
 //! Headless Core owner: single-instance lock, daemon lifecycle, and the
-//! local control socket shared by the daemon and a running TUI.
+//! local control channel shared by the daemon and a running TUI.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -10,22 +10,27 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
+use operit_host_native_common::DaemonHost::ControlStream;
 use operit_node_runtime::NodeServices::PeerTransport;
 use operit_proxy_local::{GeneratedCoreProxy, LocalCoreProxy};
 use operit_util::AppLogger::AppLogger;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Notify;
+use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::bootstrap::{active_cli_identity, CliIdentity};
 use crate::core_proxy::SharedLocalCore;
 use crate::create_cli_core_application;
+use crate::host::daemon::{self as DaemonHost, ControlListener};
 
 /// One control request or response; a command line must stay below this cap.
 const MAX_CONTROL_BYTES: usize = 16 * 1024 * 1024;
+/// Size cap for the detached daemon output file.
+const DAEMON_OUT_MAX_BYTES: u64 = 4 * 1024 * 1024;
+/// Newest bytes kept when the detached daemon output file is trimmed.
+const DAEMON_OUT_KEEP_BYTES: usize = 1024 * 1024;
 /// A routed command may wait for a model response for a long time.
 const CONTROL_READ_TIMEOUT: Duration = Duration::from_secs(3600);
 const CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -36,6 +41,7 @@ const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(60);
 /// the same bus name.
 static OWNER_PROCESS: AtomicBool = AtomicBool::new(false);
 
+/// Reports whether this process owns the active identity Core.
 pub(crate) fn process_is_owner() -> bool {
     OWNER_PROCESS.load(Ordering::Relaxed)
 }
@@ -49,7 +55,7 @@ pub(crate) fn owner_is_running() -> bool {
     owner_lock_held(&paths)
 }
 
-/// Runtime state shared by the status command, the control socket, and the
+/// Runtime state shared by the status command, the control channel, and the
 /// TUI status line.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,7 +72,7 @@ pub(crate) struct DaemonStatus {
     pub log_path: String,
     pub output_log: String,
     pub version: String,
-    /// Runtime-only counter for commands routed through the control socket.
+    /// Runtime-only counter for commands routed through the control channel.
     #[serde(default)]
     pub commands: u64,
 }
@@ -85,11 +91,13 @@ pub(crate) struct DaemonPaths {
 }
 
 impl DaemonPaths {
+    /// Resolves daemon paths for the selected CLI identity.
     pub(crate) fn for_active_identity() -> Result<Self, String> {
         let (identity, runtime_root, _) = active_cli_identity();
         Ok(Self::at(&runtime_root, &identity))
     }
 
+    /// Builds persistent paths and the host-owned endpoint for one identity.
     fn at(identity_root: &Path, identity: &CliIdentity) -> Self {
         let daemon_dir = identity_root.join("daemon");
         let hex = format!(
@@ -106,7 +114,7 @@ impl DaemonPaths {
             identity_name: identity.name.clone(),
             lock_path: daemon_dir.join("owner.lock"),
             status_path: daemon_dir.join("status.json"),
-            socket_path: socket_dir.join("control.sock"),
+            socket_path: DaemonHost::control_endpoint(&socket_dir, &hex),
             output_log_path: identity_root.join("logs").join("daemon.out"),
             daemon_dir,
         }
@@ -123,30 +131,25 @@ pub(crate) struct OwnerGuard {
 }
 
 impl OwnerGuard {
+    /// Acquires exclusive Core ownership for the active identity.
     pub(crate) fn acquire(mode: &str) -> Result<Self, String> {
         Self::acquire_at(DaemonPaths::for_active_identity()?, mode)
     }
 
+    /// Locks one identity before publishing its initial owner status.
     fn acquire_at(paths: DaemonPaths, mode: &str) -> Result<Self, String> {
         ensure_private_dir(&paths.daemon_dir)?;
-        if let Some(parent) = paths.socket_path.parent() {
-            ensure_private_dir(parent)?;
-        }
         if let Some(parent) = paths.output_log_path.parent() {
             ensure_private_dir(parent)?;
         }
-        let mut options = OpenOptions::new();
+        let mut options = DaemonHost::private_open_options();
         options.read(true).write(true).create(true);
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
         let lock = options
             .open(&paths.lock_path)
             .map_err(|error| format!("cannot open {}: {error}", paths.lock_path.display()))?;
         match lock.try_lock_exclusive() {
             Ok(()) => {}
-            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+            Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
                 let detail = read_status(&paths.status_path)
                     .map(|status| {
                         format!(
@@ -190,10 +193,12 @@ impl OwnerGuard {
         })
     }
 
+    /// Returns the paths protected by this owner lock.
     pub(crate) fn paths(&self) -> &DaemonPaths {
         &self.paths
     }
 
+    /// Returns the latest persisted owner status.
     pub(crate) fn status(&self) -> &DaemonStatus {
         &self.status
     }
@@ -205,6 +210,7 @@ impl OwnerGuard {
         write_status(&self.paths.status_path, &self.status)
     }
 
+    /// Publishes readiness after the host control endpoint has bound.
     pub(crate) fn mark_ready(&mut self) -> Result<(), String> {
         self.status.state = "ready".to_string();
         write_status(&self.paths.status_path, &self.status)
@@ -212,9 +218,10 @@ impl OwnerGuard {
 }
 
 impl Drop for OwnerGuard {
+    /// Removes owner metadata before releasing the identity lock.
     fn drop(&mut self) {
         OWNER_PROCESS.store(false, Ordering::Relaxed);
-        let _ = fs::remove_file(&self.paths.socket_path);
+        let _ = DaemonHost::cleanup_endpoint(&self.paths.socket_path);
         let _ = fs::remove_file(&self.paths.status_path);
     }
 }
@@ -241,6 +248,7 @@ struct ControlResponse {
 }
 
 impl ControlResponse {
+    /// Builds a successful response without an output payload.
     fn ok() -> Self {
         Self {
             ok: true,
@@ -251,6 +259,7 @@ impl ControlResponse {
         }
     }
 
+    /// Builds a response containing the command output.
     fn output(stdout: String, stderr: String) -> Self {
         Self {
             ok: true,
@@ -261,6 +270,7 @@ impl ControlResponse {
         }
     }
 
+    /// Builds a response containing the live owner status.
     fn status(status: DaemonStatus) -> Self {
         Self {
             ok: true,
@@ -271,6 +281,7 @@ impl ControlResponse {
         }
     }
 
+    /// Builds a failed response with its original error.
     fn error(error: impl Into<String>) -> Self {
         Self {
             ok: false,
@@ -285,49 +296,35 @@ impl ControlResponse {
 /// Accepts control connections while the owning Core is alive. Every command
 /// gets its own generated proxy over the same local Core handle.
 pub(crate) struct ControlServer {
-    listener: UnixListener,
+    listener: ControlListener,
     client: Arc<LocalCoreProxy>,
     status: Arc<DaemonStatus>,
     commands: Arc<AtomicU64>,
-    shutdown: Arc<Notify>,
+    shutdown: watch::Sender<bool>,
 }
 
 impl ControlServer {
-    pub(crate) async fn bind(
-        paths: &DaemonPaths,
+    /// Binds the host control endpoint before publishing the owner's ready status.
+    pub(crate) fn bind(
+        owner: &mut OwnerGuard,
         client: Arc<LocalCoreProxy>,
-        status: DaemonStatus,
     ) -> Result<Self, String> {
-        if let Some(parent) = paths.socket_path.parent() {
-            ensure_private_dir(parent)?;
-        }
-        if paths.socket_path.exists() {
-            if status_request(&paths.socket_path).await.is_ok() {
-                return Err(format!(
-                    "control socket is already in use: {}",
-                    paths.socket_path.display()
-                ));
-            }
-            let _ = fs::remove_file(&paths.socket_path);
-        }
-        let listener = UnixListener::bind(&paths.socket_path)
-            .map_err(|error| format!("cannot bind {}: {error}", paths.socket_path.display()))?;
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&paths.socket_path, fs::Permissions::from_mode(0o600)).map_err(
-                |error| format!("cannot secure {}: {error}", paths.socket_path.display()),
-            )?;
-        }
+        let path = &owner.paths().socket_path;
+        let listener = ControlListener::bind(path)
+            .map_err(|error| format!("cannot bind {}: {error}", path.display()))?;
+        owner.mark_ready()?;
+        let (shutdown, _) = watch::channel(false);
         Ok(Self {
             listener,
             client,
-            status: Arc::new(status),
+            status: Arc::new(owner.status().clone()),
             commands: Arc::new(AtomicU64::new(0)),
-            shutdown: Arc::new(Notify::new()),
+            shutdown,
         })
     }
 
-    pub(crate) fn shutdown_token(&self) -> Arc<Notify> {
+    /// Shares a persistent shutdown state with the owner and the accept loop.
+    pub(crate) fn shutdown_token(&self) -> watch::Sender<bool> {
         self.shutdown.clone()
     }
 
@@ -339,22 +336,24 @@ impl ControlServer {
         })
     }
 
+    /// Accepts control requests until the shared shutdown state is set.
     async fn serve(self) {
         let Self {
-            listener,
+            mut listener,
             client,
             status,
             commands,
             shutdown,
         } = self;
+        let mut stopped = shutdown.subscribe();
         let mut connections = JoinSet::new();
         loop {
             tokio::select! {
                 biased;
-                _ = shutdown.notified() => break,
+                _ = stopped.wait_for(|value| *value) => break,
                 accepted = listener.accept() => {
                     match accepted {
-                        Ok((stream, _)) => {
+                        Ok(stream) => {
                             let client = client.clone();
                             let status = status.clone();
                             let commands = commands.clone();
@@ -366,7 +365,7 @@ impl ControlServer {
                         Err(error) => {
                             AppLogger::e(
                                 "DaemonControl",
-                                &format!("control socket accept failed: {error}"),
+                                &format!("control channel accept failed: {error}"),
                             );
                             break;
                         }
@@ -385,14 +384,15 @@ impl ControlServer {
     }
 }
 
+/// Handles one framed request over the host control stream.
 async fn handle_connection(
-    stream: UnixStream,
+    stream: ControlStream,
     client: Arc<LocalCoreProxy>,
     status: Arc<DaemonStatus>,
     commands: Arc<AtomicU64>,
-    shutdown: Arc<Notify>,
+    shutdown: watch::Sender<bool>,
 ) {
-    let (read_half, mut write_half) = stream.into_split();
+    let (read_half, mut write_half) = tokio::io::split(stream);
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();
     let response = match tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
@@ -416,7 +416,7 @@ async fn handle_connection(
         text
     } else {
         serde_json::to_string(&ControlResponse::error(
-            "command output is too large to return over the control socket",
+            "command output is too large to return over the control channel",
         ))
         .expect("error response must serialize")
     };
@@ -425,12 +425,13 @@ async fn handle_connection(
     let _ = write_half.flush().await;
 }
 
+/// Dispatches owner operations and commands against the shared Core.
 async fn handle_request(
     request: ControlRequest,
     client: Arc<LocalCoreProxy>,
     status: Arc<DaemonStatus>,
     commands: Arc<AtomicU64>,
-    shutdown: Arc<Notify>,
+    shutdown: watch::Sender<bool>,
 ) -> ControlResponse {
     match request.op.as_str() {
         "ping" => ControlResponse::ok(),
@@ -443,7 +444,7 @@ async fn handle_request(
             if status.mode != "daemon" {
                 return ControlResponse::error("the TUI owns this identity; quit it from the TUI");
             }
-            shutdown.notify_one();
+            shutdown.send_replace(true);
             ControlResponse::ok()
         }
         "run" => {
@@ -515,40 +516,39 @@ fn route_supported(args: &[String]) -> bool {
     }
 }
 
-async fn connect_with_retry(paths: &DaemonPaths) -> Option<UnixStream> {
+/// Waits for the locked owner to finish binding its control endpoint.
+async fn connect_with_retry(paths: &DaemonPaths) -> Option<ControlStream> {
     for _ in 0..20 {
-        if paths.socket_path.exists() {
-            if let Ok(Ok(stream)) = tokio::time::timeout(
-                CONTROL_CONNECT_TIMEOUT,
-                UnixStream::connect(&paths.socket_path),
-            )
-            .await
-            {
-                return Some(stream);
-            }
-        }
-        // Without an owner only a stale socket can remain; do not wait for it.
         if !owner_lock_held(paths) {
-            let _ = fs::remove_file(&paths.socket_path);
             return None;
+        }
+        if let Ok(Ok(stream)) = tokio::time::timeout(
+            CONTROL_CONNECT_TIMEOUT,
+            DaemonHost::connect(&paths.socket_path),
+        )
+        .await
+        {
+            return Some(stream);
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     None
 }
 
+/// Connects to one host endpoint and enforces response deadlines.
 async fn request_at_with_timeout(
     path: &Path,
     request: &ControlRequest,
     read_timeout: Duration,
 ) -> Result<ControlResponse, String> {
-    let stream = tokio::time::timeout(CONTROL_CONNECT_TIMEOUT, UnixStream::connect(path))
+    let stream = tokio::time::timeout(CONTROL_CONNECT_TIMEOUT, DaemonHost::connect(path))
         .await
-        .map_err(|_| "control socket connect timed out".to_string())?
+        .map_err(|_| "control channel connect timed out".to_string())?
         .map_err(|error| error.to_string())?;
     exchange_with_timeout(stream, request, read_timeout).await
 }
 
+/// Requests live owner status over its control channel.
 async fn status_request(path: &Path) -> Result<ControlResponse, String> {
     request_at_with_timeout(
         path,
@@ -561,12 +561,17 @@ async fn status_request(path: &Path) -> Result<ControlResponse, String> {
     .await
 }
 
-async fn exchange(stream: UnixStream, request: &ControlRequest) -> Result<ControlResponse, String> {
+/// Exchanges one command using the normal command response deadline.
+async fn exchange(
+    stream: ControlStream,
+    request: &ControlRequest,
+) -> Result<ControlResponse, String> {
     exchange_with_timeout(stream, request, CONTROL_READ_TIMEOUT).await
 }
 
+/// Writes one JSON request and reads its bounded JSON response.
 async fn exchange_with_timeout(
-    mut stream: UnixStream,
+    mut stream: ControlStream,
     request: &ControlRequest,
     read_timeout: Duration,
 ) -> Result<ControlResponse, String> {
@@ -581,10 +586,10 @@ async fn exchange_with_timeout(
     let mut response = String::new();
     let read = tokio::time::timeout(read_timeout, reader.read_line(&mut response))
         .await
-        .map_err(|_| "control socket response timed out".to_string())?
+        .map_err(|_| "control channel response timed out".to_string())?
         .map_err(|error| error.to_string())?;
     if read == 0 {
-        return Err("control socket closed without a response".to_string());
+        return Err("control channel closed without a response".to_string());
     }
     if response.len() > MAX_CONTROL_BYTES {
         return Err("control response is too large".to_string());
@@ -592,6 +597,7 @@ async fn exchange_with_timeout(
     serde_json::from_str(&response).map_err(|error| format!("invalid control response: {error}"))
 }
 
+/// Prints the returned command output and preserves errors.
 fn print_response(response: ControlResponse, json: bool) -> Result<(), String> {
     if let Some(stdout) = response.stdout {
         if !stdout.is_empty() {
@@ -618,6 +624,7 @@ fn print_response(response: ControlResponse, json: bool) -> Result<(), String> {
     }
 }
 
+/// Checks whether an existing owner holds the identity lock.
 fn owner_lock_held(paths: &DaemonPaths) -> bool {
     let Ok(file) = OpenOptions::new()
         .read(true)
@@ -635,9 +642,20 @@ fn owner_lock_held(paths: &DaemonPaths) -> bool {
     }
 }
 
+/// Distinguishes stopped, starting, and responsive ready owners.
 async fn query_status_at(paths: &DaemonPaths) -> Result<Option<DaemonStatus>, String> {
-    if !paths.socket_path.exists() {
+    if !owner_lock_held(paths) {
         return Ok(None);
+    }
+    let bytes = match fs::read(&paths.status_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("cannot read owner status: {error}")),
+    };
+    let status: DaemonStatus =
+        serde_json::from_slice(&bytes).map_err(|error| format!("invalid owner status: {error}"))?;
+    if status.state == "starting" {
+        return Ok(Some(status));
     }
     match status_request(&paths.socket_path).await {
         Ok(response) if response.ok => Ok(response.status),
@@ -646,7 +664,7 @@ async fn query_status_at(paths: &DaemonPaths) -> Result<Option<DaemonStatus>, St
             .unwrap_or_else(|| "status request failed".to_string())),
         Err(error) => {
             if owner_lock_held(paths) {
-                Err(format!("control socket is unresponsive: {error}"))
+                Err(format!("control channel is unresponsive: {error}"))
             } else {
                 Ok(None)
             }
@@ -671,6 +689,7 @@ pub(crate) async fn run(args: &[String]) -> Result<(), String> {
     }
 }
 
+/// Prints the supported daemon commands.
 fn print_usage() {
     println!("operit2 daemon run [--no-listen] [--link-listen <transport>[,<transport>...]]");
     println!("operit2 daemon start [--no-listen] [--link-listen <transport>[,<transport>...]]");
@@ -682,7 +701,7 @@ fn print_usage() {
     println!("status   Show the current Core owner (daemon or TUI).");
     println!("stop     Ask a running daemon to shut down.");
     println!();
-    println!("Routed `operit2 cli ...` commands use the owner's control socket.");
+    println!("Routed `operit2 cli ...` commands use the owner's control channel.");
 }
 
 #[derive(Default)]
@@ -692,6 +711,7 @@ struct RunOptions {
 }
 
 impl RunOptions {
+    /// Parses listener options without changing identity configuration.
     fn parse(args: &[String]) -> Result<Self, String> {
         let mut options = Self::default();
         let mut index = 0;
@@ -720,6 +740,7 @@ impl RunOptions {
     }
 }
 
+/// Resolves one explicitly supported listener transport.
 fn parse_transport(value: &str) -> Result<PeerTransport, String> {
     match value {
         "http" => Ok(PeerTransport::Http),
@@ -733,6 +754,7 @@ fn parse_transport(value: &str) -> Result<PeerTransport, String> {
     }
 }
 
+/// Owns a Core until a control or host shutdown request arrives.
 async fn run_foreground(args: &[String]) -> Result<(), String> {
     let options = RunOptions::parse(args)?;
     let mut owner = OwnerGuard::acquire("daemon")?;
@@ -742,13 +764,7 @@ async fn run_foreground(args: &[String]) -> Result<(), String> {
     let result = async {
         start_listeners(&core_application, &options).await?;
         owner.refresh_log_path()?;
-        owner.mark_ready()?;
-        let server = ControlServer::bind(
-            owner.paths(),
-            core_application.localClient(),
-            owner.status().clone(),
-        )
-        .await?;
+        let server = ControlServer::bind(&mut owner, core_application.localClient())?;
         AppLogger::i(
             "Daemon",
             &format!(
@@ -763,18 +779,26 @@ async fn run_foreground(args: &[String]) -> Result<(), String> {
             owner.paths().socket_path.display()
         );
         let shutdown = server.shutdown_token();
+        let mut stopped = shutdown.subscribe();
 
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                let server_task = server.spawn_local();
+                let mut server_task = server.spawn_local();
                 let outcome = tokio::select! {
-                    _ = shutdown.notified() => Ok(()),
-                    _ = tokio::signal::ctrl_c() => Ok(()),
-                    _ = sigterm() => Ok(()),
+                    biased;
+                    _ = stopped.wait_for(|value| *value) => Ok(()),
+                    signal = tokio::signal::ctrl_c() => signal.map_err(|error| error.to_string()),
+                    signal = DaemonHost::termination_signal() => signal.map_err(|error| error.to_string()),
+                    result = &mut server_task => {
+                        return match result {
+                            Ok(()) => Err("daemon control server stopped unexpectedly".to_string()),
+                            Err(error) => Err(format!("daemon control server failed: {error}")),
+                        };
+                    }
                 };
                 // Let the accept loop drain the shutdown response before dropping it.
-                shutdown.notify_one();
+                shutdown.send_replace(true);
                 let _ = tokio::time::timeout(Duration::from_secs(5), server_task).await;
                 outcome
             })
@@ -788,15 +812,7 @@ async fn run_foreground(args: &[String]) -> Result<(), String> {
     result
 }
 
-async fn sigterm() {
-    let Ok(mut signal) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-    else {
-        std::future::pending::<()>().await;
-        return;
-    };
-    signal.recv().await;
-}
-
+/// Starts the listeners selected by explicit or saved configuration.
 async fn start_listeners(
     core_application: &operit_core_application::CoreApplication,
     options: &RunOptions,
@@ -807,7 +823,7 @@ async fn start_listeners(
     let services = core_application.accessServices();
     let explicit = !options.listen.is_empty();
     let transports = if explicit {
-        let mut config = crate::cli::link::cli_listener_config(&services)?;
+        let mut config = services.localHostConfig()?.ok_or("Node listener preferences are not initialized")?;
         config.transports = options.listen.clone();
         config.updatedAt = operit_host_api::TimeUtils::currentTimeMillis();
         services.saveLocalHostConfig(config)?;
@@ -841,6 +857,7 @@ async fn start_listeners(
     }
 }
 
+/// Starts a detached Core owner and waits for its ready status.
 async fn start_background(args: &[String]) -> Result<(), String> {
     RunOptions::parse(args)?;
     let paths = DaemonPaths::for_active_identity()?;
@@ -889,45 +906,71 @@ async fn start_background(args: &[String]) -> Result<(), String> {
     }
 }
 
+/// Keeps the detached daemon output bounded by dropping its oldest records
+/// before the new daemon reopens the file. Best effort: a failed trim must
+/// never block daemon startup.
+fn trim_daemon_output(path: &Path) {
+    let Ok(metadata) = fs::metadata(path) else {
+        return;
+    };
+    if !metadata.is_file() || metadata.len() <= DAEMON_OUT_MAX_BYTES {
+        return;
+    }
+    let Ok(content) = fs::read(path) else {
+        return;
+    };
+    // Raw process output may not be UTF-8: cut on byte boundaries only,
+    // resuming at the next line start so every kept record stays whole.
+    let mut cut = content.len().saturating_sub(DAEMON_OUT_KEEP_BYTES);
+    while cut < content.len() && (content[cut] & 0xC0) == 0x80 {
+        cut += 1;
+    }
+    while cut < content.len() && content[cut] != b'\n' {
+        cut += 1;
+    }
+    let kept = if cut < content.len() {
+        &content[cut + 1..]
+    } else {
+        &content[content.len()..]
+    };
+    let mut trimmed = b"daemon output trimmed; oldest records evicted\n".to_vec();
+    trimmed.extend_from_slice(kept);
+    let _ = fs::write(path, &trimmed);
+}
+
+/// Redirects daemon output and delegates process creation to the host.
 fn spawn_detached(args: &[String], paths: &DaemonPaths) -> Result<u32, String> {
-    use std::os::unix::process::CommandExt;
     if let Some(parent) = paths.output_log_path.parent() {
         ensure_private_dir(parent)?;
     }
+    trim_daemon_output(&paths.output_log_path);
     let executable =
         std::env::current_exe().map_err(|error| format!("cannot resolve operit2: {error}"))?;
-    let mut options = OpenOptions::new();
+    let mut options = DaemonHost::private_open_options();
     options.create(true).append(true);
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
     let log = options.open(&paths.output_log_path).map_err(|error| {
         format!(
             "cannot open daemon output {}: {error}",
             paths.output_log_path.display()
         )
     })?;
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&paths.output_log_path, fs::Permissions::from_mode(0o600));
-    }
     let stderr = log
         .try_clone()
         .map_err(|error| format!("cannot clone daemon output handle: {error}"))?;
-    let child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .arg("daemon")
         .arg("run")
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
-        .stderr(Stdio::from(stderr))
-        .process_group(0)
-        .spawn()
+        .stderr(Stdio::from(stderr));
+    let child = DaemonHost::spawn_detached(&mut command)
         .map_err(|error| format!("cannot start daemon: {error}"))?;
     Ok(child.id())
 }
 
+/// Prints the current identity owner status.
 async fn status_command(json: bool) -> Result<(), String> {
     let paths = DaemonPaths::for_active_identity()?;
     let status = query_status_at(&paths).await?;
@@ -967,6 +1010,7 @@ async fn status_command(json: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Requests orderly shutdown and waits for the owner lock to release.
 async fn stop_command(json: bool) -> Result<(), String> {
     let paths = DaemonPaths::for_active_identity()?;
     let Some(status) = query_status_at(&paths).await? else {
@@ -995,7 +1039,7 @@ async fn stop_command(json: bool) -> Result<(), String> {
             .unwrap_or_else(|| "shutdown request failed".to_string()));
     }
     let deadline = Instant::now() + Duration::from_secs(20);
-    while paths.socket_path.exists() {
+    while owner_lock_held(&paths) {
         if Instant::now() >= deadline {
             return Err(
                 "shutdown was requested but the daemon is still running; check its log".to_string(),
@@ -1014,6 +1058,7 @@ async fn stop_command(json: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Prints the human-readable owner diagnostics.
 fn print_status_human(status: &DaemonStatus) {
     let label = if status.mode == "tui" {
         "owner"
@@ -1039,26 +1084,22 @@ fn print_status_human(status: &DaemonStatus) {
     println!("version: {}", status.version);
 }
 
+/// Creates a daemon directory using its host's permission model.
 fn ensure_private_dir(path: &Path) -> Result<(), String> {
-    fs::create_dir_all(path)
-        .map_err(|error| format!("cannot create {}: {error}", path.display()))?;
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-            .map_err(|error| format!("cannot secure {}: {error}", path.display()))?;
-    }
-    Ok(())
+    DaemonHost::ensure_private_dir(path).map_err(|error| {
+        format!(
+            "cannot create private directory {}: {error}",
+            path.display()
+        )
+    })
 }
 
+/// Atomically publishes the complete status file with host permissions.
 fn write_status(path: &Path, status: &DaemonStatus) -> Result<(), String> {
     let temporary = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec_pretty(status).map_err(|error| error.to_string())?;
-    let mut options = OpenOptions::new();
+    let mut options = DaemonHost::private_open_options();
     options.write(true).create(true).truncate(true);
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
     let mut file = options
         .open(&temporary)
         .map_err(|error| format!("cannot write {}: {error}", temporary.display()))?;
@@ -1066,15 +1107,18 @@ fn write_status(path: &Path, status: &DaemonStatus) -> Result<(), String> {
         .map_err(|error| format!("cannot write {}: {error}", temporary.display()))?;
     file.sync_all()
         .map_err(|error| format!("cannot sync {}: {error}", temporary.display()))?;
+    drop(file);
     fs::rename(&temporary, path)
         .map_err(|error| format!("cannot publish {}: {error}", path.display()))
 }
 
+/// Reads one persisted owner status without altering it.
 fn read_status(path: &Path) -> Result<DaemonStatus, String> {
     let bytes = fs::read(path).map_err(|error| error.to_string())?;
     serde_json::from_slice(&bytes).map_err(|error| error.to_string())
 }
 
+/// Reads the wall-clock timestamp used by owner diagnostics.
 fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1086,6 +1130,7 @@ fn now_millis() -> u64 {
 mod tests {
     use super::*;
 
+    /// Checks that interactive and local-only commands bypass owner routing.
     #[test]
     fn interactive_commands_stay_in_the_invoking_process() {
         assert!(route_supported(&["package".into(), "list".into()]));
@@ -1105,6 +1150,7 @@ mod tests {
         assert!(!route_supported(&[]));
     }
 
+    /// Checks that ownership is exclusive and released when its guard drops.
     #[test]
     fn owner_lock_is_exclusive_per_identity() {
         let unique = SystemTime::now()
@@ -1126,6 +1172,43 @@ mod tests {
         drop(first);
         let third = OwnerGuard::acquire_at(paths, "test").expect("lock must be released");
         drop(third);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn daemon_output_is_trimmed_to_newest_records() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let root = std::env::temp_dir().join(format!(
+            "operit-daemon-trim-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("daemon.out");
+        let line = format!("{}x\n", "y".repeat(4096));
+        let records = (DAEMON_OUT_MAX_BYTES / 4096 as u64 + 64) as usize;
+        let body: String = (0..records).map(|index| format!("record-{index} {line}")).collect();
+        fs::write(&path, &body).unwrap();
+
+        trim_daemon_output(&path);
+        let trimmed = fs::read(&path).unwrap();
+        assert!(
+            (trimmed.len() as u64) <= DAEMON_OUT_MAX_BYTES,
+            "trimmed output must stay under the cap"
+        );
+        assert!(trimmed.starts_with(b"daemon output trimmed; oldest records evicted\n"));
+        let text = String::from_utf8_lossy(&trimmed);
+        assert!(!text.contains("record-0 "), "oldest records must be evicted");
+        assert!(
+            text.contains(&format!("record-{} ", records - 1)),
+            "newest records must survive"
+        );
+
+        let before = fs::read(&path).unwrap();
+        trim_daemon_output(&path);
+        assert_eq!(fs::read(&path).unwrap(), before, "must be a no-op under the cap");
         let _ = fs::remove_dir_all(root);
     }
 }

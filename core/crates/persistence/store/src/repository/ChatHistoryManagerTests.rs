@@ -7,6 +7,47 @@ use std::time::Duration;
 const CHAT_ID: &str = "chat-variants";
 const MESSAGE_TIMESTAMP: i64 = 123;
 
+/// Keeps a completed reply's totals when an older asynchronous summary refreshes the window.
+#[test]
+fn summary_context_window_update_preserves_completed_reply_totals() {
+    let _guard = DATABASE_MUTEX.lock().unwrap();
+    let (manager, _) = chatOrderFixture("summary-context-window-totals");
+    manager
+        .updateChatTokenCounts("older".to_string(), 100, 20, 120)
+        .unwrap();
+    let snapshot = manager
+        .loadChatHistory("older".to_string())
+        .unwrap()
+        .unwrap();
+    manager
+        .updateChatTokenCounts("older".to_string(), 160, 50, 210)
+        .unwrap();
+
+    let compacted = manager
+        .updateChatContextWindow("older".to_string(), 40)
+        .unwrap();
+
+    assert_eq!((snapshot.inputTokens, snapshot.outputTokens), (100, 20));
+    assert_eq!((compacted.inputTokens, compacted.outputTokens), (160, 50));
+    assert_eq!(compacted.currentWindowSize, 40);
+    assert_eq!(compacted.title, snapshot.title);
+    let persisted = manager
+        .loadChatHistory("older".to_string())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            persisted.inputTokens,
+            persisted.outputTokens,
+            persisted.currentWindowSize
+        ),
+        (160, 50, 40)
+    );
+    assert!(manager
+        .updateChatContextWindow("missing".to_string(), 40)
+        .is_err());
+}
+
 /// Opens a chat whose binding arrives before its workspace preference record.
 fn workspaceMetadataFixture(name: &str) -> (ChatHistoryManager, Arc<AppDatabase>, Workspace) {
     crate::PreferencesDataStore::installPreferenceObserverTestHost();

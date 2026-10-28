@@ -73,11 +73,27 @@ impl FunctionalConfigManager {
             .withSchema(Self::PREFERENCES_VERSION, Self::migratePreferences)
     }
 
+    /// Converts historical binding values without creating unrelated default bindings.
+    fn decodeSyncedEntry(entry: &mut operit_store::PreferencesDataStore::PreferencesSyncedEntry) -> Result<(), PreferencesDataStoreError> {
+        entry.decodeHistoricalValues(|version, values| {
+            if version > Self::PREFERENCES_VERSION {
+                return Err(PreferencesDataStoreError::SchemaVersionTooNew { actual: version, expected: Self::PREFERENCES_VERSION });
+            }
+            if version < 3 && values.contains(&Self::FUNCTION_MODEL_BINDING()) {
+                if version < 2 { Self::migratePreferences(1, values)?; }
+                Self::migratePreferences(2, values)?;
+            }
+            Ok(())
+        })
+    }
+
     /// Declares provider UUID references using the same contract as plugin owners.
     pub(crate) fn spaceMergeStore() -> PreferenceMergeStore {
         PreferenceMergeStore {
             path: operit_util::RuntimeStorageLayout::FUNCTIONAL_CONFIGS_PREFERENCES_PATH.to_string(),
             encrypted: false,
+            storageVersion: Some(Self::PREFERENCES_VERSION),
+            decode: Some(Self::decodeSyncedEntry),
             merge: StoragePreferencesMergeDescriptor {
                 version: 1,
                 catalog: None,

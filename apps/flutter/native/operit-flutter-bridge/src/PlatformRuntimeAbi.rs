@@ -1,5 +1,5 @@
 //! ABI module selection is kept outside the platform construction pipeline.
-//! The selected ABI files keep their existing exported symbols and wire formats.
+//! Native Core transport uses ABI v3; lifecycle and browser exports have separate owners.
 
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "NativeDataRescue.rs"]

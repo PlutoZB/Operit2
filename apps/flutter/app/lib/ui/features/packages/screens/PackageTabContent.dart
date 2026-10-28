@@ -18,6 +18,9 @@ class PackageTabContent extends StatelessWidget {
     required this.morePackages,
     required this.loadIssues,
     required this.scopes,
+    required this.bundledUpdates,
+    required this.onUpdatePackage,
+    this.customizedPackageNames = const <String>{},
     required this.onMoveScope,
     required this.enabledPackageNames,
     required this.isSearchActive,
@@ -32,6 +35,10 @@ class PackageTabContent extends StatelessWidget {
   final List<core_proxy.BundledExternalPackageCandidate> morePackages;
   final List<core_proxy.ToolPkgLoadIssue> loadIssues;
   final Map<String, String> scopes;
+  final Map<String, core_proxy.BundledExternalPackageCandidate> bundledUpdates;
+  final ValueChanged<core_proxy.BundledExternalPackageCandidate>
+  onUpdatePackage;
+  final Set<String> customizedPackageNames;
   final ValueChanged<String> onMoveScope;
 
   final Set<String> enabledPackageNames;
@@ -102,14 +109,33 @@ class PackageTabContent extends StatelessWidget {
               itemBuilder: (context, package) {
                 return PackageListItem(
                   key: ValueKey<String>('package:${package.name}'),
+                  primaryAction: bundledUpdates.containsKey(package.name)
+                      ? FilledButton.tonalIcon(
+                          key: ValueKey<String>(
+                            'bundled-update:${package.name}',
+                          ),
+                          onPressed: () =>
+                              onUpdatePackage(bundledUpdates[package.name]!),
+                          icon: const Icon(Icons.system_update_alt, size: 18),
+                          label: const Text('更新'),
+                          style: FilledButton.styleFrom(
+                            visualDensity: VisualDensity.compact,
+                            padding: const EdgeInsets.symmetric(horizontal: 10),
+                          ),
+                        )
+                      : null,
                   icon: packageCategoryIcon(package.category),
                   title: toolPackageDisplayName(package),
+                  statusLabel: customizedPackageNames.contains(package.name)
+                      ? '自定义'
+                      : null,
                   subtitle: localizedText(package.description),
                   metadata: <String>[
                     package.name,
                     package.category,
                     '${package.tools.length} 工具',
-                    package.isBuiltIn ? '内置' : '外部',
+                    if (!customizedPackageNames.contains(package.name))
+                      package.isBuiltIn ? '内置' : '外部',
                   ],
                   enabled: enabledPackageNames.contains(package.name),
                   onDetails: () => onPackageTap(package),

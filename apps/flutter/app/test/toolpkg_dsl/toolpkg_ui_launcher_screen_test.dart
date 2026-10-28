@@ -1,4 +1,5 @@
 import '../support/compose_session_fixture.dart';
+import 'package:operit2/core/compose/compose_program_buffer.dart';
 import 'package:operit2/core/application/PluginHotReload.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -463,6 +464,14 @@ void main() {
                   )
                   .args
               as Map;
+      final render = bridge.calls.firstWhere(
+        (call) => call.methodName == 'render',
+      );
+      final runtimeOptions = (render.args as Map)['runtimeOptions'] as Map;
+      expect(
+        runtimeOptions['moduleSpec'],
+        containsPair('screenExport', 'Translation'),
+      );
       expect(invocation['chatId'], 'translation-chat');
       expect(invocation['messageIndex'], 3);
       expect((invocation['message'] as Map)['content'], 'Selected message');
@@ -1134,6 +1143,77 @@ void main() {
     expect(navigated, [
       'toolpkg:com.operit.sidebar_model_sites:ui:model_sites_viewer',
     ]);
+  });
+
+  testWidgets(
+    'retired renderer callbacks cannot enter a reloading or replacement session',
+    (tester) async {
+      final bridge = _ToolPkgDslTestBridge(
+        renderResult: (_) => _toggleRenderResult(false),
+      );
+      await tester.pumpWidget(_screen(bridge));
+      await tester.pumpAndSettle();
+      final retiredCallback = tester
+          .widget<Switch>(find.byType(Switch))
+          .onChanged!;
+      final release = Completer<void>();
+      bridge.releaseCompletion = release;
+      PluginHotReload.revision.value++;
+      retiredCallback(true);
+      await _pumpComposeReload(tester, settle: false);
+      expect(find.textContaining('Compose session reloading'), findsNothing);
+      expect(
+        bridge.calls.where((call) => call.methodName == 'action'),
+        isEmpty,
+      );
+      bridge.releaseCompletion = null;
+      release.complete();
+      await _pumpComposeReload(tester);
+      retiredCallback(true);
+      await tester.pumpAndSettle();
+      expect(
+        bridge.calls.where((call) => call.methodName == 'action'),
+        isEmpty,
+      );
+      expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
+      await tester.tap(find.byType(Switch));
+      await tester.pumpAndSettle();
+      expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('reload runs root onLoad once for each new session', (
+    tester,
+  ) async {
+    final actions = <String>[];
+    final bridge = _ToolPkgDslTestBridge(
+      onAction: (args) => actions.add(args['actionId'] as String),
+      renderResult: (_) => jsonEncode({
+        'success': true,
+        'tree': _node(
+          'Text',
+          props: {
+            'text': 'Session content',
+            'onLoad': {'__actionId': 'load'},
+          },
+        ),
+      }),
+    );
+    await tester.pumpWidget(_screen(bridge));
+    await tester.pumpAndSettle();
+    expect(actions, ['load']);
+    for (var index = 0; index < 2; index++) {
+      PluginHotReload.revision.value++;
+      await _pumpComposeReload(tester);
+      expect(actions, List.filled(index + 2, 'load'));
+      await tester.pumpWidget(
+        _screen(bridge, initialState: {'version': index}),
+      );
+      await tester.pumpAndSettle();
+      expect(actions, List.filled(index + 2, 'load'));
+    }
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('Flutter reassemble opens a fresh usable Compose session', (
@@ -2251,7 +2331,7 @@ void main() {
 
   for (final invalidType in ['Icon', 'IconButton']) {
     testWidgets(
-      'contains invalid plugin $invalidType without breaking sibling actions',
+      'reports invalid plugin $invalidType and preserves sibling actions',
       (tester) async {
         final bridge = _ToolPkgDslTestBridge(
           renderResult: (count) => jsonEncode({
@@ -2261,13 +2341,17 @@ void main() {
               children: [
                 _node('Text', props: {'text': 'Healthy sibling $count'}),
                 _node(
-                  invalidType,
-                  props: {
-                    'name': 'not_a_material_icon',
-                    'icon': 'not_a_material_icon',
-                    'width': 32,
-                    'height': 32,
-                  },
+                  'Box',
+                  props: {'width': 32, 'height': 32},
+                  children: [
+                    _node(
+                      invalidType,
+                      props: {
+                        'name': 'not_a_material_icon',
+                        'icon': 'not_a_material_icon',
+                      },
+                    ),
+                  ],
                 ),
                 _node(
                   'IconButton',
@@ -2282,13 +2366,13 @@ void main() {
         );
         await tester.pumpWidget(_screen(bridge));
         await tester.pumpAndSettle();
-        expect(tester.takeException(), isNull);
-        expect(find.byType(ErrorWidget), findsNothing);
+        expect(tester.takeException(), isArgumentError);
+        expect(find.byType(ErrorWidget), findsOneWidget);
         expect(find.text('Healthy sibling 0'), findsOneWidget);
         await tester.tap(find.byIcon(Icons.add));
         await tester.pumpAndSettle();
-        expect(tester.takeException(), isNull);
-        expect(find.byType(ErrorWidget), findsNothing);
+        expect(tester.takeException(), isArgumentError);
+        expect(find.byType(ErrorWidget), findsOneWidget);
         expect(find.text('Healthy sibling 1'), findsOneWidget);
       },
     );
@@ -2537,6 +2621,7 @@ core_proxy.ToolPkgContainerRuntime _pluginRuntime() {
     chatInputHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
     chatViewHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
     chatMessageHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
+    chatResponseHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
     chatMessageMenuItems: <core_proxy.ToolPkgChatMessageMenuItemRuntime>[],
     chatRuntimeHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
     hostEventHooks: <core_proxy.ToolPkgHostEventHookRuntime>[],
@@ -2610,6 +2695,7 @@ core_proxy.ToolPkgContainerRuntime _moduleOnlyPluginRuntime() {
     chatInputHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
     chatViewHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
     chatMessageHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
+    chatResponseHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
     chatMessageMenuItems: <core_proxy.ToolPkgChatMessageMenuItemRuntime>[],
     chatRuntimeHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
     hostEventHooks: <core_proxy.ToolPkgHostEventHookRuntime>[],
@@ -2715,6 +2801,7 @@ class _ToolPkgDslTestBridge extends OperitRuntimeBridge {
             order: 20,
             dialog: core_proxy.ToolPkgChatMessageMenuDialog(
               screen: 'ui/translate.js',
+              screenExport: 'Translation',
               title: 'Translation dialog',
             ),
           ).toJson(),
@@ -2828,15 +2915,20 @@ class _ToolPkgDslTestBridge extends OperitRuntimeBridge {
 
       /// Publishes a flat commit and routes side effects only on the final response.
       void emit(String phase) {
+        final update = composeFixtureUpdate(
+          tree,
+          ++session.revision,
+          reset: session.revision == 1,
+          previousIds: session.sourceIds,
+        );
+        session.sourceIds = ComposeProgramBuffer(
+          update.buffer,
+        ).transaction.instances.map((instance) => instance.id).toSet();
         session.emit(
           core_proxy.ToolPkgComposeDslEvent(
             requestId: command.requestId,
             phase: phase,
-            update: composeFixtureUpdate(
-              tree,
-              ++session.revision,
-              reset: session.revision == 1,
-            ),
+            update: update,
             actionResult: phase == 'final' ? result['actionResult'] : null,
             navigationCommands:
                 phase == 'final' && result.containsKey('navigationCommands')
@@ -2955,6 +3047,7 @@ class _DslFixtureSession {
       StreamController<core_proxy.ToolPkgComposeDslEvent>.broadcast();
   String target = '';
   int revision = 0;
+  Set<String> sourceIds = {};
 
   /// Publishes only while the fixture session remains open.
   void emit(core_proxy.ToolPkgComposeDslEvent event) {

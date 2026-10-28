@@ -52,6 +52,20 @@ impl ApiPreferences {
             .withSchema(2, Self::migratePreferences)
     }
 
+    /// Registers the API preference contract independently of its local schema migration lifecycle.
+    pub(crate) fn spaceMergeStore() -> operit_store::PreferenceMerge::PreferenceMergeStore {
+        operit_store::PreferenceMerge::PreferenceMergeStore::values(OperitPaths::API_PREFERENCES_PATH, false, 2, Self::decodeSyncedEntry)
+    }
+
+    /// Converts historical API values to the current typed value contract.
+    fn decodeSyncedEntry(entry: &mut operit_store::PreferencesDataStore::PreferencesSyncedEntry) -> Result<(), PreferencesDataStoreError> {
+        entry.decodeHistoricalValues(|version, values| {
+            if version > 2 { return Err(PreferencesDataStoreError::SchemaVersionTooNew { actual: version, expected: 2 }); }
+            if version < 2 { Self::migratePreferences(1, values)?; }
+            Ok(())
+        })
+    }
+
     /// Reads the committed typed values for another owning runtime module.
     pub(crate) fn snapshot(&self) -> Result<Preferences, PreferencesDataStoreError> {
         self.apiDataStore.data()
@@ -178,7 +192,6 @@ impl ApiPreferences {
             ApiProviderType::DEEPSEEK.name(),
             ApiProviderType::MISTRAL.name(),
             ApiProviderType::SILICONFLOW.name(),
-            ApiProviderType::IFLOW.name(),
             ApiProviderType::OPENROUTER.name(),
             ApiProviderType::OPENCODE.name(),
             ApiProviderType::FOUR_ROUTER.name(),

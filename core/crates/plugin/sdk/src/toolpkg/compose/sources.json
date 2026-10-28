@@ -1,9 +1,10 @@
 {
   "context": [
+    "../ModuleExports.js",
     "Artifact.js",
     "Actions.js",
-    "Generation.js",
-    "Retained.js",
+    "Buffer.js",
+    "Composition.js",
     "Reactive.js",
     "Nodes.js",
     "State.js",

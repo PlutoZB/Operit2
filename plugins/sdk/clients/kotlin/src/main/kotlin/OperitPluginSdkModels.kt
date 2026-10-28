@@ -459,6 +459,7 @@ data class ToolPkgChatComposerSlotRuntime(
     val id: String,
     val slot: String,
     val screen: String,
+    val screenExport: String?,
     val order: Int,
     val keepAlive: Boolean
 )
@@ -469,6 +470,7 @@ fun decodeToolPkgChatComposerSlotRuntime(value: Any?): ToolPkgChatComposerSlotRu
         id = input["id"] as String as String,
         slot = input["slot"] as String as String,
         screen = input["screen"] as String as String,
+        screenExport = input["screenExport"]?.let { it as String } as String?,
         order = (input["order"] as Number).toInt() as Int,
         keepAlive = input["keepAlive"] as Boolean as Boolean,
     )
@@ -479,12 +481,14 @@ fun ToolPkgChatComposerSlotRuntime.toMessagePackValue(): Map<String, Any?> = map
     "id" to this.id,
     "slot" to this.slot,
     "screen" to this.screen,
+    "screenExport" to this.screenExport?.let { it },
     "order" to this.order,
     "keepAlive" to this.keepAlive,
 )
 
 data class ToolPkgChatMessageMenuDialogRuntime(
     val screen: String,
+    val screenExport: String?,
     val title: LocalizedText
 )
 
@@ -492,6 +496,7 @@ fun decodeToolPkgChatMessageMenuDialogRuntime(value: Any?): ToolPkgChatMessageMe
     val input = value as Map<*, *>
     return ToolPkgChatMessageMenuDialogRuntime(
         screen = input["screen"] as String as String,
+        screenExport = input["screenExport"]?.let { it as String } as String?,
         title = decodeLocalizedText(input["title"]) as LocalizedText,
     )
 }
@@ -499,6 +504,7 @@ fun decodeToolPkgChatMessageMenuDialogRuntime(value: Any?): ToolPkgChatMessageMe
 /** Encodes a typed SDK model into its Link argument representation. */
 fun ToolPkgChatMessageMenuDialogRuntime.toMessagePackValue(): Map<String, Any?> = mapOf(
     "screen" to this.screen,
+    "screenExport" to this.screenExport?.let { it },
     "title" to this.title.toMessagePackValue(),
 )
 
@@ -576,6 +582,7 @@ data class ToolPkgContainerRuntime(
     val chatLifecycleHooks: List<ToolPkgFunctionHookRuntime>,
     val chatMessageMenuItems: List<ToolPkgChatMessageMenuItemRuntime>,
     val chatRuntimeHooks: List<ToolPkgFunctionHookRuntime>,
+    val chatResponseHooks: List<ToolPkgFunctionHookRuntime>,
     val hostEventHooks: List<ToolPkgHostEventHookRuntime>,
     val toolLifecycleHooks: List<ToolPkgFunctionHookRuntime>,
     val promptInputHooks: List<ToolPkgFunctionHookRuntime>,
@@ -632,6 +639,7 @@ fun decodeToolPkgContainerRuntime(value: Any?): ToolPkgContainerRuntime {
         chatLifecycleHooks = (input["chatLifecycleHooks"] as List<*>).map { item -> decodeToolPkgFunctionHookRuntime(item) } as List<ToolPkgFunctionHookRuntime>,
         chatMessageMenuItems = (input["chatMessageMenuItems"] as List<*>).map { item -> decodeToolPkgChatMessageMenuItemRuntime(item) } as List<ToolPkgChatMessageMenuItemRuntime>,
         chatRuntimeHooks = (input["chatRuntimeHooks"] as List<*>).map { item -> decodeToolPkgFunctionHookRuntime(item) } as List<ToolPkgFunctionHookRuntime>,
+        chatResponseHooks = (input["chatResponseHooks"] as List<*>).map { item -> decodeToolPkgFunctionHookRuntime(item) } as List<ToolPkgFunctionHookRuntime>,
         hostEventHooks = (input["hostEventHooks"] as List<*>).map { item -> decodeToolPkgHostEventHookRuntime(item) } as List<ToolPkgHostEventHookRuntime>,
         toolLifecycleHooks = (input["toolLifecycleHooks"] as List<*>).map { item -> decodeToolPkgFunctionHookRuntime(item) } as List<ToolPkgFunctionHookRuntime>,
         promptInputHooks = (input["promptInputHooks"] as List<*>).map { item -> decodeToolPkgFunctionHookRuntime(item) } as List<ToolPkgFunctionHookRuntime>,
@@ -688,6 +696,7 @@ fun ToolPkgContainerRuntime.toMessagePackValue(): Map<String, Any?> = mapOf(
     "chatLifecycleHooks" to this.chatLifecycleHooks.map { item -> item.toMessagePackValue() },
     "chatMessageMenuItems" to this.chatMessageMenuItems.map { item -> item.toMessagePackValue() },
     "chatRuntimeHooks" to this.chatRuntimeHooks.map { item -> item.toMessagePackValue() },
+    "chatResponseHooks" to this.chatResponseHooks.map { item -> item.toMessagePackValue() },
     "hostEventHooks" to this.hostEventHooks.map { item -> item.toMessagePackValue() },
     "toolLifecycleHooks" to this.toolLifecycleHooks.map { item -> item.toMessagePackValue() },
     "promptInputHooks" to this.promptInputHooks.map { item -> item.toMessagePackValue() },

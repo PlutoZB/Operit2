@@ -235,7 +235,7 @@ pub struct ChatHistoryDelegate {
     pub chatConfigurationsFlow: MutableStateFlow<HashMap<String, ChatConfigurationDisplayResult>>,
     pub isInitialized: bool,
     pub allowAddMessage: bool,
-    pub beforeDestructiveHistoryMutation: Option<fn(String)>,
+    pub beforeDestructiveHistoryMutation: Option<Arc<dyn Fn(String) + Send + Sync>>,
     pub afterDestructiveHistoryMutation: Option<fn(String)>,
     pub pendingPersistChatOrderJob: Option<String>,
 }
@@ -303,7 +303,7 @@ impl ChatHistoryDelegate {
             chatConfigurationsFlow: self.chatConfigurationsFlow.clone(),
             isInitialized: self.isInitialized,
             allowAddMessage: self.allowAddMessage,
-            beforeDestructiveHistoryMutation: self.beforeDestructiveHistoryMutation,
+            beforeDestructiveHistoryMutation: self.beforeDestructiveHistoryMutation.clone(),
             afterDestructiveHistoryMutation: self.afterDestructiveHistoryMutation,
             pendingPersistChatOrderJob: self.pendingPersistChatOrderJob.clone(),
         }
@@ -658,8 +658,8 @@ impl ChatHistoryDelegate {
 
     #[allow(non_snake_case)]
     /// Registers a hook invoked before destructive history mutations.
-    pub fn setBeforeDestructiveHistoryMutation(&mut self, handler: fn(String)) {
-        self.beforeDestructiveHistoryMutation = Some(handler);
+    pub fn setBeforeDestructiveHistoryMutation(&mut self, handler: impl Fn(String) + Send + Sync + 'static) {
+        self.beforeDestructiveHistoryMutation = Some(Arc::new(handler));
     }
 
     #[allow(non_snake_case)]
@@ -671,7 +671,7 @@ impl ChatHistoryDelegate {
     #[allow(non_snake_case)]
     /// Invokes the pre-mutation hook for a chat id.
     pub fn prepareChatForDestructiveMutation(&self, chatId: String) {
-        if let Some(handler) = self.beforeDestructiveHistoryMutation {
+        if let Some(handler) = self.beforeDestructiveHistoryMutation.as_ref() {
             handler(chatId);
         }
     }
@@ -1343,6 +1343,7 @@ impl ChatHistoryDelegate {
         service: &EnhancedAIService,
         setAsCurrentChat: bool,
         sourceChatId: Option<String>,
+        parentChatId: Option<String>,
         input: Option<Value>,
     ) -> Result<String, String> {
         self.createChatDraft(
@@ -1350,6 +1351,7 @@ impl ChatHistoryDelegate {
             ToolPkgChatCreationKind::New,
             setAsCurrentChat,
             sourceChatId,
+            parentChatId,
             None,
             input,
         )
@@ -1363,6 +1365,7 @@ impl ChatHistoryDelegate {
         creationKind: ToolPkgChatCreationKind,
         setAsCurrentChat: bool,
         sourceChatId: Option<String>,
+        parentChatId: Option<String>,
         sourceMessageTimestamp: Option<i64>,
         input: Option<Value>,
     ) -> Result<String, String> {
@@ -1388,7 +1391,11 @@ impl ChatHistoryDelegate {
             return Err("Branch creation requires a source chat".to_string());
         }
         let workspaceId = source.as_ref().and_then(|chat| chat.workspaceId.clone());
-        let parentChatId = if isBranch { sourceChatId.clone() } else { None };
+        if let Some(id) = &parentChatId {
+            self.chatHistoryManager.loadChatHistory(id.clone())
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("Parent chat does not exist: {id}"))?;
+        }
         let title = if isBranch {
             source
                 .as_ref()
@@ -1400,9 +1407,9 @@ impl ChatHistoryDelegate {
         };
         let mut draft = self
             .chatHistoryManager
-            .newChatDraft(title, BTreeMap::new(), workspaceId, parentChatId)
+            .newChatDraft(title, BTreeMap::new(), workspaceId, parentChatId.clone())
             .map_err(|error| error.to_string())?;
-        let api = ChatConfigurationApi::ready(&service.tool_handler).await?;
+        let mut api = ChatConfigurationApi::ready(&service.tool_handler).await;
         let hooks = ToolPkgChatLifecycleHookBridge::snapshot().await?;
         let hookDraft = ToolPkgChatCreationDraft {
             creationKind,
@@ -1455,7 +1462,7 @@ impl ChatHistoryDelegate {
             })
             .transpose()?;
         let configuration = api.resolveDraft(request.clone(), ownerExtension).await?;
-        if !isBranch && setAsCurrentChat {
+        if !isBranch && setAsCurrentChat && parentChatId.is_none() {
             if let Some(currentId) = self.currentChatIdFlow.value() {
                 if sourceChatId.as_ref() == Some(&currentId) {
                     let current = self
@@ -1606,6 +1613,7 @@ impl ChatHistoryDelegate {
             service,
             ToolPkgChatCreationKind::Branch,
             true,
+            Some(sourceChatId.clone()),
             Some(sourceChatId),
             upToMessageTimestamp,
             None,
@@ -1638,44 +1646,40 @@ impl ChatHistoryDelegate {
     }
 
     #[allow(non_snake_case)]
-    /// Deletes a chat after the active selection has moved to a valid chat.
-    pub fn deleteChatHistory(&mut self, chatId: String) -> bool {
+    /// Releases owner state before deleting an unlocked conversation and its in-memory projection.
+    pub async fn deleteChatHistory(
+        &mut self,
+        service: &EnhancedAIService,
+        chatId: String,
+    ) -> Result<bool, String> {
+        self.requireChatExists(&chatId)?;
         let canDelete = self
             .chatHistoryManager
             .canDeleteChatHistory(chatId.clone())
-            .expect("ChatHistoryManager.canDeleteChatHistory must succeed");
+            .map_err(|error| error.to_string())?;
         if !canDelete {
-            return false;
+            return Err(format!("Chat is locked: {chatId}"));
         }
+        let api = ChatConfigurationApi::ready(&service.tool_handler).await;
         self.prepareChatForDestructiveMutation(chatId.clone());
+        api.deleteConfiguration(&chatId).await?;
         let deleted = self
             .chatHistoryManager
             .deleteChatHistory(chatId.clone())
-            .expect("ChatHistoryManager.deleteChatHistory must succeed");
-        if deleted && self.currentChatIdFlow.value().as_ref() == Some(&chatId) {
+            .map_err(|error| error.to_string())?;
+        if !deleted {
+            return Err(format!("Core conversation deletion failed: {chatId}"));
+        }
+        if self.currentChatIdFlow.value().as_ref() == Some(&chatId) {
             self.currentChatIdFlow.set_value(None);
             self.clearCurrentChatHistoryInMemory();
         }
-        if deleted {
-            self.chatConfigurationsFlow.update(|configurations| {
-                configurations.remove(&chatId);
-            });
-            self.clearChatFlow(&chatId);
-            self.finishDestructiveHistoryMutation(chatId);
-        }
-        deleted
-    }
-
-    #[allow(non_snake_case)]
-    /// Removes the provisional assistant message for a failed response.
-    pub fn discardFailedAssistantMessage(&mut self, chatId: String, timestamp: i64) {
-        self.chatHistoryManager
-            .deleteMessage(chatId.clone(), timestamp)
-            .expect("ChatHistoryManager.deleteMessage must remove failed assistant message");
-        self.removeChatMessage(&chatId, timestamp);
-        if self.currentChatIdFlow.value().as_ref() == Some(&chatId) {
-            self.emitChatHistoryState();
-        }
+        self.chatConfigurationsFlow.update(|configurations| {
+            configurations.remove(&chatId);
+        });
+        self.clearChatFlow(&chatId);
+        self.finishDestructiveHistoryMutation(chatId);
+        Ok(true)
     }
 
     #[allow(non_snake_case)]
@@ -2345,10 +2349,11 @@ impl ChatHistoryDelegate {
             .chatHistoryManager
             .commitAssistantMessageSegment(chatId.clone(), message.clone(), chatMetrics)
             .map_err(|error| error.to_string())?;
-        let persistedMessage = self
+        let mut persistedMessage = self
             .chatHistoryManager
             .loadChatMessageVariant(&chatId, message.timestamp, 0)
             .map_err(|error| error.to_string())?;
+        persistedMessage.contentStream = message.contentStream.clone();
         ToolPkgChatMessageHookBridge::dispatchMessagePersisted(&chatId, &persistedMessage);
         if self.currentChatIdFlow.value().as_ref() == Some(&chatId) {
             self.upsertCurrentChatMessageInMemory(persistedMessage.clone());

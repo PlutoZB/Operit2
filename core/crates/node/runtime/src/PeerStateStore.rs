@@ -22,11 +22,15 @@ pub(crate) enum StoredDirection {
 /// Stores node-local listener binding and discovery preferences.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PeerHostConfig {
+    /// Network bind address. Port zero requests Host allocation; automatic mode
+    /// persists the selected port for subsequent reconnects and restarts.
     pub bindAddress: String,
     /// 显式暴露的传输方式；空列表不启动监听。
     #[serde(default)]
     pub transports: Vec<operit_peer_link::PeerTransport>,
     pub discoveryEnabled: bool,
+    /// Automatic reuses an assigned port or requests a new one on collision.
+    /// Fixed requires a nonzero port and never changes it after a bind failure.
     pub portMode: PeerHostPortMode,
     pub updatedAt: i64,
 }
@@ -66,7 +70,7 @@ pub struct PeerStateStore {
 }
 impl PeerStateStore {
     const OUTBOUND_PREFERENCES_VERSION: u32 = 2;
-    const HOST_CONFIG_PREFERENCES_VERSION: u32 = 3;
+    const HOST_CONFIG_PREFERENCES_VERSION: u32 = 4;
 
     /// Creates the node-local peer preference store over the supplied storage host.
     pub fn new(storage: Arc<dyn RuntimeStorageHost>) -> Self {
@@ -118,17 +122,17 @@ impl PeerStateStore {
             0 => {
                 if preferences.entries().is_empty() {
                     let initial = PeerHostConfig {
-                        bindAddress: "0.0.0.0:37195".into(),
+                        bindAddress: "0.0.0.0:0".into(),
                         transports: vec![PeerTransport::Http, PeerTransport::WebSocket],
                         discoveryEnabled: true,
-                        portMode: PeerHostPortMode::Fixed,
+                        portMode: PeerHostPortMode::Automatic,
                         updatedAt: currentTimeMillis(),
                     };
                     for (key, value) in [
                         ("bindAddress", initial.bindAddress),
                         ("transports", serde_json::to_string(&initial.transports)?),
                         ("discoveryEnabled", initial.discoveryEnabled.to_string()),
-                        ("portMode", "fixed".to_owned()),
+                        ("portMode", "automatic".to_owned()),
                         ("updatedAt", initial.updatedAt.to_string()),
                     ] {
                         preferences.set(&stringPreferencesKey(key), value);
@@ -161,6 +165,24 @@ impl PeerStateStore {
             2 => {
                 decodeHostConfig(preferences).map_err(PreferencesDataStoreError::Message)?;
                 preferences.remove(&stringPreferencesKey("token"));
+                Ok(())
+            }
+            3 => {
+                let config = decodeHostConfig(preferences)
+                    .map_err(PreferencesDataStoreError::Message)?;
+                // Old application and ESP32 defaults were persisted as fixed.
+                // Keep custom bindings, disabled discovery and transport choices.
+                let legacyDefault = config.discoveryEnabled
+                    && config.portMode == PeerHostPortMode::Fixed
+                    && ((config.bindAddress == "0.0.0.0:37195"
+                        && config.transports == [PeerTransport::Http, PeerTransport::WebSocket])
+                        || (config.bindAddress == "0.0.0.0:8765"
+                            && (config.transports == [PeerTransport::Serial, PeerTransport::Tcp]
+                                || config.transports == [PeerTransport::Serial])));
+                if legacyDefault {
+                    preferences.set(&stringPreferencesKey("bindAddress"), "0.0.0.0:0");
+                    preferences.set(&stringPreferencesKey("portMode"), "automatic");
+                }
                 Ok(())
             }
             from => Err(PreferencesDataStoreError::MissingMigration { from, to: from + 1 }),
@@ -416,7 +438,12 @@ impl PeerStateStore {
                 let mut current = supplied.clone();
                 if !replace {
                     if let Some(info) = persisted {
-                        current.model = info.model;
+                        // A user rename survives restarts, while the legacy
+                        // architecture-derived CLI label is replaced by the
+                        // supplied host-name label.
+                        if !LinkDeviceInfo::isLegacyCliAutoModel(&info.model) {
+                            current.model = info.model;
+                        }
                     }
                 }
                 let info = record
@@ -755,6 +782,14 @@ mod tests {
         std::sync::atomic::AtomicBool,
     );
     impl RuntimeStorageHost for Storage {
+        /// Confirms synchronous in-memory publication without copying or rewriting bytes.
+        fn flushFile(&self, path: &str) -> operit_host_api::HostResult<()> {
+            if !self.exists(path)? {
+                return Err(operit_host_api::HostError::new("runtime storage entry not found"));
+            }
+            Ok(())
+        }
+
         fn runtimeRootDir(&self) -> Option<std::path::PathBuf> {
             None
         }
@@ -769,6 +804,11 @@ mod tests {
                 .cloned()
                 .ok_or_else(|| HostError::new("missing"))
         }
+        /// Atomically publishes one complete in-memory test entry.
+        fn writeBytesAtomically(&self, path: &str, content: &[u8]) -> operit_host_api::HostResult<()> {
+            self.writeBytes(path, content)
+        }
+
         fn writeBytes(&self, path: &str, bytes: &[u8]) -> HostResult<()> {
             if self.1.load(std::sync::atomic::Ordering::Relaxed) {
                 return Err(HostError::new("injected write failure"));
@@ -1228,6 +1268,36 @@ mod tests {
         );
     }
 
+    /// Replaces the legacy CLI auto label with the host-name label while keeping identity.
+    #[test]
+    fn startup_replaces_legacy_cli_auto_model_with_the_supplied_host_name() {
+        let store = PeerStateStore::new(Arc::new(Storage::default()));
+        let legacyModel = format!("server(cli)-{}", std::env::consts::ARCH);
+        writeRecord(
+            &store,
+            RUNTIME_LINK_ACCESS_IDENTITY_PATH,
+            "record",
+            serde_json::json!({
+                "deviceId": "stable-node",
+                "deviceInfo": { "platform": "linux", "model": legacyModel }
+            }),
+        );
+        let supplied = LinkDeviceInfo {
+            platform: "linux".into(),
+            model: "server(cli)-build-01".into(),
+            pairingIncarnation: None,
+        };
+        let current = store.deviceInfo(supplied, false).unwrap();
+        assert_eq!(current.model, "server(cli)-build-01");
+        let records = store
+            .records::<Value>(RUNTIME_LINK_ACCESS_IDENTITY_PATH)
+            .unwrap();
+        assert_eq!(
+            records["record"]["deviceInfo"]["model"],
+            "server(cli)-build-01"
+        );
+    }
+
     /// Announces the persisted pairing generation even when the in-memory copy
     /// still carries the value minted at startup: a device that left a Space
     /// mid-run renewed its generation, and partners must record the new one.
@@ -1303,23 +1373,23 @@ mod tests {
 
     /// Verifies first reads initialize listener defaults exactly once through the schema.
     #[test]
-    fn listener_schema_initializes_http_websocket_discovery_and_fixed_binding_once() {
+    fn listener_schema_initializes_http_websocket_discovery_and_automatic_binding_once() {
         let storage = Arc::new(Storage::default());
         let store = PeerStateStore::new(storage.clone());
         let first = store.hostConfig().unwrap().unwrap();
-        assert_eq!(first.bindAddress, "0.0.0.0:37195");
+        assert_eq!(first.bindAddress, "0.0.0.0:0");
         assert_eq!(
             first.transports,
             vec![PeerTransport::Http, PeerTransport::WebSocket]
         );
         assert!(first.discoveryEnabled);
-        assert_eq!(first.portMode, PeerHostPortMode::Fixed);
+        assert_eq!(first.portMode, PeerHostPortMode::Automatic);
         assert_eq!(
             store
                 .store(RUNTIME_LINK_ACCESS_HOST_CONFIG_PATH)
                 .schemaVersion()
                 .unwrap(),
-            3
+            4
         );
         let before = storage.0.lock().unwrap().clone();
         let second = PeerStateStore::new(storage.clone())
@@ -1329,6 +1399,112 @@ mod tests {
         assert_eq!(first.bindAddress, second.bindAddress);
         assert_eq!(first.updatedAt, second.updatedAt);
         assert_eq!(before, *storage.0.lock().unwrap());
+    }
+
+    /// Upgrades known old defaults once while preserving custom fixed listeners.
+    #[test]
+    fn listener_schema_migrates_legacy_defaults_without_overwriting_custom_bindings() {
+        for (address, transports, discovery, mode, migrate) in [
+            (
+                "0.0.0.0:37195",
+                vec![PeerTransport::Http, PeerTransport::WebSocket],
+                true,
+                PeerHostPortMode::Fixed,
+                true,
+            ),
+            (
+                "0.0.0.0:8765",
+                vec![PeerTransport::Serial, PeerTransport::Tcp],
+                true,
+                PeerHostPortMode::Fixed,
+                true,
+            ),
+            (
+                "0.0.0.0:8765",
+                vec![PeerTransport::Serial],
+                true,
+                PeerHostPortMode::Fixed,
+                true,
+            ),
+            (
+                "127.0.0.1:48123",
+                vec![PeerTransport::Http, PeerTransport::WebSocket],
+                true,
+                PeerHostPortMode::Fixed,
+                false,
+            ),
+            (
+                "0.0.0.0:37195",
+                vec![PeerTransport::Tcp],
+                true,
+                PeerHostPortMode::Fixed,
+                false,
+            ),
+            (
+                "0.0.0.0:37195",
+                vec![PeerTransport::Http, PeerTransport::WebSocket],
+                false,
+                PeerHostPortMode::Fixed,
+                false,
+            ),
+            (
+                "0.0.0.0:37195",
+                vec![PeerTransport::Http, PeerTransport::WebSocket],
+                true,
+                PeerHostPortMode::Automatic,
+                false,
+            ),
+        ] {
+            let storage = Arc::new(Storage::default());
+            let store = PeerStateStore::new(storage.clone());
+            let mut preferences = emptyPreferences();
+            writeHostConfigPreferences(
+                &mut preferences,
+                &PeerHostConfig {
+                    bindAddress: address.into(),
+                    transports: transports.clone(),
+                    discoveryEnabled: discovery,
+                    portMode: mode,
+                    updatedAt: 123,
+                },
+            )
+            .unwrap();
+            preferences.set(
+                &stringPreferencesKey(PREFERENCES_SCHEMA_VERSION_KEY_NAME),
+                3,
+            );
+            preferences.set(&stringPreferencesKey("extra"), "keep");
+            CoreNodeStateStore::newWithStorage(storage.clone(), RUNTIME_LINK_ACCESS_HOST_CONFIG_PATH)
+                .replace(preferences)
+                .unwrap();
+            let config = store.hostConfig().unwrap().unwrap();
+            assert_eq!(
+                config.bindAddress,
+                if migrate { "0.0.0.0:0" } else { address }
+            );
+            assert_eq!(
+                config.portMode,
+                if migrate {
+                    PeerHostPortMode::Automatic
+                } else {
+                    mode
+                }
+            );
+            assert_eq!(config.transports, transports);
+            assert_eq!(config.discoveryEnabled, discovery);
+            assert_eq!(config.updatedAt, 123);
+            assert_eq!(
+                store
+                    .preferences(RUNTIME_LINK_ACCESS_HOST_CONFIG_PATH)
+                    .unwrap()
+                    .get(&stringPreferencesKey("extra"))
+                    .unwrap(),
+                "keep"
+            );
+            let before = storage.0.lock().unwrap().clone();
+            store.hostConfig().unwrap();
+            assert_eq!(before, *storage.0.lock().unwrap());
+        }
     }
 
     /// Verifies simultaneous first reads share one persisted listener configuration.
@@ -1399,14 +1575,14 @@ mod tests {
                 .store(RUNTIME_LINK_ACCESS_HOST_CONFIG_PATH)
                 .schemaVersion()
                 .unwrap(),
-            3
+            4
         );
     }
 
     /// Verifies missing current-schema fields and unknown future versions fail unchanged.
     #[test]
     fn listener_schema_rejects_incomplete_current_and_newer_preferences() {
-        for version in [1, 2, 3, 4] {
+        for version in [1, 2, 3, 4, 5] {
             let storage = Arc::new(Storage::default());
             let mut preferences = emptyPreferences();
             preferences.set(

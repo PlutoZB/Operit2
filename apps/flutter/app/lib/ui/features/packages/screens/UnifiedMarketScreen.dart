@@ -108,6 +108,7 @@ class _UnifiedMarketScreenState extends State<UnifiedMarketScreen>
     super.dispose();
   }
 
+  /// Builds market panes and keeps the bottom bar clear of top system insets.
   @override
   Widget build(BuildContext context) {
     return Material(
@@ -164,37 +165,41 @@ class _UnifiedMarketScreenState extends State<UnifiedMarketScreen>
             ),
           ),
           if (!_hasCategoryScope)
-            NavigationBar(
-              height: 56,
-              selectedIndex: _selectedTab.index,
-              labelBehavior: NavigationDestinationLabelBehavior.alwaysHide,
-              onDestinationSelected: (index) {
-                setState(() {
-                  _selectedTab = MarketHomeTab.values[index];
-                  _searchInput = '';
-                  _searchQuery = '';
-                  _searchExpanded = false;
-                  _searchDebounce?.cancel();
-                });
-                _syncTopBar();
-              },
-              destinations: const <NavigationDestination>[
-                NavigationDestination(
-                  icon: Icon(Icons.storefront_outlined),
-                  selectedIcon: Icon(Icons.storefront),
-                  label: '全部',
-                ),
-                NavigationDestination(
-                  icon: Icon(Icons.category_outlined),
-                  selectedIcon: Icon(Icons.category),
-                  label: '分类',
-                ),
-                NavigationDestination(
-                  icon: Icon(Icons.person_outline),
-                  selectedIcon: Icon(Icons.person),
-                  label: '我的',
-                ),
-              ],
+            MediaQuery.removePadding(
+              context: context,
+              removeTop: true,
+              child: NavigationBar(
+                height: 56,
+                selectedIndex: _selectedTab.index,
+                labelBehavior: NavigationDestinationLabelBehavior.alwaysHide,
+                onDestinationSelected: (index) {
+                  setState(() {
+                    _selectedTab = MarketHomeTab.values[index];
+                    _searchInput = '';
+                    _searchQuery = '';
+                    _searchExpanded = false;
+                    _searchDebounce?.cancel();
+                  });
+                  _syncTopBar();
+                },
+                destinations: const <NavigationDestination>[
+                  NavigationDestination(
+                    icon: Icon(Icons.storefront_outlined),
+                    selectedIcon: Icon(Icons.storefront),
+                    label: '全部',
+                  ),
+                  NavigationDestination(
+                    icon: Icon(Icons.category_outlined),
+                    selectedIcon: Icon(Icons.category),
+                    label: '分类',
+                  ),
+                  NavigationDestination(
+                    icon: Icon(Icons.person_outline),
+                    selectedIcon: Icon(Icons.person),
+                    label: '我的',
+                  ),
+                ],
+              ),
             ),
         ],
       ),

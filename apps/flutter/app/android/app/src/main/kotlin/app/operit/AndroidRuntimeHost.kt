@@ -11,8 +11,6 @@ import java.io.File
 import java.util.ArrayDeque
 import java.util.Locale
 import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicInteger
 
 class AndroidRuntimeHost(context: Context) {
     private companion object {
@@ -24,11 +22,7 @@ class AndroidRuntimeHost(context: Context) {
     // Main-thread callbacks share only the short-lived state lock.
     private val runtimeLock = Any()
     private val runtimeCreationLock = Any()
-    private val runtimeThreadIndex = AtomicInteger(0)
-    private val runtimeExecutor: ExecutorService =
-        Executors.newFixedThreadPool(8) { runnable ->
-            Thread(runnable, "operit-runtime-${runtimeThreadIndex.incrementAndGet()}")
-        }
+    private val runtimeExecutor: ExecutorService = HostTaskExecutor()
     private var runtimeHandle: Long = 0
     private var runtimeStarting = false
     private val pendingRuntimeEvents = ArrayDeque<String>()
@@ -58,6 +52,31 @@ class AndroidRuntimeHost(context: Context) {
             }
             configuredRuntimeRoot = runtimeRoot
             configuredWorkspaceRoot = workspaceRoot
+        }
+    }
+
+    /** Publishes Core-owned work revisions even when no Flutter engine is attached. */
+    fun publishBackgroundWork(encoded: String) {
+        mainHandler.post {
+            try {
+                app.operit.keep_alive.KeepAliveServiceHost.publishWorkSnapshot(encoded)
+            } catch (error: RuntimeException) {
+                Log.e(TAG, "Core work presentation failed", error)
+                app.operit.keep_alive.KeepAliveServiceHost.reportWorkError(error.toString())
+            }
+        }
+    }
+
+    /** Stops the execution selected by an Android notification action. */
+    fun stopBackgroundWork(workId: String) {
+        runBackground {
+            try {
+                val response = JSONObject(OperitRuntimeNative.stopBackgroundWork(ensureRuntimeHandle(), workId))
+                check(response.getBoolean("ok")) { response.getString("error") }
+            } catch (error: Exception) {
+                Log.e(TAG, "Background work stop failed: $workId", error)
+                mainHandler.post { app.operit.keep_alive.KeepAliveServiceHost.reportWorkError(error.toString()) }
+            }
         }
     }
 

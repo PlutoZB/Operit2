@@ -3,6 +3,15 @@ import MethodChannel from '@ohos/flutter_ohos/src/main/ets/plugin/common/MethodC
 import runtimeNative from 'liboperit_runtime_ohos.so';
 import FileSelectorOhosPlugin from 'file_selector_ohos';
 
+interface RescueLaunchMode {
+  rescue: boolean;
+}
+
+interface RescueLaunchResponse {
+  ok: boolean;
+  value: RescueLaunchMode;
+}
+
 interface OfflineNativeModule {
   /** Executes blocking rescue work on the platform worker pool. */
   dataRescue(defaultRuntimeRoot: string, request: string): Promise<string>;
@@ -24,7 +33,8 @@ export default class DataRescueAbility extends FlutterAbility {
           const encoded = call.args as string;
           const command = JSON.parse(encoded) as Record<string, string>;
           if (command['operation'] === 'launchMode') {
-            result.success(JSON.stringify({ ok: true, value: { rescue: true } }));
+            const launch: RescueLaunchResponse = { ok: true, value: { rescue: true } };
+            result.success(JSON.stringify(launch));
             return;
           }
           nativeBridge.dataRescue(`${this.context.filesDir}/runtime`, encoded)

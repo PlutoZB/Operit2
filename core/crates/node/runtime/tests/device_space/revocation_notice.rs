@@ -327,7 +327,7 @@ async fn readmitted_device_survives_its_own_removal_record_in_history() {
 /// replay of the historical removal. The old `RemoveMember` stays in the shared
 /// history forever, so a synchronization round that re-delivers it must not
 /// delete the fresh pairing — otherwise the re-applicant's own core refuses the
-/// submission ("Join request requires a current directional pairing") while
+/// submission ("Join request requires a current pairing") while
 /// the paired peer never sees a request.
 #[tokio::test]
 async fn historical_removal_replay_keeps_the_fresh_pairing_of_a_reapplicant() {

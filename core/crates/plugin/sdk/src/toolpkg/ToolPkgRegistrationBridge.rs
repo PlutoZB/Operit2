@@ -7,6 +7,7 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
         "false"
     };
     r#"
+    __OPERIT_TOOLPKG_MODULE_EXPORTS__
     (function() {
         var root = typeof globalThis !== 'undefined'
             ? globalThis
@@ -31,6 +32,7 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
             chatLifecycleHooks: [],
             chatMessageMenuItems: [],
             chatRuntimeHooks: [],
+            chatResponseHooks: [],
             hostEventHooks: [],
             toolLifecycleHooks: [],
             promptInputHooks: [],
@@ -146,20 +148,6 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
                 : null;
         }
 
-        function resolveExportedFunctionName(fn) {
-            var exportsRef = getActiveExports();
-            if (!exportsRef || typeof exportsRef !== 'object') {
-                return '';
-            }
-            var keys = Object.keys(exportsRef);
-            for (var i = 0; i < keys.length; i += 1) {
-                if (exportsRef[keys[i]] === fn) {
-                    return keys[i];
-                }
-            }
-            return '';
-        }
-
         function buildGeneratedFunctionName(definition) {
             moduleRefFunctionCounter += 1;
             var rawId = String((definition && definition.id) || 'hook');
@@ -169,7 +157,7 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
 
         function activeModulePath() {
             var exportsRef = getActiveExports();
-            if (!exportsRef || typeof exportsRef !== 'object') {
+            if (!exportsRef || (typeof exportsRef !== 'object' && typeof exportsRef !== 'function')) {
                 return '';
             }
             return typeof exportsRef.__operit_toolpkg_module_path === 'string'
@@ -203,37 +191,25 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
 
         function buildModuleRefFunctionSource(requirePath, exportName) {
             return 'function() {' +
-                'var moduleRef = require(' + JSON.stringify(requirePath) + ');' +
-                'var fn = moduleRef && moduleRef[' + JSON.stringify(exportName) + '];' +
-                'if (typeof fn !== "function") {' +
-                    'throw new Error("ToolPkg registered function export not found: ' + exportName.replace(/"/g, '\\"') + '");' +
-                '}' +
-                'return fn.apply(null, arguments);' +
+                'return OperitToolPkgExports.require(require(' + JSON.stringify(requirePath) + '), ' +
+                    JSON.stringify(exportName) + ').apply(null, arguments);' +
             '}';
         }
 
         function resolveDurableFunctionRef(fn, definition, label) {
-            var exportedName = resolveExportedFunctionName(fn);
+            var exportedName = OperitToolPkgExports.nameOf(getActiveExports(), fn);
             if (exportedName) {
                 return {
                     name: exportedName,
                     source: ''
                 };
             }
-            var modulePath = typeof fn.__operit_toolpkg_module_path === 'string'
-                ? fn.__operit_toolpkg_module_path.trim().replace(/\\/g, '/')
-                : '';
-            var exportName = typeof fn.__operit_toolpkg_export_name === 'string'
-                ? fn.__operit_toolpkg_export_name.trim()
-                : '';
-            if (!modulePath || !exportName) {
-                throw new Error(label + ' function must be exported from a toolpkg module');
-            }
+            var reference = OperitToolPkgExports.reference(fn, label + ' function');
             var fromModulePath = activeModulePath();
             var functionName = buildGeneratedFunctionName(definition);
             return {
                 name: functionName,
-                source: buildModuleRefFunctionSource(relativeRequirePath(fromModulePath, modulePath), exportName)
+                source: buildModuleRefFunctionSource(relativeRequirePath(fromModulePath, reference.path), reference.name)
             };
         }
 
@@ -301,51 +277,13 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
             var exportName = null;
             if (typeof screen === 'string') {
                 path = screen.trim().replace(/\\/g, '/');
-            } else if (typeof screen === 'function' && typeof screen.__operit_toolpkg_module_path === 'string') {
-                path = screen.__operit_toolpkg_module_path.trim().replace(/\\/g, '/');
-                exportName = screen.__operit_toolpkg_export_name;
-            } else if (
-                screen &&
-                typeof screen === 'object' &&
-                typeof screen.default === 'function' &&
-                typeof screen.default.__operit_toolpkg_module_path === 'string'
-            ) {
-                path = screen.default.__operit_toolpkg_module_path.trim().replace(/\\/g, '/');
-                exportName = screen.default.__operit_toolpkg_export_name;
+            } else {
+                var reference = OperitToolPkgExports.reference(screen, label + ' screen');
+                path = reference.path;
+                exportName = reference.name;
             }
-            if (!path) {
-                throw new Error(label + ' requires a serializable screen reference');
-            }
-            if (typeof screen !== 'string' && (typeof exportName !== 'string' || !exportName.trim())) {
-                throw new Error(label + ' screen function must have a named module export');
-            }
-            normalized.screenExport = exportName;
-            normalized.screen = path;
-            return normalized;
-        }
-
-        function normalizeDialogScreenField(definition, label) {
-            if (!definition || typeof definition !== 'object' || Array.isArray(definition)) {
-                throw new Error(label + ' expects an object');
-            }
-            var normalized = copyObject(definition, 'screen');
-            var screen = definition.screen;
-            var path = '';
-            if (typeof screen === 'string') {
-                path = screen.trim().replace(/\\/g, '/');
-            } else if (typeof screen === 'function' && typeof screen.__operit_toolpkg_module_path === 'string') {
-                path = screen.__operit_toolpkg_module_path.trim().replace(/\\/g, '/');
-            } else if (
-                screen &&
-                typeof screen === 'object' &&
-                typeof screen.default === 'function' &&
-                typeof screen.default.__operit_toolpkg_module_path === 'string'
-            ) {
-                path = screen.default.__operit_toolpkg_module_path.trim().replace(/\\/g, '/');
-            }
-            if (!path) {
-                throw new Error(label + ' requires a serializable screen reference');
-            }
+            if (!path) throw new Error(label + ' requires a serializable screen reference');
+            if (exportName !== null) normalized.screenExport = exportName;
             normalized.screen = path;
             return normalized;
         }
@@ -356,7 +294,7 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
                 if (typeof definition.dialog !== 'object' || Array.isArray(definition.dialog)) {
                     throw new Error(label + '.dialog expects an object');
                 }
-                normalized.dialog = normalizeDialogScreenField(definition.dialog, label + '.dialog');
+                normalized.dialog = normalizeScreenField(definition.dialog, label + '.dialog');
             }
             return normalized;
         }
@@ -623,6 +561,7 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
 
         var toolPkgApi = requireToolPkgApiRuntime();
         var api = toolPkgApi.namespace('ToolPkg', {
+            ipc: root.__operitToolPkgIpc,
             _m: captureMarketOrigin,
             // Captures only explicitly published methods using durable exported function references.
             registerApi: function(definition) {
@@ -707,6 +646,7 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
                 .between('1.0.1', '2.0.0')
                 .since('2.0.0')
                 .implement(registerFunction('chatRuntimeHooks', 'registerChatRuntimeHook')),
+            registerChatResponseHook: registerFunction('chatResponseHooks', 'registerChatResponseHook'),
             registerHostEventHook: registerFunction('hostEventHooks', 'registerHostEventHook'),
             registerToolLifecycleHook: registerFunction('toolLifecycleHooks', 'registerToolLifecycleHook'),
             registerPromptInputHook: registerFunction('promptInputHooks', 'registerPromptInputHook'),
@@ -735,6 +675,7 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
         installGlobal('ToolPkg', api);
     })();
     "#
+    .replace("__OPERIT_TOOLPKG_MODULE_EXPORTS__", include_str!("ModuleExports.js"))
     .replace("__OPERIT_TOOLPKG_REGISTRATION_ONLY__", registrationOnly)
 }
 
@@ -742,17 +683,17 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
 mod tests {
     use super::buildToolPkgRegistrationBridgeScript;
     use crate::toolpkg::ToolPkgApiRuntimeScript::buildToolPkgApiRuntimeScript;
-    use rquickjs::{Context, Runtime};
+    use operit_host_api::HostJavaScriptRuntime;
 
     /// Verifies runtime marketplace markers can be evaluated repeatedly without capture side effects.
     #[test]
     fn runtime_marketplace_marker_is_repeatable_noop() {
-        let runtime = Runtime::new().expect("QuickJS runtime should start");
-        let context = Context::full(&runtime).expect("QuickJS context should start");
+        let mut context = crate::javascript_test::runtime();
 
-        context.with(|context| {
+        {
             context
-                .eval::<(), _>(
+                .evaluateHostJavaScriptVoid(
+                    "test",
                     r#"
                     globalThis.__operitExpose = function(name, value) {
                         globalThis[name] = value;
@@ -761,33 +702,34 @@ mod tests {
                 )
                 .expect("runtime expose should evaluate");
             context
-                .eval::<(), _>(buildToolPkgApiRuntimeScript())
+                .evaluateHostJavaScriptVoid("test", &buildToolPkgApiRuntimeScript())
                 .expect("toolpkg api runtime should evaluate");
             context
-                .eval::<(), _>(buildToolPkgRegistrationBridgeScript(false))
+                .evaluateHostJavaScriptVoid("test", &buildToolPkgRegistrationBridgeScript(false))
                 .expect("runtime bridge should evaluate");
             context
-                .eval::<(), _>("ToolPkg._m([], 0); ToolPkg._m([], 0);")
+                .evaluateHostJavaScriptVoid("test", "ToolPkg._m([], 0); ToolPkg._m([], 0);")
                 .expect("runtime marker calls should not throw");
             let capturedOrigin = context
-                .eval::<String, _>(
+                .evaluateHostJavaScriptString(
+                    "test",
                     "String(globalThis.__operitToolPkgRegistrationCapture.marketOrigin)",
                 )
                 .expect("runtime capture should be readable");
 
             assert_eq!(capturedOrigin, "null");
-        });
+        }
     }
 
     /// Verifies Core command registrations retain their metadata and durable callback reference.
     #[test]
     fn captures_core_command_registration() {
-        let runtime = Runtime::new().expect("QuickJS runtime should start");
-        let context = Context::full(&runtime).expect("QuickJS context should start");
+        let mut context = crate::javascript_test::runtime();
 
-        context.with(|context| {
+        {
             context
-                .eval::<(), _>(
+                .evaluateHostJavaScriptVoid(
+                    "test",
                     r#"
                     globalThis.__operitExpose = function(name, value) {
                         globalThis[name] = value;
@@ -796,13 +738,14 @@ mod tests {
                 )
                 .expect("runtime expose should evaluate");
             context
-                .eval::<(), _>(buildToolPkgApiRuntimeScript())
+                .evaluateHostJavaScriptVoid("test", &buildToolPkgApiRuntimeScript())
                 .expect("toolpkg api runtime should evaluate");
             context
-                .eval::<(), _>(buildToolPkgRegistrationBridgeScript(false))
+                .evaluateHostJavaScriptVoid("test", &buildToolPkgRegistrationBridgeScript(false))
                 .expect("runtime bridge should evaluate");
             context
-                .eval::<(), _>(
+                .evaluateHostJavaScriptVoid(
+                    "test",
                     r#"
                     function runHello(event) {
                         return { stdout: event.eventPayload.commandName };
@@ -822,18 +765,18 @@ mod tests {
                 )
                 .expect("Core command registration should evaluate");
             let command_name = context
-                .eval::<String, _>(
+                .evaluateHostJavaScriptString("test",
                     "JSON.parse(globalThis.__operitToolPkgRegistrationCapture.coreCommands[0]).name",
                 )
                 .expect("captured command should be readable");
             let function_name = context
-                .eval::<String, _>(
+                .evaluateHostJavaScriptString("test",
                     "JSON.parse(globalThis.__operitToolPkgRegistrationCapture.coreCommands[0]).function",
                 )
                 .expect("captured function should be readable");
 
             assert_eq!(command_name, "hello");
             assert_eq!(function_name, "runHello");
-        });
+        }
     }
 }

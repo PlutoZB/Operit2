@@ -30,6 +30,8 @@ function runtime(operations = {}) {
   vm.runInContext(source('hosts/web/src/javascript_promises.js'), context);
   const registry = context.__operitHostPromiseRegistry;
   const builtins = {
+    /** Receives the exact execution owner selected by the production call registry. */
+    __operitNativeActivateCall() { return null; },
     /** Reads the exact trusted library requested by its production accessor. */
     __operitNativeReadBootstrapLibrary: bootstrapLibrarySource,
     __operitNativePrepareComposeModule: compileComposeModule,
@@ -45,7 +47,10 @@ function runtime(operations = {}) {
     /** Cancels the exact scope owned by the runtime session or timer. */
     __operitNativeCancelJavaScriptPromises(scope) { registry.cancel(scope); timers.delete(scope); return null; },
     /** Accepts the explicit detached-session lifecycle notification. */
-    __operitNativeNotifyDetachedCall() { return null; },
+    __operitNativeNotifyDetachedCall(id) {
+      setImmediate(() => context.__operitFinalizeDetachedCall(id));
+      return null;
+    },
     ...operations,
   };
   const engine = source(bridge + 'JsEngine.rs');
@@ -61,8 +66,8 @@ function runtime(operations = {}) {
     const name = match[1];
     context[name] = registry.syncBinding((...args) => invoke(name, args));
   }
-  for (const match of asyncBlock.matchAll(/"([^"]+)"/g)) {
-    const name = match[1];
+  const asyncNames = Array.from(asyncBlock.matchAll(/"([^"]+)"/g), match => match[1]);
+  for (const name of [...asyncNames, '__operitNativeCallToolStructured']) {
     context[name] = registry.binding((id, ...args) => {
       Promise.resolve().then(() => invoke(name, args)).then(
         value => registry.settle(id, value, false),
@@ -70,6 +75,8 @@ function runtime(operations = {}) {
       );
     });
   }
+  // The engine registers this lifecycle binding separately from syncNames.
+  context.__operitNativeNotifyDetachedCall = registry.syncBinding(builtins.__operitNativeNotifyDetachedCall);
   context.__operitNativeCancelJavaScriptPromises = registry.syncBinding(builtins.__operitNativeCancelJavaScriptPromises);
   context.__operitNativeScheduleJavaScriptTimer = registry.binding((id, delay) => timers.set(id, delay));
   vm.runInContext(`globalThis.__operitNativeCompileModuleFactory = body =>
@@ -86,7 +93,11 @@ function runtime(operations = {}) {
 }
 
 /** Flushes deterministic Promise turns without advancing any safety timers. */
-async function flush() { for (let turn = 0; turn < 16; turn++) await Promise.resolve(); }
+async function flush() {
+  for (let turn = 0; turn < 16; turn++) await Promise.resolve();
+  // Native wakes finalize detached sessions after the queued Promise jobs drain.
+  await new Promise(setImmediate);
+}
 
 /** Confirms the complete bootstrap no longer installs a native-interface object or callback delegates. */
 test('production bootstrap exposes public wrappers without the removed global object', () => {
@@ -125,18 +136,22 @@ test('crypto and deflate use direct structured values without error-string guess
 });
 
 /** Checks asynchronous image operations retain the session and never publish callback IDs. */
-test('Jimp uses an owned host Promise and releases exactly the original execution reference', async () => {
+test('Jimp retains its owner while pending and releases all references on success and failure', async () => {
+  let finishRead;
+  const read = new Promise(resolve => { finishRead = resolve; });
   const { context, calls, openCall } = runtime({
     /** Returns an owned image handle or fails the exact submitted image operation. */
     __operitNativeImageProcessing(operation, args) {
-      if (operation === 'read') { assert.equal(args[0], 'encoded'); return 'image-handle'; }
+      if (operation === 'read') { assert.equal(args[0], 'encoded'); return read; }
       throw new Error('image operation rejected');
     },
   });
   openCall();
   vm.runInContext('JSON.parse = JSON.stringify = function() { throw Error("JSON transport used"); };', context);
   const pending = context.Jimp.read('encoded');
-  assert.equal(context.__operitGetCallState('owner').pendingReferences, 1);
+  await flush();
+  assert.ok(context.__operitGetCallState('owner').pendingReferences > 0, 'Pending image work must retain its owner');
+  finishRead('image-handle');
   const image = await pending;
   assert.equal(image.id, 'image-handle');
   await flush();
@@ -185,7 +200,7 @@ test('script completion uses structured host values with JSON text disabled', as
   const { context, outputs, failures } = runtime();
   vm.runInContext('JSON.parse = JSON.stringify = function() { throw Error("JSON transport used"); };', context);
   executeScript(context, 'script-owner', {__operit_toolpkg_api_version: '2.0.0'},
-    'exports.run = function() { return { literal: "{\\\"data\\\":1}", nested: {value: 7} }; };', 'run', 60, 10000);
+    'exports.run = function() { return { literal: "{\\\"data\\\":1}", nested: {value: 7} }; };', 'run');
   await flush();
   assert.equal(failures.size, 0);
   assert.equal(outputs.get('script-owner').literal, '{"data":1}');
@@ -193,11 +208,73 @@ test('script completion uses structured host values with JSON text disabled', as
   assert.equal(context.__operitGetCallState('script-owner'), null);
 });
 
+/** Exercises cancellation through the real bootstrap while a new chat waits for shared cleanup. */
+test('cancelled tool execution releases a waiting chat initializer without reviving its session', async () => {
+  let finishRead, reads = 0;
+  const firstRead = new Promise(resolve => { finishRead = resolve; });
+  const { context, outputs, failures } = runtime({
+    /** Suspends the first storage read and serves the next call on the same retained handle. */
+    __operitNativeCallToolStructured(_type, name, parameters) {
+      assert.equal(name, 'storage_request');
+      switch (parameters.request.op) {
+        case 'open_preferences': return { success: true, data: { op: 'open', handle: 'preferences', path: 'chats.preferences.json' } };
+        case 'preferences_data':
+          if (++reads === 1) return firstRead;
+          return { success: true, data: { op: 'preferences_data', snapshot: { schemaVersion: 1, values: { selection: 'card:role' } } } };
+        default: throw new Error('Unexpected preference operation: ' + parameters.request.op);
+      }
+    },
+  });
+  vm.runInContext(source(sdk + 'js_sdk/storage_runtime.js'), context);
+  vm.runInContext(`globalThis.Tools = { Storage: {
+    /** Adapts the fixture tool surface to the production structured tool-call transport. */
+    request(request) { return toolCall('storage_request', { request: request }); }
+  } };`, context);
+  const params = { __operit_toolpkg_api_version: '2.0.0' };
+  executeScript(context, 'weather-owner', params, `
+    /** Retains the real preferences facade while its first queued read is suspended. */
+    exports.run = async function() {
+      globalThis.released = 0;
+      globalThis.store = await __operitPreferencesOpen({ path: 'chats.preferences.json' });
+      try {
+        await store.data();
+        throw new Error('Cancelled operation resumed successfully');
+      } finally {
+        released++;
+      }
+    };
+  `, 'run');
+  await flush();
+  executeScript(context, 'new-chat-owner', params, `
+    /** Reads the binding through the same serialized queue using the new chat's own session. */
+    exports.run = async function() {
+      const binding = await store.data();
+      return { selection: binding.get('selection'), owner: __operitCurrentCallId };
+    };
+  `, 'run');
+  await flush();
+  assert.equal(outputs.size, 0);
+  context.__operitCancelCallSession('weather-owner');
+  context.__operitHostPromiseRegistry.cancel('weather-owner');
+  await flush();
+  assert.equal(context.released, 1);
+  assert.deepEqual(structuredClone(outputs.get('new-chat-owner')), { selection: 'card:role', owner: 'new-chat-owner' });
+  assert.equal(reads, 2);
+  assert.equal(outputs.has('weather-owner'), false);
+  assert.equal(failures.size, 0);
+  assert.equal(context.__operitGetCallState('weather-owner'), null);
+  assert.equal(context.__operitGetCallState('new-chat-owner'), null);
+  finishRead({ success: true, data: { op: 'preferences_data', snapshot: { schemaVersion: 1, values: { selection: 'card:cancelled' } } } });
+  await flush();
+  assert.equal(context.released, 1);
+  assert.equal(outputs.size, 1);
+});
+
 /** Checks result conversion failures cannot mark a session completed before reporting the error. */
 test('cyclic script results fail explicitly rather than producing replacement data', async () => {
   const { context, outputs, failures } = runtime();
   executeScript(context, 'cycle-owner', {__operit_toolpkg_api_version: '2.0.0'},
-    'exports.run = function() { var value = {}; value.self = value; return value; };', 'run', 60, 10000);
+    'exports.run = function() { var value = {}; value.self = value; return value; };', 'run');
   await flush();
   assert.equal(outputs.size, 0);
   assert.equal(failures.get('cycle-owner').success, false);
@@ -338,7 +415,7 @@ test('module reads preserve empty source and propagate the original resource-own
   executeScript(successful.context, 'modules', {
     __operit_toolpkg_api_version:'2.0.0', toolPkgId:'fixture', __operit_ui_package_name:'fixture',
     __operit_script_screen:'dist/main.js',
-  }, 'var empty = require("./empty"); var shared = require("./shared"); exports.run = function() { return {empty:empty.missing===undefined, label:shared.label}; };', 'run', 60, 10000);
+  }, 'var empty = require("./empty"); var shared = require("./shared"); exports.run = function() { return {empty:empty.missing===undefined, label:shared.label}; };', 'run');
   await flush();
   assert.equal(successful.failures.size, 0);
   assert.equal(successful.outputs.get('modules').empty, true);
@@ -350,7 +427,7 @@ test('module reads preserve empty source and propagate the original resource-own
   executeScript(failed.context, 'failed-modules', {
     __operit_toolpkg_api_version:'2.0.0', toolPkgId:'fixture', __operit_ui_package_name:'fixture',
     __operit_script_screen:'dist/main.js',
-  }, 'var shared = require("./shared"); exports.run = function() { return shared; };', 'run', 60, 10000);
+  }, 'var shared = require("./shared"); exports.run = function() { return shared; };', 'run');
   await flush();
   assert.equal(failed.outputs.size, 0);
   assert.match(failed.failures.get('failed-modules').message, /resource owner read denied/);
@@ -363,7 +440,7 @@ test('page bootstrap owns no compiler and precompiled factories bypass shared lo
     __operitNativePrepareComposeModule() { throw Error('Artifact attempted source lowering'); },
   });
   assert.equal(vm.runInContext('typeof __operitAcorn + ":" + typeof OperitComposeCompiler', context), 'undefined:undefined');
-  const source = '// @operit-compose-artifact 1\nexports.run = function() { return 7; };';
+  const source = '// @operit-compose-artifact 4\nexports.run = function() { return 7; };';
   const factory = context.__operitGetFactory('main', 'pkg:artifact', source, true);
   const module = { exports: {} };
   factory(module, module.exports, () => { throw Error('Unexpected require'); }, {});

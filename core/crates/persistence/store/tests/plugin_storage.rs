@@ -1183,3 +1183,348 @@ fn byte_budgets_bound_exported_pages_without_reordering() {
     f.call(json!({"op":"close","handle":handle})).unwrap();
     f.dispose();
 }
+
+/// Opens the owners/memory fixture whose identities follow a preference catalog.
+fn open_owner_merge_fixture(fixture: &Fixture, withMerge: bool) -> String {
+    let mut request = json!({"op":"open","path":fixture.path,"kind":"objects"});
+    if withMerge {
+        request["merge"] = json!({"version":3,"maxEntities":1,"maxReferences":2,"entities":[{
+            "collection":"owners","identityColumn":"ownerKey","nameColumn":null,"ignoredColumns":[],
+            "keyEncoding":"slash_root","matchMode":"identity",
+            "keyReferences":[{"prefix":"character:","target":{"kind":"preference","path":"runtime/config/preferences/cards.preferences.json"}}],
+            "childCollections":["memories"],
+            "references":[
+                {"collection":"owners","column":"document","target":{"kind":"collection","collection":"owners"},
+                 "keyPrefix":"owners/","keySuffix":"/USER.md","valueEncoding":"uri_component"},
+                {"collection":"memories","column":"owner","target":{"kind":"preference","path":"runtime/config/preferences/cards.preferences.json"},
+                 "keyPrefix":"character:","keySuffix":"","valueEncoding":"direct"}
+            ]}]});
+    }
+    fixture.call(request).unwrap()["handle"].as_str().unwrap().to_string()
+}
+
+/// Builds one object mutation for an explicitly selected collection.
+fn put_in(collection: &str, key: &str, value: Value) -> Value {
+    json!({"collection":collection,"key":key,"value":value,"deleted":false,"checkVersion":false,"expectedVersion":null})
+}
+
+/// Canonicalizes one owners space plus its memory children for the alias tests.
+fn seed_aliased_owner(fixture: &Fixture, handle: &str, oldId: &str, newId: &str) {
+    let oldKey = format!("character:{oldId}");
+    fixture.call(json!({"op":"commit","handle":handle,"mutations":[
+        put_in("owners", &oldKey, json!({"ownerKey": oldKey, "document": format!("owners/character%3A{oldId}/USER.md")})),
+        put_in("memories", &format!("{oldKey}/m1"), json!({"owner": oldKey, "title": "kept"}))
+    ]})).unwrap();
+    PluginStorage::reconcilePreferenceReferences(fixture.host.clone(), &std::collections::BTreeMap::from([
+        (format!("runtime/config/preferences/cards.preferences.json\u{001f}{oldId}"), newId.to_string()),
+    ])).unwrap();
+}
+
+/// Redirects a live writer's pre-merge identities onto the canonical rows so a
+/// background rename can never be undone by the next local commit.
+#[test]
+fn local_commits_redirect_aliased_keys_onto_canonical_rows() {
+    let fixture = Fixture::new("redirect");
+    let oldId = "c3c356e7-17fb-4cce-b38b-4e230352564f";
+    let newId = "13f64b4b-a19c-4daf-a27c-9f62ba873fe6";
+    let oldKey = format!("character:{oldId}");
+    let canonicalKey = format!("character:{newId}");
+    let handle = open_owner_merge_fixture(&fixture, true);
+    seed_aliased_owner(&fixture, &handle, oldId, newId);
+
+    // A stale writer still holding the pre-merge identity commits again.
+    fixture.call(json!({"op":"commit","handle":handle,"mutations":[
+        put_in("owners", &oldKey, json!({"ownerKey": oldKey, "document": format!("owners/character%3A{oldId}/USER.md")})),
+        put_in("memories", &format!("{oldKey}/m2"), json!({"owner": oldKey, "title": "resurrected"}))
+    ]})).unwrap();
+
+    let oldOwners = fixture.call(json!({"op":"get","handle":handle,"collection":"owners","key":oldKey})).unwrap();
+    assert_eq!(oldOwners, json!(null), "the retired owners key must stay empty");
+    let canonicalOwners = fixture.call(json!({"op":"get","handle":handle,"collection":"owners","key":canonicalKey})).unwrap();
+    assert_eq!(canonicalOwners["value"]["ownerKey"], json!(canonicalKey));
+    assert_eq!(canonicalOwners["value"]["document"], json!(format!("owners/character%3A{newId}/USER.md")));
+    let resurrected = fixture.call(json!({"op":"get","handle":handle,"collection":"memories","key":format!("{canonicalKey}/m2")})).unwrap();
+    assert_eq!(resurrected["value"]["owner"], json!(canonicalKey));
+    assert_eq!(resurrected["value"]["title"], json!("resurrected"));
+    assert_eq!(
+        fixture.call(json!({"op":"get","handle":handle,"collection":"memories","key":format!("{oldKey}/m2")})).unwrap(),
+        json!(null)
+    );
+    fixture.dispose();
+}
+
+/// Reopening a merged database moves rows that a pre-fix writer left under an
+/// aliased identity back onto the canonical rows before the first read.
+#[test]
+fn opening_a_database_heals_rows_written_under_aliased_identities() {
+    let fixture = Fixture::new("heal");
+    let oldId = "c3c356e7-17fb-4cce-b38b-4e230352564f";
+    let newId = "13f64b4b-a19c-4daf-a27c-9f62ba873fe6";
+    let oldKey = format!("character:{oldId}");
+    let canonicalKey = format!("character:{newId}");
+    let handle = open_owner_merge_fixture(&fixture, true);
+    seed_aliased_owner(&fixture, &handle, oldId, newId);
+
+    // A writer without the merge contract recreates rows under the retired key.
+    let bare = open_owner_merge_fixture(&fixture, false);
+    fixture.call(json!({"op":"commit","handle":bare,"mutations":[
+        put_in("owners", &oldKey, json!({"ownerKey": oldKey, "document": format!("owners/character%3A{oldId}/USER.md")})),
+        put_in("memories", &format!("{oldKey}/m2"), json!({"owner": oldKey, "title": "orphan"}))
+    ]})).unwrap();
+    fixture.call(json!({"op":"close","handle":bare})).unwrap();
+    fixture.call(json!({"op":"close","handle":handle})).unwrap();
+
+    let reopened = open_owner_merge_fixture(&fixture, true);
+    assert_eq!(
+        fixture.call(json!({"op":"get","handle":reopened,"collection":"owners","key":oldKey})).unwrap(),
+        json!(null)
+    );
+    let canonicalOwners = fixture.call(json!({"op":"get","handle":reopened,"collection":"owners","key":canonicalKey})).unwrap();
+    assert_eq!(canonicalOwners["value"]["ownerKey"], json!(canonicalKey));
+    assert_eq!(canonicalOwners["value"]["document"], json!(format!("owners/character%3A{newId}/USER.md")));
+    let orphan = fixture.call(json!({"op":"get","handle":reopened,"collection":"memories","key":format!("{canonicalKey}/m2")})).unwrap();
+    assert_eq!(orphan["value"]["owner"], json!(canonicalKey));
+    assert_eq!(orphan["value"]["title"], json!("orphan"));
+    assert_eq!(
+        fixture.call(json!({"op":"get","handle":reopened,"collection":"memories","key":format!("{oldKey}/m2")})).unwrap(),
+        json!(null)
+    );
+    fixture.dispose();
+}
+
+/// Exports immutable history without parsing an obsolete catalog merge declaration.
+#[test]
+fn obsolete_catalog_contract_does_not_block_history_export() {
+    let source = Fixture::new("broken-contract-source");
+    let target = Fixture::new("broken-contract-target");
+    let handle = source.open("objects");
+    source
+        .call(json!({"op":"commit","handle":handle,"mutations":[put("pending",json!(7))]}))
+        .unwrap();
+    let pending = source.export();
+    assert!(!pending.is_empty());
+    let committed = PluginStorage::localClock(source.host.clone()).unwrap();
+    let catalog = SqliteStore::openWithHost(
+        source.host.clone(),
+        "runtime/extensions/device/storage/catalog.sqlite",
+    )
+    .unwrap();
+    let invalid = json!({
+        "version": 1, "maxEntities": 1, "maxReferences": 1,
+        "entities": [{
+            "collection":"keys", "identityColumn":"key", "nameColumn":null,
+            "ignoredColumns":[], "keyEncoding":"slash_root", "references":[],
+            "keyReferences":[{"collection":"cards","prefix":"character:"}]
+        }]
+    });
+    catalog
+        .execute(
+            "UPDATE plugin_databases SET merge=?1 WHERE path=?2",
+            vec![
+                operit_host_api::SqliteValue::Text(invalid.to_string()),
+                operit_host_api::SqliteValue::Text(source.path.clone()),
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        PluginStorage::localClock(source.host.clone()).unwrap(),
+        committed
+    );
+    assert_eq!(
+        PluginStorage::operationsSince(
+            source.host.clone(),
+            &SyncClock::empty(),
+            &["plugin_storage".into()],
+            100,
+        )
+        .unwrap(),
+        pending
+    );
+    assert!(
+        PluginStorage::operationsSince(
+            source.host.clone(),
+            &SyncClock::empty(),
+            &["preferences".into()],
+            100,
+        )
+        .unwrap()
+        .is_empty()
+    );
+    assert!(
+        PluginStorage::localClock(target.host.clone())
+            .unwrap()
+            .sequences
+            .is_empty()
+    );
+
+    catalog
+        .execute("UPDATE plugin_databases SET merge=NULL", Vec::new())
+        .unwrap();
+    let retried = source.export();
+    assert_eq!(retried, pending);
+    target.replay(&retried);
+    assert_eq!(
+        PluginStorage::localClock(target.host.clone()).unwrap(),
+        committed
+    );
+    let targetHandle = target.open("objects");
+    assert_eq!(target.get(&targetHandle, "pending")["value"], json!(7));
+    drop(catalog);
+    source.dispose();
+    target.dispose();
+}
+
+/// Migrates the historical declaration only for execution and retains byte-equivalent JSON operation content.
+#[test]
+fn historical_key_reference_payload_replays_without_mutating_operation_identity() {
+    let source = Fixture::new("historical-source");
+    let target = Fixture::new("historical-target");
+    let handle = open_object_merge_fixture(&source);
+    seed_object_card(&source, &handle, "a", "Card", "content");
+    let store = SqliteStore::openWithHost(source.host.clone(), &source.path).unwrap();
+    for mut operation in source.export() {
+        for entity in operation.payload["manifest"]["merge"]["entities"]
+            .as_array_mut()
+            .unwrap()
+        {
+            for reference in entity["keyReferences"].as_array_mut().unwrap() {
+                let collection = reference["target"]["collection"].clone();
+                reference.as_object_mut().unwrap().remove("target");
+                reference["collection"] = collection;
+            }
+        }
+        store
+            .execute(
+                "UPDATE _operit_log SET payload=?1 WHERE origin=?2 AND sequence=?3",
+                vec![
+                    operit_host_api::SqliteValue::Text(operation.payload.to_string()),
+                    operit_host_api::SqliteValue::Text(operation.originDeviceId),
+                    operit_host_api::SqliteValue::Integer(operation.sequence),
+                ],
+            )
+            .unwrap();
+    }
+    let originals = source.export();
+    assert!(originals.iter().any(|operation| {
+        operation.payload["manifest"]["merge"]["entities"][1]["keyReferences"][0]
+            .get("collection")
+            .is_some()
+    }));
+    target.replay(&originals);
+    target.replay(&originals);
+    assert_eq!(target.export(), originals);
+    drop(store);
+    source.dispose();
+    target.dispose();
+}
+
+/// Reports a broken database while exporting healthy databases in the same page.
+#[test]
+fn unavailable_database_does_not_block_healthy_database_export() {
+    use operit_store::SyncOperationStore::SyncReceipt;
+    let source = Fixture::new("independent-databases");
+    let handle = source.open("objects");
+    source
+        .call(json!({"op":"commit","handle":handle,"mutations":[put("ready",json!(7))]}))
+        .unwrap();
+    let originals = source.export();
+    let catalog = SqliteStore::openWithHost(
+        source.host.clone(),
+        "runtime/extensions/device/storage/catalog.sqlite",
+    )
+    .unwrap();
+    let brokenPath = format!("{}/broken.sqlite", source.roots[0]);
+    catalog.execute("INSERT INTO plugin_databases(path,owner,kind,sync,merge) VALUES(?1,'storage_test','objects',1,NULL)", vec![operit_host_api::SqliteValue::Text(brokenPath.clone())]).unwrap();
+    let (operations, errors) = PluginStorage::exportWithBudget(
+        source.host.clone(),
+        &SyncReceipt::default(),
+        &[],
+        100,
+        100_000,
+    )
+    .unwrap();
+    assert_eq!(operations, originals);
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].contains(&brokenPath));
+    let (receipt, errors) = PluginStorage::receipt(source.host.clone()).unwrap();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(
+        receipt.ranges[&originals[0].originDeviceId],
+        vec![[1, originals.last().unwrap().sequence]]
+    );
+    drop(catalog);
+    source.dispose();
+}
+
+/// Ordinary references survive delivery before their preference target exists.
+#[test]
+fn preference_references_do_not_block_independent_plugin_transactions() {
+    let source = Fixture::new("reference-source");
+    let target = Fixture::new("reference-target");
+    let handle = open_owner_merge_fixture(&source, true);
+    source.call(json!({"op":"commit","handle":handle,"mutations":[put_in("owners", "character:a", json!({"ownerKey":"character:a", "document":"owners/character%3Aa/USER.md"}))]})).unwrap();
+    let originals = source.export();
+    for _ in 0..2 {
+        for operation in &originals {
+            PluginStorage::applyOperation(
+                target.host.clone(), target.host.clone(), operation, &Default::default(),
+            ).unwrap();
+        }
+    }
+    assert_eq!(target.export(), originals);
+    let handle = open_owner_merge_fixture(&target, true);
+    let record = target.call(json!({"op":"get","handle":handle,"collection":"owners","key":"character:a"})).unwrap();
+    assert_eq!(record["value"]["ownerKey"], "character:a");
+    source.dispose();
+    target.dispose();
+}
+
+/// Queries synchronized source envelopes through the same parameterized CTE shape as memory retrieval.
+#[test]
+fn object_queries_rank_vectors_after_sync_replay() {
+    let first = Fixture::new("first");
+    let handle = first.open("objects");
+    first.call(json!({"op":"commit","handle":handle,"mutations":[
+        put("source", json!({"record":{"content":"source"},"embedding":{"vector":[1.0,0.0]}})),
+        put("other", json!({"record":{"content":"other"},"embedding":{"vector":[0.0,1.0]}}))
+    ]})).unwrap();
+    // SQLiteDialect rejects AS MATERIALIZED before SQLite sees the statement.
+    let sql = "WITH query_vector AS (SELECT CAST(key AS INTEGER) AS dimension,value FROM json_each(?1)) SELECT key,(SELECT sum(q.value*v.value) FROM json_each(o.value,'$.embedding.vector') v JOIN query_vector q ON q.dimension=v.key) AS score FROM plugin_objects o WHERE collection='keys' ORDER BY score DESC LIMIT 1";
+    let second = Fixture::new("second");
+    second.replay(&first.export());
+    let other = second.open("objects");
+    for (vector, expected) in [("[1.0,0.0]", "source"), ("[0.0,1.0]", "other")] {
+        let params = json!([{"kind":"text","value":vector}]);
+        let rows = first.call(json!({"op":"query","handle":handle,"statement":{"sql":sql,"params":params}})).unwrap();
+        assert_eq!(rows[0]["values"][0]["value"], expected);
+        assert_eq!(rows[0]["values"][1]["value"], 1.0);
+        assert_eq!(rows, second.call(json!({"op":"query","handle":other,"statement":{"sql":sql,"params":params}})).unwrap());
+    }
+    for statement in [
+        "SELECT * FROM _operit_log",
+        "DELETE FROM plugin_objects",
+        "SELECT * FROM sqlite_master",
+        "WITH hidden AS (SELECT * FROM _operit_log) SELECT * FROM hidden",
+        "WITH hidden AS (SELECT * FROM sqlite_master) SELECT * FROM hidden",
+        "WITH keys AS (SELECT key FROM plugin_objects) DELETE FROM plugin_objects WHERE key IN (SELECT key FROM keys)",
+    ] {
+        assert!(first.call(json!({"op":"query","handle":handle,"statement":{"sql":statement,"params":[]}})).is_err());
+    }
+    first.dispose(); second.dispose();
+}
+
+/// Rejects a source write when related owner metadata changed while the caller awaited a provider.
+#[test]
+fn object_record_guards_are_checked_before_source_publication() {
+    let f = Fixture::new("first");
+    let handle = f.open("objects");
+    f.call(json!({"op":"commit","handle":handle,"mutations":[put("owner",json!({"model":"old"}))]})).unwrap();
+    let version = f.get(&handle,"owner")["version"].clone();
+    f.call(json!({"op":"commit","handle":handle,"mutations":[put("owner",json!({"model":"new"}))]})).unwrap();
+    assert!(f.call(json!({"op":"commit","handle":handle,"mutations":[put("source",json!({"vector":[1.0]}))],"guards":[{"collection":"keys","key":"owner","expectedVersion":version}]})).is_err());
+    assert!(f.get(&handle,"source").is_null());
+    let current = f.get(&handle,"owner");
+    f.call(json!({"op":"commit","handle":handle,"mutations":[put("source",json!({"vector":[1.0]}))],"guards":[{"collection":"keys","key":"owner","expectedVersion":current["version"]}]})).unwrap();
+    assert_eq!(f.get(&handle,"owner"),current);
+    f.dispose();
+}

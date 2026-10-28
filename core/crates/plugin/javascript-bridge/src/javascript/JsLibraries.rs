@@ -201,6 +201,7 @@ fn assembleRuntimeBootstrapScript() -> String {
         {}
         var globalThis = this;
         var window = globalThis;
+        var global = globalThis;
         var OPERIT_CLEAN_ON_EXIT_DIR = {};
         var __operitRuntimePrelude = {};
         var __operitComposeRuntimeSource = {};
@@ -251,7 +252,7 @@ fn assembleRuntimeBootstrapScript() -> String {
                     }});
                 }}
                 try {{
-                    __operitNativeScheduleJavaScriptTimer(timerId, Math.floor(normalizedDelay)).then(function() {{
+                    __operitThenUntracked(__operitNativeScheduleJavaScriptTimer(timerId, Math.floor(normalizedDelay)), function() {{
                         if (!timerStates.delete(timerId)) return;
                         try {{
                             __operitActivateCall(timerCallId);
@@ -365,23 +366,13 @@ fn assembleRuntimeBootstrapScript() -> String {
             if (!Object.prototype.hasOwnProperty.call(value.composeDsl, 'screen')) {{
                 return value;
             }}
-            var screenRef = value.composeDsl.screen;
-            var resolved = '';
-            if (typeof screenRef === 'function') {{
-                resolved = __operitText(screenRef.__operit_toolpkg_module_path).trim();
-            }} else if (
-                screenRef &&
-                typeof screenRef === 'object' &&
-                typeof screenRef.default === 'function'
-            ) {{
-                resolved = __operitText(screenRef.default.__operit_toolpkg_module_path).trim();
-            }} else if (typeof screenRef === 'string') {{
-                throw new Error('composeDsl.screen must be a compose_dsl screen function, not a string path');
+            var reference = OperitToolPkgExports.reference(value.composeDsl.screen, 'composeDsl.screen');
+            var spec = value.composeDsl.moduleSpec;
+            if (spec != null && (typeof spec !== 'object' || Array.isArray(spec))) {{
+                throw new Error('composeDsl.moduleSpec must be an object');
             }}
-            if (!resolved) {{
-                throw new Error('composeDsl.screen is missing a toolpkg module path marker');
-            }}
-            value.composeDsl.screen = resolved.replace(/\\/g, '/');
+            value.composeDsl.screen = reference.path;
+            value.composeDsl.moduleSpec = Object.assign({{}}, spec, {{screenExport: reference.name}});
             return value;
         }}
 
@@ -483,23 +474,6 @@ fn assembleRuntimeBootstrapScript() -> String {
             return factory;
         }}
 
-        function __operitTagModuleExports(modulePath, exportsRef) {{
-            if (typeof exportsRef === 'function') {{
-                exportsRef.__operit_toolpkg_module_path = modulePath;
-                return;
-            }}
-            if (!exportsRef || typeof exportsRef !== 'object') {{
-                return;
-            }}
-            exportsRef.__operit_toolpkg_module_path = modulePath;
-            Object.keys(exportsRef).forEach(function(key) {{
-                if (typeof exportsRef[key] === 'function') {{
-                    exportsRef[key].__operit_toolpkg_module_path = modulePath;
-                    exportsRef[key].__operit_toolpkg_export_name = key;
-                }}
-            }});
-        }}
-
         function __operitText(value) {{
             return value == null ? '' : String(value);
         }}
@@ -512,48 +486,9 @@ fn assembleRuntimeBootstrapScript() -> String {
             return normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on';
         }}
 
-        function __operitCreateRegistrationScreenPlaceholder(modulePath) {{
-            function ScreenPlaceholder() {{
-                return null;
-            }}
-            ScreenPlaceholder.__operit_toolpkg_module_path = modulePath;
-            ScreenPlaceholder.__operit_toolpkg_export_name = "default";
-            return ScreenPlaceholder;
-        }}
-
         function __operitIsLocalUiModulePath(modulePath) {{
             var normalized = __operitNormalizePath(modulePath);
             return /\.ui\.js$/i.test(normalized);
-        }}
-
-        function __operitFindTargetFunction(exportsRef, moduleRef, functionName) {{
-            if (exportsRef && typeof exportsRef[functionName] === 'function') {{
-                return exportsRef[functionName];
-            }}
-            if (moduleRef && moduleRef.exports && typeof moduleRef.exports[functionName] === 'function') {{
-                return moduleRef.exports[functionName];
-            }}
-            if (typeof globalThis[functionName] === 'function') {{
-                return globalThis[functionName];
-            }}
-            return null;
-        }}
-
-        function __operitBuildAvailableFunctions(exportsRef, moduleRef) {{
-            var names = [];
-            function collect(target) {{
-                if (!target || typeof target !== 'object') {{
-                    return;
-                }}
-                Object.keys(target).forEach(function(key) {{
-                    if (typeof target[key] === 'function' && names.indexOf(key) < 0) {{
-                        names.push(key);
-                    }}
-                }});
-            }}
-            collect(exportsRef);
-            collect(moduleRef && moduleRef.exports ? moduleRef.exports : null);
-            return names;
         }}
 
         var __operitScriptSources = new Map();
@@ -567,7 +502,7 @@ fn assembleRuntimeBootstrapScript() -> String {
         }}
 
         /** Invokes a registered source without transferring or fingerprinting its text again. */
-        function __operitExecuteScriptFunction(callId, params, sourceId, targetFunctionName, timeoutSec, preTimeoutMs, structuredResult) {{
+        function __operitExecuteScriptFunction(callId, params, sourceId, targetFunctionName, structuredResult, toolPkgContext) {{
             var scriptText = __operitScriptSources.get(sourceId);
             if (typeof scriptText !== 'string') {{
                 throw new Error('Unknown registered script source: ' + sourceId);
@@ -582,7 +517,7 @@ fn assembleRuntimeBootstrapScript() -> String {
                 }});
                 return;
             }}
-            var callState = registerCallSession(callId, params);
+            var callState = registerCallSession(callId, params, toolPkgContext);
             callState.previousCallId = previousCallId;
             callState.previousCallRuntime = previousCallRuntime;
             globalThis.__operitCurrentCallId = callId;
@@ -591,22 +526,12 @@ fn assembleRuntimeBootstrapScript() -> String {
                     ? globalThis.__operitGetCallState(callId)
                     : null;
             }}
+            /** Restores the surviving context and retires this call after its owned work ends. */
             function finalizeCall() {{
                 if (globalThis.__operitCurrentCallId === callId) {{
-                    // Prefer the surrounding session, but never leave a suspended call without
-                    // an owner when the surrounding call already finished: other calls may still
-                    // be awaiting host work and must keep a live execution id.
-                    globalThis.__operitCurrentCallId =
-                        typeof globalThis.__operitRestoreLiveCallId === 'function'
-                            ? globalThis.__operitRestoreLiveCallId(previousCallId, callId)
-                            : '';
-                }}
-                if (globalThis.__operit_call_runtime_ref === callRuntime) {{
-                    if (previousCallRuntime && typeof previousCallRuntime === 'object') {{
-                        globalThis.__operit_call_runtime_ref = previousCallRuntime;
-                    }} else {{
-                        delete globalThis.__operit_call_runtime_ref;
-                    }}
+                    globalThis.__operitRestoreCallContext(
+                        globalThis.__operitRestoreLiveCallId(previousCallId, callId)
+                    );
                 }}
                 if (callState.pendingReferences > 0) {{
                     callState.detached = true;
@@ -759,13 +684,17 @@ fn assembleRuntimeBootstrapScript() -> String {
                 log: emitIntermediate,
                 update: emitIntermediate,
                 sendIntermediateResult: emitIntermediate,
-                /** Publishes each retained commit immediately on its own command's structured channel. */
+                /** Registers a subscription cleanup for the exact originating call session. */
+                onCleanup: function(cleanup) {{
+                    if (typeof cleanup !== 'function') {{ throw new TypeError('Call cleanup must be a function'); }}
+                    callState.cleanupCallbacks.add(cleanup);
+                    /** Releases a disposed subscription before its call finishes. */
+                    return function() {{ callState.cleanupCallbacks.delete(cleanup); }};
+                }},
+                /** Transfers the sealed Compose allocation on its owning call channel. */
                 sendComposeResponse: function(phase, response) {{
                     if (!isActive()) {{ throw new Error('Compose response owner is no longer active'); }}
-                    __operitNativeSendStructuredIntermediate(callId, {{
-                        phase: phase,
-                        response: __operitNormalizeComposeResult(response)
-                    }});
+                    __operitNativeSendStructuredIntermediate(callId, response);
                 }},
                 reportError: emitError,
                 done: complete,
@@ -842,118 +771,6 @@ fn assembleRuntimeBootstrapScript() -> String {
                         ? __operitText(params.moduleSpec.screen)
                         : ''
                 ));
-                function getCurrentToolPkgRuntimeKind() {{
-                    var explicitRuntime = __operitText(
-                        readCallValue('__operit_toolpkg_runtime_kind', '')
-                    ).trim().toLowerCase();
-                    if (
-                        explicitRuntime === 'main' ||
-                        explicitRuntime === 'ui' ||
-                        explicitRuntime === 'sandbox' ||
-                        explicitRuntime === 'provider'
-                    ) {{
-                        return explicitRuntime;
-                    }}
-                    var contextKey = __operitText(
-                        readCallValue(
-                            '__operit_execution_context_key',
-                            readCallValue('executionContextKey', '')
-                        )
-                    ).trim();
-                    if (/^toolpkg_provider:/i.test(contextKey)) {{
-                        return 'provider';
-                    }}
-                    if (
-                        /^toolpkg_compose:/i.test(contextKey) ||
-                        /^toolpkg_compose_dsl:/i.test(contextKey) ||
-                        /^toolpkg_xml_render:/i.test(contextKey)
-                    ) {{
-                        return 'ui';
-                    }}
-                    var subpackageId = __operitText(
-                        readCallValue('__operit_toolpkg_subpackage_id', '')
-                    ).trim();
-                    return subpackageId.length > 0 ? 'sandbox' : 'main';
-                }}
-
-                function getCurrentToolPkgExecutionContextKey() {{
-                    var composeContextKey = __operitText(
-                        readCallValue(
-                            '__operit_compose_execution_context_key',
-                            readCallValue('executionContextKey', '')
-                        )
-                    ).trim();
-                    var scopedContextKey = __operitText(
-                        readCallValue('__operit_execution_context_key', '')
-                    ).trim();
-                    if (composeContextKey.length > 0) {{
-                        return composeContextKey;
-                    }}
-                    if (scopedContextKey.length > 0) {{
-                        return scopedContextKey;
-                    }}
-                    return packageTarget ? 'toolpkg_main:' + packageTarget : '';
-                }}
-
-                function ensureToolPkgIpcRegistry() {{
-                    var registry = globalThis.__operitToolPkgIpcRegistry;
-                    if (!registry || typeof registry !== 'object') {{
-                        registry = Object.create(null);
-                        globalThis.__operitToolPkgIpcRegistry = registry;
-                    }}
-                    return registry;
-                }}
-
-                function normalizeToolPkgIpcChannel(channel) {{
-                    return __operitText(channel).trim();
-                }}
-
-                function registerToolPkgIpcHandler(channel, handler) {{
-                    var normalizedChannel = normalizeToolPkgIpcChannel(channel);
-                    if (normalizedChannel.length === 0) {{
-                        throw new Error('ToolPkg.ipc channel is required');
-                    }}
-                    if (typeof handler !== 'function') {{
-                        throw new Error('ToolPkg.ipc handler must be a function');
-                    }}
-                    ensureToolPkgIpcRegistry()[normalizedChannel] = handler;
-                    return function() {{
-                        var registry = ensureToolPkgIpcRegistry();
-                        if (registry[normalizedChannel] === handler) {{
-                            delete registry[normalizedChannel];
-                        }}
-                    }};
-                }}
-
-                function unregisterToolPkgIpcHandler(channel, handler) {{
-                    var normalizedChannel = normalizeToolPkgIpcChannel(channel);
-                    if (normalizedChannel.length === 0) {{
-                        return false;
-                    }}
-                    var registry = ensureToolPkgIpcRegistry();
-                    if (arguments.length > 1 && registry[normalizedChannel] !== handler) {{
-                        return false;
-                    }}
-                    if (typeof registry[normalizedChannel] === 'function') {{
-                        delete registry[normalizedChannel];
-                        return true;
-                    }}
-                    return false;
-                }}
-
-                function invokeToolPkgIpcLocal(channel, payload, meta) {{
-                    var normalizedChannel = normalizeToolPkgIpcChannel(channel);
-                    if (normalizedChannel.length === 0) {{
-                        throw new Error('ToolPkg.ipc channel is required');
-                    }}
-                    var registry = ensureToolPkgIpcRegistry();
-                    var handler = registry[normalizedChannel];
-                    if (typeof handler !== 'function') {{
-                        throw new Error('ToolPkg.ipc channel is not registered: ' + normalizedChannel);
-                    }}
-                    return handler(payload, meta && typeof meta === 'object' ? meta : {{}});
-                }}
-
                 function normalizeToolPkgWasmValueType(valueType) {{
                     var normalizedType = __operitText(valueType).trim().toLowerCase();
                     if (
@@ -1003,148 +820,6 @@ fn assembleRuntimeBootstrapScript() -> String {
                     return normalizedArgs;
                 }}
 
-                function ensureToolPkgIpcApi() {{
-                    var toolPkgApi = globalThis.ToolPkg && typeof globalThis.ToolPkg === 'object'
-                        ? globalThis.ToolPkg
-                        : {{}};
-                    if (globalThis.ToolPkg !== toolPkgApi) {{
-                        globalThis.ToolPkg = toolPkgApi;
-                    }}
-                    var ipcApi = toolPkgApi.ipc && typeof toolPkgApi.ipc === 'object'
-                        ? toolPkgApi.ipc
-                        : {{}};
-
-                    ipcApi.on = function(channel, handler) {{
-                        return registerToolPkgIpcHandler(channel, handler);
-                    }};
-                    ipcApi.off = function(channel, handler) {{
-                        return unregisterToolPkgIpcHandler(channel, handler);
-                    }};
-                    ipcApi.call = function(channel, payload, options) {{
-                        var normalizedChannel = normalizeToolPkgIpcChannel(channel);
-                        if (normalizedChannel.length === 0) {{
-                            return Promise.reject(new Error('ToolPkg.ipc channel is required'));
-                        }}
-                        var callOptions = options && typeof options === 'object' ? options : {{}};
-                        var targetRuntime = __operitText(callOptions.targetRuntime || '').trim().toLowerCase();
-                        if (
-                            targetRuntime &&
-                            targetRuntime !== 'main' &&
-                            targetRuntime !== 'ui' &&
-                            targetRuntime !== 'sandbox' &&
-                            targetRuntime !== 'provider'
-                        ) {{
-                            return Promise.reject(new Error('ToolPkg.ipc targetRuntime is invalid: ' + targetRuntime));
-                        }}
-                        var targetContextKey = __operitText(callOptions.targetContextKey || '').trim();
-                        var hasTargetOptions = targetRuntime.length > 0 || targetContextKey.length > 0;
-                        var currentContextKey = getCurrentToolPkgExecutionContextKey();
-                        var currentRuntime = getCurrentToolPkgRuntimeKind();
-                        if (
-                            currentRuntime === 'main' &&
-                            (
-                                !hasTargetOptions ||
-                                (
-                                    (targetRuntime.length === 0 || targetRuntime === 'main') &&
-                                    (targetContextKey.length === 0 || targetContextKey === currentContextKey)
-                                )
-                            )
-                        ) {{
-                            try {{
-                                return Promise.resolve(
-                                    invokeToolPkgIpcLocal(normalizedChannel, payload, {{
-                                        channel: normalizedChannel,
-                                        callerContextKey: currentContextKey,
-                                        currentContextKey: currentContextKey,
-                                        currentRuntime: currentRuntime,
-                                        packageTarget: packageTarget
-                                    }})
-                                );
-                            }} catch (error) {{
-                                return Promise.reject(error);
-                            }}
-                        }}
-                        if (
-                            targetContextKey.length > 0 &&
-                            targetContextKey === currentContextKey &&
-                            targetRuntime.length > 0 &&
-                            targetRuntime !== currentRuntime
-                        ) {{
-                            return Promise.reject(
-                                new Error(
-                                    'ToolPkg.ipc targetRuntime does not match current runtime: ' +
-                                        targetRuntime +
-                                        ' != ' +
-                                        currentRuntime
-                                )
-                            );
-                        }}
-                        if (targetContextKey.length > 0 && targetContextKey === currentContextKey) {{
-                            try {{
-                                return Promise.resolve(
-                                    invokeToolPkgIpcLocal(normalizedChannel, payload, {{
-                                        channel: normalizedChannel,
-                                        callerContextKey: currentContextKey,
-                                        currentContextKey: currentContextKey,
-                                        currentRuntime: currentRuntime,
-                                        packageTarget: packageTarget
-                                    }})
-                                );
-                            }} catch (error) {{
-                                return Promise.reject(error);
-                            }}
-                        }}
-                        if (!packageTarget) {{
-                            return Promise.reject(new Error('ToolPkg.ipc requires a bound package target'));
-                        }}
-                        var ownerCallId = String(globalThis.__operitCurrentCallId);
-                        return new Promise(function(resolve, reject) {{
-                            __operitRetainCallReference(ownerCallId);
-                            /** Releases this request only after the public continuation runs. */
-                            function releaseReference() {{
-                                Promise.resolve().then(function() {{
-                                    __operitReleaseCallReference(ownerCallId);
-                                }});
-                            }}
-                            try {{
-                                __operitNativeInvokeToolPkgIpc(
-                                    ownerCallId, packageTarget, currentContextKey,
-                                    targetContextKey, targetRuntime, normalizedChannel,
-                                    payload === undefined ? null : payload
-                                ).then(function(response) {{
-                                    try {{
-                                        __operitActivateCall(ownerCallId);
-                                        if (!response || typeof response !== 'object' || typeof response.success !== 'boolean') {{
-                                            throw new TypeError('IPC host returned an invalid result envelope');
-                                        }}
-                                        if (!response.success) throw new Error(response.message);
-                                        resolve(response.value);
-                                    }} catch (error) {{
-                                        reject(error);
-                                    }} finally {{
-                                        releaseReference();
-                                    }}
-                                }}, function(error) {{
-                                    try {{
-                                        __operitActivateCall(ownerCallId);
-                                        reject(error);
-                                    }} catch (activationError) {{
-                                        reject(activationError);
-                                    }} finally {{
-                                        releaseReference();
-                                    }}
-                                }});
-                            }} catch (error) {{
-                                reject(error);
-                                releaseReference();
-                            }}
-                        }});
-                    }};
-
-                    toolPkgApi.ipc = ipcApi;
-                    globalThis.__operitInvokeToolPkgIpcLocal = invokeToolPkgIpcLocal;
-                }}
-
                 function ensureToolPkgWasmApi() {{
                     var toolPkgApi = globalThis.ToolPkg && typeof globalThis.ToolPkg === 'object'
                         ? globalThis.ToolPkg
@@ -1179,7 +854,6 @@ fn assembleRuntimeBootstrapScript() -> String {
                     toolPkgApi.wasm = wasmApi;
                 }}
 
-                ensureToolPkgIpcApi();
                 __operitInstallToolPkgRouteApi();
                 if (!registrationMode) {{
                     ensureToolPkgWasmApi();
@@ -1193,7 +867,7 @@ fn assembleRuntimeBootstrapScript() -> String {
                 var moduleCache = registrationMode ? {{}} : __operitGetModuleInstanceCache();
                 var mainModuleKey = ['instance', 'main', packageTarget + ':' + screenPath, sourceId, 'compose=' + structuredResult].join(':');
                 var module = moduleCache[mainModuleKey];
-                var exports = module && module.exports ? module.exports : null;
+                var exports = module ? module.exports : null;
                 /** Reads CommonJS candidates from the execution resource owner and preserves empty modules. */
                 function readToolPkgModule(modulePath) {{
                     if (!packageTarget) {{
@@ -1230,25 +904,16 @@ fn assembleRuntimeBootstrapScript() -> String {
                     }};
                     var factory = __operitGetFactory('module', packageTarget + ':' + modulePath, moduleText, structuredResult);
                     var previousActiveModule = globalThis.__operitActiveModule;
-                    var previousActiveExports = globalThis.__operitActiveModuleExports;
-                    var previousModule = callState.currentModule;
-                    var previousExports = callState.currentModuleExports;
                     globalThis.__operitActiveModule = requiredModule;
-                    globalThis.__operitActiveModuleExports = requiredModule.exports;
-                    callState.currentModule = requiredModule;
-                    callState.currentModuleExports = requiredModule.exports;
                     try {{
                         factory(requiredModule, requiredModule.exports, localRequire, callRuntime);
                     }} catch (error) {{
                         delete moduleCache[moduleKey];
                         throw error;
                     }} finally {{
-                        callState.currentModule = previousModule;
-                        callState.currentModuleExports = previousExports;
                         globalThis.__operitActiveModule = previousActiveModule;
-                        globalThis.__operitActiveModuleExports = previousActiveExports;
                     }}
-                    __operitTagModuleExports(modulePath, requiredModule.exports);
+                    OperitToolPkgExports.tag(modulePath, requiredModule.exports);
                     return requiredModule.exports;
                 }}
                 function requireInternal(moduleName, fromPath) {{
@@ -1285,7 +950,7 @@ fn assembleRuntimeBootstrapScript() -> String {
                     markRequire(request, fromPath || screenPath || '<root>', resolvedPath);
                     markModule(resolvedPath);
                     if (registrationMode && __operitIsLocalUiModulePath(resolvedPath)) {{
-                        return __operitCreateRegistrationScreenPlaceholder(resolvedPath);
+                        return OperitToolPkgExports.placeholder(resolvedPath);
                     }}
                     var loaded = readToolPkgModule(resolvedPath);
                     if (!loaded) {{
@@ -1307,33 +972,20 @@ fn assembleRuntimeBootstrapScript() -> String {
                     var mainFactory = __operitGetFactory('main', packageTarget + ':' + screenPath + ':' + sourceId, scriptText, structuredResult);
                     markStage('execute_main_script');
                     var previousActiveModule = globalThis.__operitActiveModule;
-                    var previousActiveExports = globalThis.__operitActiveModuleExports;
-                    var previousModule = callState.currentModule;
-                    var previousExports = callState.currentModuleExports;
                     globalThis.__operitActiveModule = module;
-                    globalThis.__operitActiveModuleExports = exports;
-                    callState.currentModule = module;
-                    callState.currentModuleExports = exports;
                     try {{
                         mainFactory(module, exports, require, callRuntime);
                     }} catch (error) {{
                         delete moduleCache[mainModuleKey];
                         throw error;
                     }} finally {{
-                        callState.currentModule = previousModule;
-                        callState.currentModuleExports = previousExports;
                         globalThis.__operitActiveModule = previousActiveModule;
-                        globalThis.__operitActiveModuleExports = previousActiveExports;
                     }}
                 }} else {{
-                    if (exports == null) {{
-                        exports = {{}};
-                        module.exports = exports;
-                    }}
                     markStage('reuse_main_script');
                 }}
-                var rootExports = module.exports || exports || {{}};
-                __operitTagModuleExports(screenPath || '<root>', rootExports);
+                var rootExports = module.exports;
+                OperitToolPkgExports.tag(screenPath || '<root>', rootExports);
 
                 var inlineFunctionName = readCallValue('__operit_inline_function_name', '');
                 var inlineFunctionSource = readCallValue('__operit_inline_function_source', '');
@@ -1344,36 +996,26 @@ fn assembleRuntimeBootstrapScript() -> String {
                         throw new Error('inline hook source did not evaluate to function');
                     }}
                     rootExports[inlineFunctionName] = inlineFunction;
-                    module.exports[inlineFunctionName] = inlineFunction;
                 }}
 
-                var targetFunction = __operitFindTargetFunction(rootExports, module, targetFunctionName);
+                var targetFunction = OperitToolPkgExports.get(rootExports, targetFunctionName);
                 if (typeof targetFunction !== 'function') {{
                     emitError(
                         "Function '" +
                             targetFunctionName +
                             "' not found in script. Available functions: " +
-                            __operitBuildAvailableFunctions(rootExports, module).join(', ')
+                            OperitToolPkgExports.names(rootExports).join(', ')
                     );
                     return;
                 }}
                 markStage('invoke_target_function');
                 var invokePreviousActiveModule = globalThis.__operitActiveModule;
-                var invokePreviousActiveExports = globalThis.__operitActiveModuleExports;
-                var previousModule = callState.currentModule;
-                var previousExports = callState.currentModuleExports;
                 globalThis.__operitActiveModule = module;
-                globalThis.__operitActiveModuleExports = rootExports;
-                callState.currentModule = module;
-                callState.currentModuleExports = rootExports;
                 var functionResult;
                 try {{
                     functionResult = targetFunction(params);
                 }} finally {{
-                    callState.currentModule = previousModule;
-                    callState.currentModuleExports = previousExports;
                     globalThis.__operitActiveModule = invokePreviousActiveModule;
-                    globalThis.__operitActiveModuleExports = invokePreviousActiveExports;
                 }}
                 markStage('handle_function_result');
                 // A nested call may have left the shared cursor on its own id; handleAsync
@@ -1404,6 +1046,7 @@ fn assembleRuntimeBootstrapScript() -> String {
         {}
         {}
         {}
+        {}
         "#,
         JsInitRuntimeScriptBuilder::buildRuntimeBootstrapScript(),
         cleanOnExitDirJson,
@@ -1412,13 +1055,14 @@ fn assembleRuntimeBootstrapScript() -> String {
         buildJavaClassBridgeDefinition(),
         buildComposeDslContextBridgeDefinition(),
         buildToolPkgApiRuntimeScript(),
+        include_str!("JsToolPkgIpc.script.js"),
         buildToolPkgRegistrationBridgeScript(false),
         getJsToolsDefinition(),
         getJsThirdPartyLibraries(),
         loadPluginConfigJs(),
         loadRuntimeContextJs(),
         buildLazyLibraryBootstrapScript(),
-        format!("{}\n{}", include_str!("../../../sdk/src/js_sdk/toolpkg_route_runtime.js"),
+        format!("{}\n{}\n__operitInstallV1Runtime(globalThis);", include_str!("../../../sdk/src/js_sdk/toolpkg_route_runtime.js"),
             JsExecutionScriptBuilder::buildExecutionRuntimeBridgeScript())
     )
 }

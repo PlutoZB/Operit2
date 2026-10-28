@@ -141,9 +141,10 @@ async fn goal_route(
     .unwrap()
 }
 
-/// Exercises actual destination execution, Core stream capture, and collector cleanup.
+/// Opens a captured stream through another service view of the same Core tree.
 async fn verify_decorated_goal_routes(
     router: &operit_node_runtime::CoreNodeRouter::CoreNodeRouter,
+    watch_router: &operit_node_runtime::CoreNodeRouter::CoreNodeRouter,
     chat: &str,
 ) {
     operit_store::CoreNodeBindingStore::CoreNodeBindingStore::default()
@@ -173,7 +174,7 @@ async fn verify_decorated_goal_routes(
         .descriptor;
     let args=operit_rslink_runtime::core_route_embedded_stream_open_args(descriptor.args,"call","watchToolPkgRoute".into(),
         operit_link::toCoreValue(json!({"bindingKey":chat,"packageName":MODES[1],"methodName":"GoalService.watch","arguments":[chat]})).unwrap()).unwrap();
-    let mut stream = router
+    let mut stream = watch_router
         .watchSpace(operit_link::CoreWatchRequest::new(
             "plugin-goal-watch",
             descriptor.target,
@@ -372,7 +373,10 @@ async fn space_modes_survive_plugin_reload_without_workspace_state() {
                 "built-in modes must load: {:?}",
                 snapshot().getToolPkgLoadIssues()
             );
-            verify_decorated_goal_routes(&router, &chat_id).await;
+            let watch_router = operit_node_runtime::CoreNodeRouter::CoreNodeRouter::new(
+                proxy.coreNodeLocalRuntime(),
+            );
+            verify_decorated_goal_routes(&router, &watch_router, &chat_id).await;
             verify_decorated_reverse_stream(&router, &chat_id).await;
             assert_mode_state(&snapshot(), &chat_id, false).await;
 

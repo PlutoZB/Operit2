@@ -1,6 +1,6 @@
 import type {
-  Card, ConversationGroupRecord, Group, GroupValues, Memory, MemoryGraph, MemorySearchConfig,
-  MemorySearchOptions, MemorySettings, MemoryChatMessage, MemoryValues, Tag, TagValues, ToolAccessConfig,
+  ConversationGroupRecord, Group, GroupValues, Memory, MemoryGraph, MemorySearchConfig,
+  MemorySearchOptions, MemorySettings, MemoryChatMessage, MemoryValues, Tag, TagValues,
 } from "./model";
 
 /** Requires an object before inspecting untrusted UI, import, or host data. */
@@ -97,32 +97,6 @@ export function assertConversationGroups(value: unknown): asserts value is Conve
     assertConversationGroup(group);
     const count = scopeCounts.get(group.ownerSelection);
     if (count === undefined || group.displayOrder >= count) throw new Error("Conversation group order must be a complete zero-based scoped sequence");
-  }
-}
-
-/** Validates every tool policy field before a complete character write. */
-export function assertToolAccess(value: unknown): asserts value is ToolAccessConfig {
-  assertObject(value, "工具访问配置");
-  assertBoolean(value.enabled, "工具访问开关");
-  for (const field of ["allowedBuiltinTools", "allowedPackages", "allowedSkills", "allowedMcpServers"] as const) assertStrings(value[field], field);
-}
-
-/** Validates each complete plugin character field, including the required nullable independent theme reference. */
-export function assertCard(value: unknown): asserts value is Card {
-  assertObject(value, "角色卡");
-  for (const field of ["id", "name", "description", "characterSetting", "openingStatement", "otherContentChat", "otherContentVoice", "advancedCustomPrompt", "marks", "chatModelBindingMode", "memoryBindingMode"] as const) assertString(value[field], field);
-  for (const field of ["avatarUri", "chatProviderId", "chatModelId", "ttsConfigId", "themeConfigId", "sharedMemoryId"] as const) assertNullableString(value[field], field);
-  if (value.themeConfigId !== null) requireId(value.themeConfigId, "角色主题配置");
-  assertStrings(value.attachedTagIds, "角色标签");
-  assertInteger(value.createdAt, "角色创建时间", 0);
-  assertInteger(value.updatedAt, "角色修改时间", 0);
-  assertToolAccess(value.toolAccessConfig);
-  if (!Array.isArray(value.sharedMemoryMounts)) throw new Error("共享记忆挂载必须是数组");
-  for (const mount of value.sharedMemoryMounts) {
-    assertObject(mount, "共享记忆挂载");
-    requireId(mount.sharedMemoryId, "共享记忆挂载标识");
-    assertBoolean(mount.readable, "共享记忆读取开关");
-    assertBoolean(mount.writable, "共享记忆写入开关");
   }
 }
 
@@ -242,6 +216,8 @@ function assertMetadata(value: unknown): asserts value is Record<string, string>
 /** Validates explicit search filters before passing them to the scoped repository. */
 export function assertSearchOptions(value: unknown): asserts value is MemorySearchOptions {
   assertObject(value, "记忆搜索参数");
+  if (value.limit !== undefined) { assertInteger(value.limit, "search limit", 1); if (value.limit > 1000) throw new Error("Memory search limit exceeds 1000"); }
+  if (value.excludeIds !== undefined) assertStrings(value.excludeIds, "excluded memory ids");
   assertString(value.ownerKey, "记忆库标识");
   assertString(value.query, "搜索文本");
   assertNullableString(value.folderPath, "搜索文件夹");

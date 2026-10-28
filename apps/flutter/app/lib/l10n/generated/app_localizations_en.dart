@@ -915,7 +915,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsCategoryLocalModelsSubtitle =>
-      'Downloads, engines, STT / TTS';
+      'LLMs, downloads, STT / TTS';
 
   @override
   String get settingsCategoryLocalModelsDescription =>
@@ -1411,9 +1411,6 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsModelProviderTypeSiliconflow => 'SiliconFlow';
-
-  @override
-  String get settingsModelProviderTypeIflow => 'iFlow';
 
   @override
   String get settingsModelProviderTypeOpenrouter => 'OpenRouter';
@@ -2860,6 +2857,11 @@ class AppLocalizationsEn extends AppLocalizations {
       'Bubble preview with 9-slice guides';
 
   @override
+  String settingsAppearanceBubbleImageImportFailed(String error) {
+    return 'Bubble image was not applied: $error';
+  }
+
+  @override
   String get settingsAppearanceBubbleImageCrop => 'Crop';
 
   @override
@@ -3838,13 +3840,13 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsPeerPortModeHelp =>
-      'Fixed mode keeps the entered IP and port for tunnels and port forwarding. A busy fixed port reports an error without changing the address.';
+      'By default, the system assigns an available port and LAN discovery advertises it. Fixed mode uses the entered listen address and port and reports an error if the port is busy.';
 
   @override
   String get settingsPeerPortMode => 'Port allocation';
 
   @override
-  String get settingsPeerPortModeFixed => 'Fixed address and port';
+  String get settingsPeerPortModeFixed => 'Fixed listen address and port';
 
   @override
   String get settingsPeerPortModeAutomatic => 'Automatic port';
@@ -3881,7 +3883,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsPeerBindPortAutomaticHelp =>
-      'Automatic mode selects a free port starting from this value.';
+      'The system assigns an available port. The actual port appears after startup.';
 
   @override
   String get settingsPeerDiscoveryNeedsTransport =>
@@ -4038,6 +4040,19 @@ class AppLocalizationsEn extends AppLocalizations {
       'This device is already a Space member. Pairing it adds a direct link without joining again; pairing shows a six-digit code on the other device for you to enter.';
 
   @override
+  String get deviceSpaceUpdateEndpoint => 'Update direct address';
+
+  @override
+  String get deviceSpaceUpdateEndpointLabel => 'Direct address';
+
+  @override
+  String get deviceSpaceUpdateEndpointHint =>
+      'For example ws://192.168.1.20:37195/link';
+
+  @override
+  String get deviceSpaceUpdateEndpointSaved => 'Direct address updated';
+
+  @override
   String deviceSpaceDirectLinkEstablished(String device) {
     return 'Direct link established: $device';
   }
@@ -4189,4 +4204,174 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsAppearanceResetAfterError => 'Reset appearance';
+
+  @override
+  String get backgroundWorkIdle => 'No work is running';
+
+  @override
+  String get backgroundWorkRunningCount => 'work items running';
+
+  @override
+  String get backgroundWorkWaiting => 'Waiting for your confirmation';
+
+  @override
+  String get backgroundWorkWaitingCount => 'awaiting confirmation';
+
+  @override
+  String get backgroundWorkCompleted => 'Completed';
+
+  @override
+  String get backgroundWorkFailed => 'Failed — open to view details';
+
+  @override
+  String get backgroundWorkCancelled => 'Stopped';
+
+  @override
+  String get backgroundWorkProcessing => 'Preparing';
+
+  @override
+  String get backgroundWorkConnecting => 'Connecting';
+
+  @override
+  String get backgroundWorkReceiving => 'Writing a response';
+
+  @override
+  String get backgroundWorkTool => 'Running a tool';
+
+  @override
+  String get backgroundWorkToolResult => 'Processing tool results';
+
+  @override
+  String get backgroundWorkSummarizing => 'Organizing context';
+
+  @override
+  String get backgroundWorkPlan => 'Executing a plan';
+
+  @override
+  String get backgroundWorkOpen => 'View conversation';
+
+  @override
+  String get backgroundWorkReview => 'Review';
+
+  @override
+  String get backgroundWorkStop => 'Stop';
+
+  @override
+  String get localModelsDeviceOnly => 'Stored on this device';
+
+  @override
+  String get localModelsDeviceOnlyDescription =>
+      'Weights, download progress and installation records stay on this device and are excluded from Space sync. Chats can route inference to the device with the model.';
+
+  @override
+  String get localModelsRunChat => 'Run and configure';
+
+  @override
+  String get localModelsUseForChat => 'Use for chat';
+
+  @override
+  String get localModelsChatActivated => 'Selected as the chat model';
+
+  @override
+  String get localModelsPrompt => 'Enter a prompt';
+
+  @override
+  String get localModelsGenerate => 'Generate';
+
+  @override
+  String get localModelsGenerating => 'Generating…';
+
+  @override
+  String get localModelsThreads => 'CPU threads';
+
+  @override
+  String get localModelsContextSize => 'Context size (tokens)';
+
+  @override
+  String get localModelsBatchSize => 'Batch size';
+
+  @override
+  String get localModelsUnload => 'Unload model';
+
+  @override
+  String get localModelsCpuBackend => 'On-device CPU inference';
+
+  @override
+  String get localModelsLlmDescription =>
+      'Download a GGUF model for llama.cpp or an MNN model bundle. After installation, try it here or select it for chat.';
+
+  @override
+  String get localModelsInvalidSettings =>
+      'Check the thread count, context size and batch size.';
+
+  @override
+  String get localModelsFilterAll => 'All models';
+
+  @override
+  String get localModelsFilterInstalled => 'Installed only';
+
+  @override
+  String get localModelsSearchCatalog => 'Search by name or inference engine';
+
+  @override
+  String get deviceSpaceSyncPeer => 'a space device';
+
+  @override
+  String deviceSpaceSyncActive(String device) {
+    return 'Syncing with $device';
+  }
+
+  @override
+  String deviceSpaceSyncCompleted(String device) {
+    return 'Synced with $device';
+  }
+
+  @override
+  String get deviceSpaceSyncChecking => 'Checking for changes';
+
+  @override
+  String get deviceSpaceSyncRecords => 'Exchanging records';
+
+  @override
+  String get deviceSpaceSyncFiles => 'Transferring and verifying files';
+
+  @override
+  String get deviceSpaceSyncRetrying =>
+      'Sync interrupted. Retrying automatically.';
+
+  @override
+  String get deviceSpaceSyncPending =>
+      'Some data is still pending. Retrying automatically.';
+
+  @override
+  String deviceSpaceSyncCurrentFile(String done, String total) {
+    return 'Current file: $done / $total';
+  }
+
+  @override
+  String deviceSpaceSyncTransferred(int count, String bytes) {
+    return '$count records exchanged · $bytes transferred';
+  }
+
+  @override
+  String get deviceSpaceSyncBackground =>
+      'You can keep using the app while syncing continues.';
+
+  @override
+  String get runtimeActivityTitle => 'Background tasks';
+
+  @override
+  String get runtimeActivitySyncing => 'Syncing';
+
+  @override
+  String get runtimeActivitySyncCompleted => 'Sync complete';
+
+  @override
+  String get runtimeActivityWaiting => 'Waiting to retry';
+
+  @override
+  String get runtimeActivityExpand => 'Show background tasks';
+
+  @override
+  String get runtimeActivityLoadingPackages => 'Loading extensions';
 }

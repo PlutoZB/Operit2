@@ -150,6 +150,8 @@ enum MarkdownNodeType {
   underline,
   inlineLatex,
   htmlBreak,
+  footnoteReference,
+  footnoteDefinition,
 }
 
 class MarkdownNodeStable {
@@ -160,6 +162,8 @@ class MarkdownNodeStable {
     this.stableKey = '',
     this.children = const <MarkdownNodeStable>[],
     this.headerLevel,
+    this.sourcePrefix = '',
+    this.linkUrl,
     this.xmlTagName,
     this.xmlAttributes,
     this.xmlBody,
@@ -173,6 +177,8 @@ class MarkdownNodeStable {
   final String stableKey;
   final List<MarkdownNodeStable> children;
   final int? headerLevel;
+  final String sourcePrefix;
+  final String? linkUrl;
   final String? xmlTagName;
   final Map<String, String>? xmlAttributes;
   final String? xmlBody;
@@ -188,6 +194,8 @@ class MarkdownNodeStable {
             other.isStreaming == isStreaming &&
             other.stableKey == stableKey &&
             other.headerLevel == headerLevel &&
+            other.sourcePrefix == sourcePrefix &&
+            other.linkUrl == linkUrl &&
             other.xmlTagName == xmlTagName &&
             _mapEquals(other.xmlAttributes, xmlAttributes) &&
             other.xmlBody == xmlBody &&
@@ -204,6 +212,8 @@ class MarkdownNodeStable {
       isStreaming,
       stableKey,
       headerLevel,
+      sourcePrefix,
+      linkUrl,
       xmlTagName,
       xmlAttributes == null ? null : Object.hashAll(xmlAttributes!.entries),
       xmlBody,

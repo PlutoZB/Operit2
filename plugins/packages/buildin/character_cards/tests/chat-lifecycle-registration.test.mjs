@@ -1,3 +1,4 @@
+import { readSdkScript } from "../../../../../tools/runtime/compose_scripts.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -14,11 +15,7 @@ function source(relative) { return readFileSync(path.join(root, relative), "utf8
 
 /** Loads the existing Rust-owned registration JavaScript, not an emulated hook registration implementation. */
 function embedded(file, name) {
-  const text = source(sdk + "toolpkg/" + file), signature = "pub fn " + name + "(";
-  assert.equal(text.split(signature).length, 2);
-  const start = text.indexOf('r#"', text.indexOf(signature)), end = text.indexOf('"#', start + 3);
-  assert.ok(start >= 0 && end > start, "The production registration script must really exist");
-  return text.slice(start + 3, end);
+  return readSdkScript(file, name);
 }
 
 /** Creates only an authenticated registration realm; no business provider, chat store or native runtime is implemented. */
@@ -76,7 +73,7 @@ test("real lifecycle registration serializes module-backed exports and missing e
   assert.match(hooks[0].function, /^__operit_module_ref_hook_creation_[0-9]+$/);
   assert.equal(typeof hooks[0].function_source, "string");
   let received;
-  const handler = vm.runInNewContext("(" + hooks[0].function_source + ")", {
+  const handler = vm.runInNewContext(readSdkScript("ModuleExports.js") + "\n(" + hooks[0].function_source + ")", {
     /** Supplies only the exact exported module function input for testing the real SDK-generated durable wrapper. */
     require(module) {
       assert.equal(module, "./hooks/creation.js");
@@ -88,14 +85,14 @@ test("real lifecycle registration serializes module-backed exports and missing e
   });
   const event = { eventName: "before_create", eventPayload: { chat: { id: "allocated-draft" } } };
   assert.equal(handler(event), event); assert.equal(received, event);
-  const missing = vm.runInNewContext("(" + hooks[0].function_source + ")", {
+  const missing = vm.runInNewContext(readSdkScript("ModuleExports.js") + "\n(" + hooks[0].function_source + ")", {
     /** Tests a genuinely absent declared export rather than supplying a successful fallback function. */
     require(module) { assert.equal(module, "./hooks/creation.js"); return {}; },
   });
   assert.throws(
     /** Requires execution of the actual module wrapper to reject an absent export. */
     () => missing(event),
-    /ToolPkg registered function export not found: initialize/,
+    /ToolPkg module export is not a function: initialize/,
   );
 });
 
@@ -146,8 +143,8 @@ test("lifecycle Rust registration pipeline preserves capture and runtime handler
 test("lifecycle bridge awaits a real ready catalog snapshot and app installs the current runtime explicitly", () => {
   const bridge = source(bridgePath), snapshot = rustFunction(bridge, "snapshot"), register = rustFunction(bridge, "register");
   assert.match(snapshot, /pub async fn snapshot\(\) -> Result<ToolPkgChatLifecycleDispatchContext, String>/);
-  assert.match(snapshot, /RuntimePackageManager::readySnapshot\(runtime\.tool_handler\(\)\.getOrCreatePackageManager\(\)\)\.await\?/);
-  assert.match(snapshot, /let runtime = \{[\s\S]*?current\.as_ref\(\)\.cloned\(\)\.ok_or_else[\s\S]*?\};\s*let manager = RuntimePackageManager::readySnapshot/);
+  assert.match(snapshot, /RuntimePackageManager::readySnapshot\(\s*runtime\.tool_handler\(\)\.getOrCreatePackageManager\(\),?\s*\)\s*\.await\?/);
+  assert.match(snapshot, /let runtime = \{[\s\S]*?current\s*\.as_ref\(\)\s*\.cloned\(\)\s*\.ok_or_else[\s\S]*?\};\s*let manager = RuntimePackageManager::readySnapshot/);
   assert.match(register, /\*current = Some\(runtime\)/);
   assert.doesNotMatch(register, /get_or_init|\.set\(/);
   assert.match(bridge, /pub fn packageManager\(&self\) -> &RuntimePackageManager/);
@@ -160,11 +157,12 @@ test("lifecycle bridge awaits a real ready catalog snapshot and app installs the
 test("lifecycle dispatch strictly awaits the own handler and validates draft before the no-participant result", () => {
   const bridge = source(bridgePath), dispatch = rustFunction(bridge, "dispatchBeforeCreate");
   assert.ok(dispatch.indexOf("validateCreationDraft(draft)?") < dispatch.indexOf("context.hooks.is_empty()"));
-  assert.match(dispatch, /runToolPkgMainHookWithTimeoutMillis\([\s\S]*?TOOLPKG_EVENT_CHAT_LIFECYCLE,[\s\S]*?Some\(CHAT_LIFECYCLE_BEFORE_CREATE\)[\s\S]*?\.await\.map_err\([\s\S]*?\)\?/);
-  assert.match(dispatch, /remainingTimeoutMillis\(\)[\s\S]*?\.ok_or_else[\s\S]*?\?/);
-  assert.match(dispatch, /if budget\.hasExpired\(\)[\s\S]*?return Err/);
+  assert.match(dispatch, /ToolPkgPreHookTimeout::runHook\(\s*Some\(&budget\),[\s\S]*?&context\.manager,[\s\S]*?TOOLPKG_EVENT_CHAT_LIFECYCLE,\s*CHAT_LIFECYCLE_BEFORE_CREATE,[\s\S]*?\)\s*\.await\?/);
+  const timeout = source("core/crates/runtime/application/src/plugins/toolpkg/ToolPkgPreHookTimeout.rs");
+  assert.match(rustFunction(timeout, "runHook"), /remainingForHook\([\s\S]*?\?;[\s\S]*?runToolPkgMainHookWithTimeoutMillis\([\s\S]*?\.await\?;[\s\S]*?if budget\.hasExpired\(\)[\s\S]*?return Err/);
+  assert.match(rustFunction(timeout, "remainingForHook"), /remainingTimeoutMillis\(\)\s*\.ok_or_else/);
   assert.match(dispatch, /parseCreationResult\(raw\)[\s\S]*?\.map_err[\s\S]*?\?/);
-  assert.match(dispatch, /extensions\.insert\(hook\.containerPackageName\.clone\(\), Value::Object\(value\)\)/);
+  assert.match(dispatch, /extensions\s*\.insert\(hook\.containerPackageName\.clone\(\), Value::Object\(value\)\)/);
   assert.doesNotMatch(dispatch, /decodeToolPkgHookResult|unwrap_or_default|get_or_init|ChatServiceCore|persist|saveChat|continue;/);
   assert.match(source(sdk + "toolpkg/ToolPkgCommonPluginConstants.rs"), /TOOLPKG_EVENT_CHAT_LIFECYCLE: &str = "toolpkg_chat_lifecycle"/);
 });
@@ -179,7 +177,7 @@ test("lifecycle source namespace and strict result decoder expose no sibling map
   assert.match(result, /raw\.ok_or_else/);
   assert.match(result, /let Value::Object\(mut result\) = parsed else[\s\S]*?return Err/);
   assert.match(result, /result\.len\(\) != 1[\s\S]*?return Err/);
-  assert.match(result, /result\.remove\("extension"\)\.ok_or_else/);
+  assert.match(result, /result\s*\.remove\("extension"\)\s*\.ok_or_else/);
   assert.match(result, /Value::Object\(value\) => Ok\(Some\(value\)\)/);
   assert.match(result, /Value::Null => Ok\(None\)/);
   assert.match(result, /_ => Err/);

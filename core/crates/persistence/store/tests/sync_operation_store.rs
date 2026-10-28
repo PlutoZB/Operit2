@@ -52,7 +52,7 @@ fn byte_budgets_bound_journal_pages_without_reordering() {
     assert_eq!(all.len(), 6);
     let budget = 64 * 1024;
     let page = store
-        .operationsSinceWithBudget(&SyncClock::empty(), &domains, 100, budget)
+        .operationsSinceWithBudget(&SyncClock::empty(), &domains, 100, budget, |_| true)
         .unwrap();
     assert!(!page.is_empty());
     assert!(page.len() < all.len(), "the byte budget must cut the page");

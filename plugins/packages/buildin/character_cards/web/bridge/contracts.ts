@@ -8,7 +8,7 @@ import type { GraphCamera, NodeSize, Point } from "../features/graph/layout";
 import type { ComposeFileSaveResult } from "../../../../../types/compose-dsl";
 
 /** Describes actual service results used by this finite editor bridge. */
-export type WebResponses = Pick<RequestResults, "listBindableChats" | "writeChatBinding" | "snapshot" | "writeGlobalMemoryPreference" | "searchMemoryDebug" | "readMemoryLink" | "exportMemory" | "importMemory" | "activate" | "saveStore" | "deleteStore" | "readUser" | "writeUser" | "graph" | "searchMemory" | "listMemories" | "listMemoryFolders" | "saveMemory" | "deleteMemory" | "createLink" | "deleteLink" | "updateLink" | "readMemorySettings" | "readMemorySearchConfig" | "writeMemorySettings" | "writeMemorySearchConfig" | "writeMemoryOwnerSettings" | "readMemoryAutoSaveStatus" | "listMemoryChats" | "startMemoryRebuild" | "readMemoryRebuildProgress" | "cancelMemoryRebuild" | "rebuildMemoryEmbeddings" | "updateChatMemory" | "autoCategorizeMemory" | "importCharacter" | "importGroup">;
+export type WebResponses = Pick<RequestResults, "listBindableChats" | "writeChatBinding" | "snapshot" | "writeGlobalMemoryPreference" | "searchMemoryDebug" | "readMemoryLink" | "exportMemory" | "importMemory" | "activate" | "saveStore" | "deleteStore" | "readUser" | "writeUser" | "graph" | "searchMemory" | "listMemories" | "listMemoryFolders" | "saveMemory" | "deleteMemory" | "createLink" | "deleteLink" | "updateLink" | "readMemorySettings" | "readMemorySearchConfig" | "writeMemorySettings" | "writeMemorySearchConfig" | "writeMemoryOwnerSettings" | "readMemoryAutoSaveStatus" | "listMemoryChats" | "pruneMissingChatBindings" | "startMemoryRebuild" | "readMemoryRebuildProgress" | "cancelMemoryRebuild" | "rebuildMemoryEmbeddings" | "updateChatMemory" | "autoCategorizeMemory" | "retryFailedCandidates" | "clearFailedCandidates" | "importCharacter" | "importGroup">;
 export type WebAction = keyof WebResponses;
 export type WebRequest<A extends WebAction> = Extract<Request, { action: A }>;
 
@@ -42,9 +42,9 @@ export interface StoreDialog extends DialogState { type: "store"; store: StoreVa
 export interface OwnerSettingsDialog extends DialogState {
   type: "owner-settings"; ownerKey: string; name: string; tab: number;
   loading: boolean; settings: MemorySettings | null; config: MemorySearchConfig | null;
-  chats: MemoryChat[] | null; queue: MemoryAutoSaveStatus | null; progress: MemoryRebuildProgress | null;
+  chats: MemoryChat[] | null; missingChatIds: string[]; queue: MemoryAutoSaveStatus | null; progress: MemoryRebuildProgress | null;
   searchQuery: string; searchThreshold: number; searchResult: import("../../src/model").MemorySearchDebug | null;
-  statusError: string; selectedChatIds: string[]; windowMessageCount: number; from: string; to: string;
+  statusError: string; selectedChatIds: string[]; windowMessageCount: number; from: string; to: string; pendingClearFailed: boolean;
 }
 export interface UserDialog extends DialogState {
   type: "user"; ownerKey: string; name: string; content: string; loading: boolean; loaded: boolean;

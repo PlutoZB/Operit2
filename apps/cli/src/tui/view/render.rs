@@ -1650,11 +1650,7 @@ impl OperitTui {
                     item_for_row.push(items.len());
                     items.push(ListItem::new(vec![self.hub_member_line(hub, device)]));
                 }
-                NetworkHubRow::Peer {
-                    deviceId,
-                    label,
-                    outbound,
-                } => {
+                NetworkHubRow::Peer { deviceId, label } => {
                     if !peers_header_drawn {
                         peers_header_drawn = true;
                         items.push(ListItem::new(section_header_line(
@@ -1662,11 +1658,7 @@ impl OperitTui {
                         )));
                     }
                     item_for_row.push(items.len());
-                    let hint = if *outbound {
-                        text.network_hub_peer_joinable()
-                    } else {
-                        text.network_hub_peer_inbound_only()
-                    };
+                    let hint = text.network_hub_peer_joinable();
                     items.push(ListItem::new(Line::from(vec![
                         Span::raw("  "),
                         Span::styled(label.clone(), Style::default().add_modifier(Modifier::BOLD)),

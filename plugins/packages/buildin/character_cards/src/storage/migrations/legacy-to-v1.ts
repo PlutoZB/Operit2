@@ -4,12 +4,14 @@ import type { CharacterStorage } from "../preferences";
 import { configurationNames, recordPrefix } from "../preferences";
 import type { ObjectMutation } from "../memory";
 import type { StoredRecord } from "../records";
+import type { CharacterState } from "../../model";
 type RecordChange = { collection: string; key: string; expectedValue: Storage.Value | null } &
   ({ op: "put"; value: Storage.Value } | { op: "delete" });
 import { uuid } from "../../identity";
+import { parseChatSelection } from "../../chat-bindings";
 import { assertInteger, assertObject, requireId } from "../../validation";
-import { clone, equal, records, stateFromRecords, storedValue } from "../records";
-import { assertCharacterState, userDocumentPath } from "../state";
+import { clone, decodeStateFromRecords, equal, records, storedValue } from "../records";
+import { userDocumentPath } from "../state";
 
 type Document = Record<string, Storage.Value>;
 type AuthorTarget = Extract<Chat.ExtensionTarget, { kind: "message" }>;
@@ -71,7 +73,9 @@ function absolute(directory: string, relative: string): string {
 
 /** Enumerates exact source files before persisting any migration work. */
 async function ownerFiles(directory: string, source: string, destination: string): Promise<FileChange[]> {
-  const listing = await Tools.Files.list(absolute(directory, source));
+  const path = absolute(directory, source);
+  if (!(await Tools.Files.exists(path)).exists) return [];
+  const listing = await Tools.Files.list(path);
   const result: FileChange[] = [];
   for (const entry of listing.entries) {
     if (entry.name === "." || entry.name === ".." || /[/\\:\u0000-\u001f]/u.test(entry.name))
@@ -83,6 +87,24 @@ async function ownerFiles(directory: string, source: string, destination: string
   return result;
 }
 
+/** Removes released list references whose targets no longer exist while retaining explicit primary choices. */
+function removeDeletedReferences(state: CharacterState): void {
+  const tags = new Set(state.tags.map(tag => tag.id));
+  const stores = new Set(state.stores.map(store => store.id));
+  const cards = new Set(state.cards.map(card => card.id));
+  for (const card of state.cards) {
+    card.attachedTagIds = card.attachedTagIds.filter(id => tags.has(id));
+    card.sharedMemoryMounts = card.sharedMemoryMounts.filter(mount => stores.has(mount.sharedMemoryId));
+  }
+  for (const group of state.groups) group.members = group.members.filter(member => cards.has(member.characterCardId));
+  for (const owner of state.owners) {
+    const memories = new Set(owner.memories.map(memory => memory.id));
+    const documents = new Set(owner.memories.filter(memory => memory.isDocumentNode).map(memory => memory.uuid));
+    owner.links = owner.links.filter(link => memories.has(link.sourceMemoryId) && memories.has(link.targetMemoryId));
+    owner.chunks = owner.chunks.filter(chunk => documents.has(chunk.memoryUuid));
+  }
+}
+
 /** Plans the plugin-owned released Core identities and their explicit references exactly once. */
 async function prepareVersionOne(storage: CharacterStorage, metadata: Document, directory: string): Promise<MigrationPlan> {
   const rows = await migrationRecords(storage);
@@ -90,8 +112,10 @@ async function prepareVersionOne(storage: CharacterStorage, metadata: Document, 
   for (const row of input) {
     if (row.collection === "cards") { assertObject(row.value, "legacy card"); delete row.value.isDefault; }
   }
-  const inputMetadata: Document = { ...metadata, version: 1 }; delete inputMetadata.legacyImportPending;
-  const state = stateFromRecords(inputMetadata, input);
+  const inputMetadata: Document = { ...clone(metadata), version: 1 }; delete inputMetadata.legacyImportPending;
+  // The released records have the same fields; repair their references before normal business reads.
+  const state = decodeStateFromRecords(inputMetadata, input) as unknown as CharacterState;
+  removeDeletedReferences(state);
   const before = records(state), identities: Record<string, string> = {};
   /** Allocates a UUID in an explicit domain scope while preserving existing UUIDs. */
   function identity(scope: string, value: string): string {
@@ -106,26 +130,32 @@ async function prepareVersionOne(storage: CharacterStorage, metadata: Document, 
     if (!Object.prototype.hasOwnProperty.call(identities, key)) throw new Error("Missing migration reference: " + key);
     return identities[key];
   }
+  const sourceStoreIds = new Set(state.stores.map(store => store.id));
+  const sourceCardIds = new Set(state.cards.map(card => card.id));
+  const sourceGroupIds = new Set(state.groups.map(group => group.id));
   for (const collection of configurationNames)
     for (const record of state[collection]) record.id = identity(collection, record.id);
-  /** Converts the documented selection variants without modifying Core model identities. */
+  /** Converts surviving role identities while preserving explicit selections of deleted roles. */
   function selection(value: string): string {
-    if (value === "model:chat") return value;
-    if (value.startsWith("card:")) return "card:" + reference("cards", value.slice(5));
-    if (value.startsWith("group:")) return "group:" + reference("groups", value.slice(6));
-    throw new Error("Invalid migration selection: " + value);
+    const parsed = parseChatSelection(value);
+    if (parsed.kind === "card" && sourceCardIds.has(parsed.id)) value = "card:" + reference("cards", parsed.id);
+    if (parsed.kind === "group" && sourceGroupIds.has(parsed.id)) value = "group:" + reference("groups", parsed.id);
+    return value;
   }
   for (const card of state.cards) {
     card.attachedTagIds = card.attachedTagIds.map(id => reference("tags", id));
-    if (card.sharedMemoryId !== null) card.sharedMemoryId = reference("stores", card.sharedMemoryId);
+    // Convert identities of imported libraries while retaining unresolved primary selections exactly.
+    if (card.sharedMemoryId !== null && sourceStoreIds.has(card.sharedMemoryId)) card.sharedMemoryId = reference("stores", card.sharedMemoryId);
     for (const mount of card.sharedMemoryMounts) mount.sharedMemoryId = reference("stores", mount.sharedMemoryId);
   }
   for (const group of state.groups)
     for (const member of group.members) member.characterCardId = reference("cards", member.characterCardId);
-  for (const group of state.conversationGroups)
-    if (group.ownerSelection !== null) group.ownerSelection = selection(group.ownerSelection);
-  if ("CharacterCard" in state.active) state.active.CharacterCard.id = reference("cards", state.active.CharacterCard.id);
-  if ("CharacterGroup" in state.active) state.active.CharacterGroup.id = reference("groups", state.active.CharacterGroup.id);
+  for (const group of state.conversationGroups) {
+    // Archived groups also carry opaque host section tokens that are not plugin role identities.
+    if (group.ownerSelection !== null && /^(card|group):/u.test(group.ownerSelection)) group.ownerSelection = selection(group.ownerSelection);
+  }
+  if ("CharacterCard" in state.active && sourceCardIds.has(state.active.CharacterCard.id)) state.active.CharacterCard.id = reference("cards", state.active.CharacterCard.id);
+  if ("CharacterGroup" in state.active && sourceGroupIds.has(state.active.CharacterGroup.id)) state.active.CharacterGroup.id = reference("groups", state.active.CharacterGroup.id);
   const directories: FileChange[] = [];
   for (const owner of state.owners) {
     const old = owner.ownerKey;
@@ -149,16 +179,25 @@ async function prepareVersionOne(storage: CharacterStorage, metadata: Document, 
     for (const chunk of owner.chunks) chunk.memoryUuid = reference(scope + "/memoryUuid", chunk.memoryUuid);
     if (owner.rebuildTask !== null) owner.rebuildTask.id = identity(scope + "/rebuildTask", owner.rebuildTask.id);
   }
+  // Core imports absolute Files API paths; existing plugin documents can use owner-relative paths.
+  const resourceMoves: FileChange[] = [];
+  for (const move of directories) {
+    resourceMoves.push(move, { source: absolute(directory, move.source), destination: absolute(directory, move.destination) });
+  }
   for (const owner of state.owners) for (const memory of owner.memories)
     for (const field of ["documentPath", "chunkIndexFilePath"] as const) {
       const path = memory[field];
       if (path === null) continue;
-      for (const move of directories) if (path.startsWith(move.source + "/")) {
+      const source = path.startsWith("owners/") ? absolute(directory, path) : path;
+      if (!(await Tools.Files.exists(source)).exists) {
+        memory[field] = null;
+        continue;
+      }
+      for (const move of resourceMoves) if (path.startsWith(move.source + "/")) {
         memory[field] = move.destination + path.slice(move.source.length);
         break;
       }
     }
-  assertCharacterState(state);
   const after = records(state), changes: RecordChange[][] = [];
   const original = new Map(rows.map(row => [JSON.stringify([row.collection, row.key]), row]));
   const targets = new Set<string>();
@@ -178,6 +217,9 @@ async function prepareVersionOne(storage: CharacterStorage, metadata: Document, 
       ]);
     }
   }
+  const retained = new Set(before.map(row => JSON.stringify([row.collection, row.key])));
+  for (const row of rows) if (!retained.has(JSON.stringify([row.collection, row.key])))
+    changes.push([{ op: "delete", collection: row.collection, key: row.key, expectedValue: row.value }]);
   for (const [key, originalValue] of (await storage.chats.data()).entries()) {
     const collection = key.startsWith("binding_") ? "chat_bindings" : key.startsWith("draft_") ? "chat_drafts" : null;
     if (collection === null) throw new Error("Unsupported chat preference during migration: " + key);
@@ -189,7 +231,6 @@ async function prepareVersionOne(storage: CharacterStorage, metadata: Document, 
   const files: FileChange[] = [];
   for (const move of directories) {
     const entries = await ownerFiles(directory, move.source, move.destination);
-    if (!entries.some(entry => entry.source === move.source + "/USER.md")) throw new Error("Missing source owner USER.md: " + move.source);
     files.push(...entries);
   }
   const authors: AuthorChange[] = [];
@@ -205,8 +246,8 @@ async function prepareVersionOne(storage: CharacterStorage, metadata: Document, 
         assertObject(extension, "legacy message author");
         if (Object.keys(extension).length !== 1) throw new Error("Invalid legacy message author");
         const participant = requireId(extension.participantId, "legacy participant id"), next = cardIds.get(participant);
-        if (next === undefined) throw new Error("Missing message author character: " + participant);
-        if (next !== participant) authors.push({ target, before: participant, after: next });
+        // A deleted historical author has no new identity; retain its original extension and display snapshot.
+        if (next !== undefined && next !== participant) authors.push({ target, before: participant, after: next });
       }
     }
   }
@@ -264,12 +305,16 @@ async function applyChanges(storage: CharacterStorage, changes: RecordChange[]):
   if (mutations.length !== 0) await storage.memory.commit(mutations);
 }
 
-/** Resumes the released-data import work while the native schema callback retains the metadata snapshot. */
-export async function migrateLegacyToV1(storage: CharacterStorage, preferences: Storage.MutablePreferences, directory: string, source: Document): Promise<void> {
-  const metadata = clone(source);
-  let plan: MigrationPlan;
+/** Resumes durable conversion work without holding a preferences edit across host calls. */
+export async function migrateCharacterStorage(storage: CharacterStorage, directory: string): Promise<void> {
+  const source = clone((await storage.metadata.data()).get<Document>("state"));
   const persisted = (await storage.migration.data()).get("plan");
-  if (persisted === undefined) plan = await prepareVersionOne(storage, metadata, directory);
+  if (persisted === undefined && (source === undefined || source.legacyImportPending !== true)) return;
+  assertObject(source, "character schema metadata");
+  if (source.migrationStatus === "writing") throw new Error("Character migration has not completed: legacy import is still writing");
+  if (source.version !== 1) throw new Error("Unsupported character schema version: " + source.version);
+  let plan: MigrationPlan;
+  if (persisted === undefined) plan = await prepareVersionOne(storage, clone(source), directory);
   else { assertMigrationPlan(persisted); plan = clone(persisted); }
   let previous: Storage.Value | undefined = persisted === undefined ? undefined : storedValue(persisted);
   /** Saves the exact work cursor in a separate native preference edit for interruption recovery. */
@@ -291,8 +336,15 @@ export async function migrateLegacyToV1(storage: CharacterStorage, preferences: 
             completed(await Tools.Files.mkdir(destination.slice(0, destination.lastIndexOf("/")), true));
             completed(await Tools.Files.copy(absolute(directory, file.source), destination, false));
           }
-          await verifyFile(directory, file);
+          else await verifyFile(directory, file);
           plan.cursor += 1; await publish();
+        }
+        for (const move of plan.directories) {
+          const document = absolute(directory, move.destination + "/USER.md");
+          if (!(await Tools.Files.exists(document)).exists) {
+            completed(await Tools.Files.mkdir(document.slice(0, document.lastIndexOf("/")), true));
+            completed(await Tools.Files.write(document, ""));
+          }
         }
         plan.phase = "authors"; plan.cursor = 0; await publish(); break;
       case "authors":
@@ -301,8 +353,6 @@ export async function migrateLegacyToV1(storage: CharacterStorage, preferences: 
           if (extension === null || Object.keys(extension).length !== 1 || (extension.participantId !== author.before && extension.participantId !== author.after))
             throw new Error("Message author changed during character migration");
           if (extension.participantId === author.before) await Tools.Chat.writeExtension(author.target, { participantId: author.after });
-          const written = await Tools.Chat.readExtension(author.target);
-          if (!equal(written.extension, { participantId: author.after })) throw new Error("Message author migration verification failed");
           plan.cursor += 1; await publish();
         }
         plan.phase = "records"; plan.cursor = 0; await publish(); break;
@@ -317,34 +367,33 @@ export async function migrateLegacyToV1(storage: CharacterStorage, preferences: 
           plan.cursor = cursor;
           await publish();
         }
-        plan.phase = "verify"; plan.cursor = 0; await publish(); break;
-      case "verify": {
-        const rows = await migrationRecords(storage);
-        const finalMetadata: Document = { ...metadata, version: 1, active: plan.active }; delete finalMetadata.legacyImportPending;
-        stateFromRecords(finalMetadata, rows);
-        for (const group of plan.changes) for (const change of group) {
-          let value: Storage.Value | undefined;
-          const name = configurationNames.find(name => name === change.collection);
-          if (name !== undefined) value = (await storage.configuration[name].data()).get(recordPrefix + change.key);
-          else if (change.collection === "chat_bindings" || change.collection === "chat_drafts") value = (await storage.chats.data()).get((change.collection === "chat_bindings" ? "binding_" : "draft_") + change.key);
-          else { const entry = await storage.memory.get(change.collection, change.key); value = entry === null ? undefined : entry.value; }
-          if (change.op === "put" ? !equal(value, change.value) : value !== undefined)
-            throw new Error("Character schema record verification failed: " + change.key);
-        }
-        for (const file of plan.files) await verifyFile(directory, file);
         plan.phase = "cleanup"; plan.cursor = 0; await publish(); break;
-      }
+      // Retains the persisted phase name so interrupted released migrations can continue.
+      case "verify":
+        plan.phase = "cleanup"; plan.cursor = 0; await publish(); break;
       case "cleanup":
+        // Publish the converted identity before retiring any original resources.
+        // A failed final edit leaves both the checkpoint and original files available.
+        await storage.metadata.edit(preferences => {
+          const current = preferences.get<Document>("state");
+          assertObject(current, "character schema metadata");
+          if (current.version !== 1 || (!equal(current.active, source.active) && !equal(current.active, plan.active)))
+            throw new Error("Character migration metadata changed during conversion");
+          const completed: Document = { ...current, version: 1, active: plan.active };
+          delete completed.legacyImportPending;
+          if (!equal(current, completed)) preferences.set("state", completed);
+        });
         for (; plan.cursor < plan.directories.length;) {
-          const source = absolute(directory, plan.directories[plan.cursor].source);
-          if ((await Tools.Files.exists(source)).exists) {
-            for (const file of plan.files) if (file.source.startsWith(plan.directories[plan.cursor].source + "/")) await verifyFile(directory, file);
-            completed(await Tools.Files.deleteFile(source, true));
+          const sourceDirectory = absolute(directory, plan.directories[plan.cursor].source);
+          if ((await Tools.Files.exists(sourceDirectory)).exists) {
+            completed(await Tools.Files.deleteFile(sourceDirectory, true));
           }
           plan.cursor += 1; await publish();
         }
-        metadata.version = 1; metadata.active = plan.active; delete metadata.legacyImportPending;
-        preferences.set("state", metadata);
+        await storage.migration.edit(preferences => {
+          if (!equal(preferences.get("plan"), previous)) throw new Error("Character migration plan changed concurrently");
+          preferences.remove("plan");
+        });
         return;
       default: throw new Error("Invalid character migration phase");
     }

@@ -77,6 +77,7 @@ pub(crate) fn default_native_storage_roots() -> Result<(PathBuf, PathBuf), Strin
 
 /// Releases Android registrations owned by the host boundary.
 pub(crate) fn release_host() {
+    crate::PlatformRuntimeAbi::AndroidJni::release_work_presentation();
     operit_host_android_native::clearAndroidHostSecretStoreBridge();
 }
 

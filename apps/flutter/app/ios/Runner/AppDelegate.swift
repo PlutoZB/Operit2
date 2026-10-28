@@ -2,6 +2,7 @@ import Flutter
 import UIKit
 import UserNotifications
 import file_selector_ios
+import operit_keep_alive
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
@@ -32,6 +33,10 @@ import file_selector_ios
     withCompletionHandler completionHandler: @escaping () -> Void
   ) {
     let userInfo = response.notification.request.content.userInfo
+    if OperitKeepAlivePlugin.receiveWorkNotification(userInfo, actionIdentifier: response.actionIdentifier) {
+      completionHandler()
+      return
+    }
     guard let activation = userInfo["operitNotificationActivation"] as? [String: Any] else {
       completionHandler()
       return

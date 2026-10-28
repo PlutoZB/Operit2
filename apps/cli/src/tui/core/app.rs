@@ -632,7 +632,6 @@ pub(super) enum NetworkHubRow {
     Peer {
         deviceId: String,
         label: String,
-        outbound: bool,
     },
 }
 
@@ -752,7 +751,6 @@ pub(super) fn network_hub_rows(
             .map(|(device_id, peer)| NetworkHubRow::Peer {
                 deviceId: device_id.clone(),
                 label: paired_device_label(device_id, peer),
-                outbound: peer.outbound,
             }),
     );
     rows
@@ -2893,7 +2891,8 @@ impl OperitTui {
                 .network_direct_link_established(&paired_peer_label(&peer)));
         }
         // A finished pairing naturally continues into the join offer: the
-        // applicant side (this device) is the one holding outbound trust.
+        // dialing side holds the wizard, so it is the one asked whether to
+        // join the paired device's Space. Joining works from either side.
         self.pair_wizard = Some(PairWizardModal {
             stage: PairStage::JoinOffer,
             field: PairField::Address,
@@ -2961,7 +2960,7 @@ impl OperitTui {
     /// Removes one pairing credential without touching Space membership;
     /// `/network remove` is the full forget for Space members.
     async fn network_unpair(&mut self, device: &str) -> Result<String, String> {
-        let (device_id, label) = self.resolve_paired_device_argument(device, false).await?;
+        let (device_id, label) = self.resolve_paired_device_argument(device).await?;
         self.networkControl.removePairedDevice(device_id).await?;
         Ok(format!("network pairing removed: {label}"))
     }
@@ -2969,25 +2968,21 @@ impl OperitTui {
     /// Requests to join the paired device's Space. Approval happens on the
     /// target device; this session pulls the decision in the background.
     async fn network_join(&mut self, device: &str) -> Result<String, String> {
-        let (device_id, label) = self.resolve_paired_device_argument(device, true).await?;
+        let (device_id, label) = self.resolve_paired_device_argument(device).await?;
         self.network_join_target(&device_id, &label).await
     }
 
     /// Join entry for callers that already hold the node id (hub rows,
-    /// pairing wizard): validates the outbound direction, then submits.
+    /// pairing wizard): requires a current pairing, then submits. The pairing
+    /// direction does not gate joining; approval happens on the target device.
     async fn network_join_target(
         &mut self,
         device_id: &str,
         label: &str,
     ) -> Result<String, String> {
         let peers = self.networkControl.pairedDevicesSnapshot()?;
-        let Some(peer) = peers.get(device_id) else {
+        if !peers.contains_key(device_id) {
             return Err(format!("no paired device matches {device_id}"));
-        };
-        if !peer.outbound {
-            return Err(format!(
-                "network join requires an outbound pairing with {label}"
-            ));
         }
         let request = self
             .networkControl
@@ -3082,12 +3077,10 @@ impl OperitTui {
     }
 
     /// Resolves a `/network unpair|join` argument against paired devices:
-    /// exact node id, or a unique display-name match. Join additionally
-    /// requires the outbound authorization direction.
+    /// exact node id, or a unique display-name match.
     async fn resolve_paired_device_argument(
         &self,
         value: &str,
-        require_outbound: bool,
     ) -> Result<(String, String), String> {
         let peers = self.networkControl.pairedDevicesSnapshot()?;
         let (device_id, peer) = match peers.get(value) {
@@ -3113,11 +3106,6 @@ impl OperitTui {
             }
         };
         let label = paired_device_label(&device_id, &peer);
-        if require_outbound && !peer.outbound {
-            return Err(format!(
-                "network join requires an outbound pairing with {label}"
-            ));
-        }
         Ok((device_id, label))
     }
 
@@ -5437,8 +5425,7 @@ impl OperitTui {
             .getResolvedModelConfig(&model_ref.provider_id, &model_ref.model_id)
             .await
             .map_err(|error| error.to_string())?;
-        let effective_context_length = config.context.maxContextLength;
-        let max_tokens = (effective_context_length * 1024.0) as i64;
+        let max_tokens = i64::from(config.context.maxContextTokens());
         let current_window_size = self.current_window_size_cache;
         if max_tokens <= 0 {
             return Ok(self
@@ -7685,20 +7672,13 @@ mod tests {
             .map(|row| row.id().to_string())
             .collect::<Vec<_>>();
         // Members come first in topology order; paired non-members follow in
-        // stable id order; an existing member never appears twice.
+        // stable id order; an existing member never appears twice. The watch
+        // holds only the inbound credential: it still gets a joinable row,
+        // because the pairing direction never gates the hub.
         assert_eq!(ids, vec!["self", "phone", "server", "watch"]);
         assert!(matches!(&rows[0], NetworkHubRow::Member(_)));
-        assert!(matches!(
-            &rows[2],
-            NetworkHubRow::Peer { outbound: true, .. }
-        ));
-        assert!(matches!(
-            &rows[3],
-            NetworkHubRow::Peer {
-                outbound: false,
-                ..
-            }
-        ));
+        assert!(matches!(&rows[2], NetworkHubRow::Peer { .. }));
+        assert!(matches!(&rows[3], NetworkHubRow::Peer { .. }));
         if let NetworkHubRow::Peer { label, .. } = &rows[2] {
             assert_eq!(label, "server");
         } else {

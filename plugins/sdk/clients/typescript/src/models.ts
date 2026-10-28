@@ -469,6 +469,7 @@ export interface ToolPkgChatComposerSlotRuntime {
   readonly id: string;
   readonly slot: string;
   readonly screen: string;
+  readonly screenExport: string | null;
   readonly order: number;
   readonly keepAlive: boolean;
 }
@@ -479,6 +480,7 @@ export function decodeToolPkgChatComposerSlotRuntime(value: unknown): ToolPkgCha
     id: input['id'] as string,
     slot: input['slot'] as string,
     screen: input['screen'] as string,
+    screenExport: input['screenExport'] == null ? null : input['screenExport'] as string | null,
     order: input['order'] as number,
     keepAlive: input['keepAlive'] as boolean,
   };
@@ -490,6 +492,7 @@ export function encodeToolPkgChatComposerSlotRuntime(value: ToolPkgChatComposerS
     'id': value.id,
     'slot': value.slot,
     'screen': value.screen,
+    'screenExport': value.screenExport === null ? null : value.screenExport,
     'order': value.order,
     'keepAlive': value.keepAlive,
   };
@@ -497,6 +500,7 @@ export function encodeToolPkgChatComposerSlotRuntime(value: ToolPkgChatComposerS
 
 export interface ToolPkgChatMessageMenuDialogRuntime {
   readonly screen: string;
+  readonly screenExport: string | null;
   readonly title: LocalizedText;
 }
 
@@ -504,6 +508,7 @@ export function decodeToolPkgChatMessageMenuDialogRuntime(value: unknown): ToolP
   const input = value as Record<string, unknown>;
   return {
     screen: input['screen'] as string,
+    screenExport: input['screenExport'] == null ? null : input['screenExport'] as string | null,
     title: decodeLocalizedText(input['title']) as LocalizedText,
   };
 }
@@ -512,6 +517,7 @@ export function decodeToolPkgChatMessageMenuDialogRuntime(value: unknown): ToolP
 export function encodeToolPkgChatMessageMenuDialogRuntime(value: ToolPkgChatMessageMenuDialogRuntime): Record<string, unknown> {
   return {
     'screen': value.screen,
+    'screenExport': value.screenExport === null ? null : value.screenExport,
     'title': encodeLocalizedText(value.title),
   };
 }
@@ -592,6 +598,7 @@ export interface ToolPkgContainerRuntime {
   readonly chatLifecycleHooks: Array<ToolPkgFunctionHookRuntime>;
   readonly chatMessageMenuItems: Array<ToolPkgChatMessageMenuItemRuntime>;
   readonly chatRuntimeHooks: Array<ToolPkgFunctionHookRuntime>;
+  readonly chatResponseHooks: Array<ToolPkgFunctionHookRuntime>;
   readonly hostEventHooks: Array<ToolPkgHostEventHookRuntime>;
   readonly toolLifecycleHooks: Array<ToolPkgFunctionHookRuntime>;
   readonly promptInputHooks: Array<ToolPkgFunctionHookRuntime>;
@@ -648,6 +655,7 @@ export function decodeToolPkgContainerRuntime(value: unknown): ToolPkgContainerR
     chatLifecycleHooks: (input['chatLifecycleHooks'] as unknown[]).map((item) => decodeToolPkgFunctionHookRuntime(item)) as Array<ToolPkgFunctionHookRuntime>,
     chatMessageMenuItems: (input['chatMessageMenuItems'] as unknown[]).map((item) => decodeToolPkgChatMessageMenuItemRuntime(item)) as Array<ToolPkgChatMessageMenuItemRuntime>,
     chatRuntimeHooks: (input['chatRuntimeHooks'] as unknown[]).map((item) => decodeToolPkgFunctionHookRuntime(item)) as Array<ToolPkgFunctionHookRuntime>,
+    chatResponseHooks: (input['chatResponseHooks'] as unknown[]).map((item) => decodeToolPkgFunctionHookRuntime(item)) as Array<ToolPkgFunctionHookRuntime>,
     hostEventHooks: (input['hostEventHooks'] as unknown[]).map((item) => decodeToolPkgHostEventHookRuntime(item)) as Array<ToolPkgHostEventHookRuntime>,
     toolLifecycleHooks: (input['toolLifecycleHooks'] as unknown[]).map((item) => decodeToolPkgFunctionHookRuntime(item)) as Array<ToolPkgFunctionHookRuntime>,
     promptInputHooks: (input['promptInputHooks'] as unknown[]).map((item) => decodeToolPkgFunctionHookRuntime(item)) as Array<ToolPkgFunctionHookRuntime>,
@@ -705,6 +713,7 @@ export function encodeToolPkgContainerRuntime(value: ToolPkgContainerRuntime): R
     'chatLifecycleHooks': value.chatLifecycleHooks.map(item => encodeToolPkgFunctionHookRuntime(item)),
     'chatMessageMenuItems': value.chatMessageMenuItems.map(item => encodeToolPkgChatMessageMenuItemRuntime(item)),
     'chatRuntimeHooks': value.chatRuntimeHooks.map(item => encodeToolPkgFunctionHookRuntime(item)),
+    'chatResponseHooks': value.chatResponseHooks.map(item => encodeToolPkgFunctionHookRuntime(item)),
     'hostEventHooks': value.hostEventHooks.map(item => encodeToolPkgHostEventHookRuntime(item)),
     'toolLifecycleHooks': value.toolLifecycleHooks.map(item => encodeToolPkgFunctionHookRuntime(item)),
     'promptInputHooks': value.promptInputHooks.map(item => encodeToolPkgFunctionHookRuntime(item)),

@@ -92,10 +92,10 @@ impl JsToolManager {
     #[allow(non_snake_case)]
     async fn withExecutionEngineForPackage<T>(
         &self,
-        selection: &JsPackageToolSelection,
+        runtime: Option<&operit_plugin_sdk::toolpkg::ToolPkgParser::ToolPkgSubpackageRuntime>,
         block: impl FnOnce(Arc<dyn JsExecutionEngine>) -> JsExecutionCompletion<JsExecutionResult<T>>,
     ) -> JsExecutionResult<T> {
-        if let Some(runtime) = selection.toolpkg_runtime.as_ref() {
+        if let Some(runtime) = runtime {
             let contextKey = format!("toolpkg_main:{}", runtime.containerPackageName);
             let engine = self
                 .packageRuntime
@@ -370,15 +370,9 @@ impl JsToolManager {
         let runtimeParams = self
             .convertToolParameters(&request, &packageName, &selection)
             .map_err(|error| JsExecutionError::invalid_request(error.message))?;
-        self.withExecutionEngineForPackage(&selection, |engine| {
-            engine.execute_script_function(
-                &selection.definition.script,
-                &functionName,
-                &runtimeParams,
-                &BTreeMap::new(),
-                None,
-                true,
-                60,
+        self.withExecutionEngineForPackage(selection.toolpkg_runtime.as_ref(), |engine| {
+            engine.execute_script_function_owned(
+                selection.definition.script, functionName, runtimeParams, BTreeMap::new(),
             )
         })
         .await
@@ -408,15 +402,9 @@ impl JsToolManager {
         };
 
         let result = self
-            .withExecutionEngineForPackage(&selection, |engine| {
-                engine.execute_script_function(
-                    &selection.definition.script,
-                    &functionName,
-                    &runtimeParams,
-                    &BTreeMap::new(),
-                    None,
-                    true,
-                    60,
+            .withExecutionEngineForPackage(selection.toolpkg_runtime.as_ref(), |engine| {
+                engine.execute_script_function_owned(
+                    selection.definition.script, functionName, runtimeParams, BTreeMap::new(),
                 )
             })
             .await;
@@ -524,12 +512,17 @@ mod tests {
         }
 
         /// Reports no environment value in manager tests.
-        fn read_environment_variable(&self, _key: &str) -> Result<Option<String>, String> {
+        fn prepare_environment(&self, _owner: &operit_plugin_sdk::javascript::JsEnvironmentOwner, _declared_names: &[String]) -> Result<(), String> {
+            Ok(())
+        }
+
+        /// Returns the environment value selected by the test host.
+        fn read_environment_variable(&self, _owner: &operit_plugin_sdk::javascript::JsEnvironmentOwner, _key: &str) -> Result<Option<String>, String> {
             Ok(None)
         }
 
         /// Ignores environment writes in manager tests.
-        fn write_environment_variable(&self, _key: &str, _value: &str) -> Result<(), String> {
+        fn write_environment_variable(&self, _owner: &operit_plugin_sdk::javascript::JsEnvironmentOwner, _key: &str, _value: &str) -> Result<(), String> {
             Ok(())
         }
 
@@ -1563,7 +1556,6 @@ mod tests {
                 &BTreeMap::new(),
                 None,
                 true,
-                60,
             )
             .await;
 

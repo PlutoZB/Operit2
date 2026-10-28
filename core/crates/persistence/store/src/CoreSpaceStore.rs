@@ -11,10 +11,11 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::CoreNodeIdentityStore::CoreNodeIdentityStore;
-use crate::PreferencesDataStore::{emptyPreferences, stringPreferencesKey, CoreNodeStateStore, PreferencesDataStore};
+use crate::PreferencesDataStore::{emptyPreferences, stringPreferencesKey, CoreNodeStateStore, Preferences, PreferencesDataStore, PreferencesDataStoreError, PreferencesSyncedEntry};
 use crate::RuntimeStorageHost::defaultRuntimeStorageHost;
 
 const CORE_SPACE_RECORD_KEY: &str = "record";
+const CORE_SPACE_RECORD_VERSION: u32 = 3;
 const UNMEASURED_DIRECT_PEER_COST: u64 = 1_000_000_000;
 /// Identifies adjacency announcements that carry no measured link quality yet.
 const LOCAL_DIRECT_PEER_EPOCH: &str = "direct-adjacency";
@@ -802,8 +803,9 @@ impl CoreSpaceStore {
     /// Publishes the local adjacency announcement for one live direct-peer set.
     ///
     /// Peers are replaced with the supplied set - the owning device is the only writer of
-    /// its own record - and every peer without a still-fresh advertisement receives one
-    /// carrying no measured quality yet, so route selection stays at hop count. Returns
+    /// its own record. Once any advertised link is close to expiry the whole set is
+    /// refreshed in one publication, and a peer without a still-fresh advertisement
+    /// carries no measured quality yet, so route selection stays at hop count. Returns
     /// whether the local record changed.
     #[allow(non_snake_case)]
     pub fn publishLocalAdjacency(
@@ -827,7 +829,7 @@ impl CoreSpaceStore {
         let peers = peerSet.into_iter().collect::<Vec<_>>();
         let now = currentTimeMillis();
         let current = self.topologyRecords()?.remove(&identity.nodeId);
-        let mut links = current
+        let retainedTargets = current
             .as_ref()
             .map(|record| {
                 record
@@ -837,45 +839,54 @@ impl CoreSpaceStore {
                         peers.contains(&link.targetNodeId)
                             && link.expiresAt.saturating_sub(now) > refreshMarginMs
                     })
-                    .cloned()
-                    .collect::<Vec<_>>()
+                    .map(|link| link.targetNodeId.clone())
+                    .collect::<BTreeSet<_>>()
             })
             .unwrap_or_default();
-        let retainedTargets = links
-            .iter()
-            .map(|link| link.targetNodeId.clone())
-            .collect::<BTreeSet<_>>();
-        let mut additions = 0_usize;
-        for peerNodeId in peers.iter().filter(|peer| !retainedTargets.contains(*peer)) {
-            let sequence = current
-                .as_ref()
-                .and_then(|record| {
-                    record
-                        .links
-                        .iter()
-                        .find(|link| link.targetNodeId == *peerNodeId)
-                })
-                .map(|link| link.sequence.saturating_add(1))
-                .unwrap_or(1);
-            links.push(CoreSpaceLinkAdvertisement {
-                targetNodeId: peerNodeId.clone(),
-                channelEpoch: LOCAL_DIRECT_PEER_EPOCH.to_string(),
-                sequence,
-                measuredAt: now,
-                expiresAt: now.saturating_add(linkTtlMs),
-                smoothedRttMs: 0,
-                lossPermille: 0,
-                congestionPermille: 0,
-            });
-            additions += 1;
-        }
         let peersUnchanged = current
             .as_ref()
             .map(|record| record.peers.as_slice() == peers.as_slice())
             .unwrap_or(false);
-        if peersUnchanged && additions == 0 {
+        if peersUnchanged && retainedTargets.len() == peers.len() {
             return Ok(false);
         }
+        // Refresh every advertised link together whenever any of them is near
+        // expiry. Rewriting one link per publication would emit a full record
+        // every TTL/peers seconds; refreshing the whole set keeps the next
+        // publication a full refresh interval away and sends one record.
+        let mut links = peers
+            .iter()
+            .map(|peerNodeId| {
+                let existing = current.as_ref().and_then(|record| {
+                    record
+                        .links
+                        .iter()
+                        .find(|link| &link.targetNodeId == peerNodeId)
+                });
+                match existing {
+                    Some(link) => CoreSpaceLinkAdvertisement {
+                        targetNodeId: peerNodeId.clone(),
+                        channelEpoch: link.channelEpoch.clone(),
+                        sequence: link.sequence.saturating_add(1),
+                        measuredAt: now,
+                        expiresAt: now.saturating_add(linkTtlMs),
+                        smoothedRttMs: link.smoothedRttMs,
+                        lossPermille: link.lossPermille,
+                        congestionPermille: link.congestionPermille,
+                    },
+                    None => CoreSpaceLinkAdvertisement {
+                        targetNodeId: peerNodeId.clone(),
+                        channelEpoch: LOCAL_DIRECT_PEER_EPOCH.to_string(),
+                        sequence: 1,
+                        measuredAt: now,
+                        expiresAt: now.saturating_add(linkTtlMs),
+                        smoothedRttMs: 0,
+                        lossPermille: 0,
+                        congestionPermille: 0,
+                    },
+                }
+            })
+            .collect::<Vec<_>>();
         links.sort_by(|left, right| left.targetNodeId.cmp(&right.targetNodeId));
         self.writeTopologyRecord(&CoreSpaceTopologyRecord {
             nodeId: identity.nodeId,
@@ -1179,9 +1190,27 @@ impl CoreSpaceStore {
             if record.nodeId == local || current.get(&record.nodeId).is_some_and(|old| old.updatedAt >= record.updatedAt) {
                 continue;
             }
-            self.writeTopologyRecord(&record)?;
+            self.importTopologyRecord(&record)?;
         }
         Ok(())
+    }
+
+    /// Stores one imported topology announcement without staging a local
+    /// operation. Snapshots already deliver these records over an
+    /// authenticated synchronization channel; publishing the import again
+    /// under this device's origin would echo every member's announcement back
+    /// to every peer and keep idle snapshots churning.
+    fn importTopologyRecord(&self, record: &CoreSpaceTopologyRecord) -> Result<(), String> {
+        let value = serde_json::to_value(record).map_err(|error| error.to_string())?;
+        self.recordStore(format!(
+            "{RUNTIME_SPACE_TOPOLOGY_DIR_PATH}/{}.preferences.json",
+            record.nodeId
+        ))
+        .migrate(|preferences| -> Result<(), PreferencesDataStoreError> {
+            preferences.set(&stringPreferencesKey(CORE_SPACE_RECORD_KEY), value);
+            Ok(())
+        })
+        .map_err(|error| error.to_string())
     }
 
     /// Reads every synchronized topology announcement visible to this CoreNode.
@@ -1282,17 +1311,46 @@ impl CoreSpaceStore {
         } else {
             (*CoreNodeStateStore::newWithStorage(self.storage.clone(), path)).clone()
         };
-        store.withSchema(2, |version, preferences| match version {
-            0 => Ok(()),
-            1 => {
-                let key = stringPreferencesKey(CORE_SPACE_RECORD_KEY);
-                if let Some(encoded) = preferences.getTyped::<String>(&key)? {
-                    let record: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&encoded)?;
-                    preferences.set(&key, serde_json::Value::Object(record));
-                }
-                Ok(())
-            }
-            from => Err(crate::PreferencesDataStore::PreferencesDataStoreError::MissingMigration { from, to: from + 1 }),
+        store.withSchema(CORE_SPACE_RECORD_VERSION, Self::migrateRecord)
+    }
+
+    /// Declares the codec for complete records owned by Space, including archived string values.
+    pub fn preferenceSyncStore(path: &str) -> Option<crate::PreferenceMerge::PreferenceMergeStore> {
+        let (directory, name) = path.rsplit_once('/')?;
+        if ![RUNTIME_SPACE_MEMBERS_DIR_PATH, RUNTIME_SPACE_DEVICE_PROFILES_DIR_PATH,
+            RUNTIME_SPACE_DEVICE_PRESENCE_DIR_PATH, RUNTIME_SPACE_TOPOLOGY_DIR_PATH].contains(&directory) {
+            return None;
+        }
+        let node = name.strip_suffix(".preferences.json")?;
+        if node.starts_with('.') || validateNodeId(node).is_err() { return None; }
+        Some(crate::PreferenceMerge::PreferenceMergeStore::values(
+            path, false, CORE_SPACE_RECORD_VERSION, Self::decodeSyncedRecord,
+        ))
+    }
+
+    /// Repairs schema-2 snapshots overwritten by unconverted history as well as older encodings.
+    fn migrateRecord(version: u32, values: &mut Preferences) -> Result<(), PreferencesDataStoreError> {
+        if version >= CORE_SPACE_RECORD_VERSION {
+            return Err(PreferencesDataStoreError::SchemaVersionTooNew {
+                actual: version, expected: CORE_SPACE_RECORD_VERSION,
+            });
+        }
+        let key = stringPreferencesKey(CORE_SPACE_RECORD_KEY);
+        if let Some(value) = values.get(&key) {
+            let record: serde_json::Map<String, serde_json::Value> = match value {
+                serde_json::Value::String(encoded) => serde_json::from_str(encoded)?,
+                value => serde_json::from_value(value.clone())?,
+            };
+            values.set(&key, serde_json::Value::Object(record));
+        }
+        Ok(())
+    }
+
+    /// Uses the same owner codec for local upgrades and historical operations; current values stay typed.
+    fn decodeSyncedRecord(entry: &mut PreferencesSyncedEntry) -> Result<(), PreferencesDataStoreError> {
+        entry.decodeHistoricalValues(|version, values| {
+            if version == CORE_SPACE_RECORD_VERSION { return Ok(()); }
+            Self::migrateRecord(version, values)
         })
     }
 
@@ -1594,12 +1652,44 @@ mod tests {
     use crate::SyncOperationStore::SyncOperationStore;
     use crate::SyncOperationStore::{NewSyncOperation, SyncOperationSemantics};
 
+    /// Schema 2 could be overwritten by raw historical JSON; reopening must repair it once.
+    #[test]
+    fn schema_two_space_records_recover_without_changing_membership() {
+        let host = Arc::new(MemoryStorageHost::default());
+        let record = serde_json::json!({"spaceId":"old-space","spaceName":"ios-aarch64",
+            "spaceRevision":12,"nodeId":"old-peer","joinedAt":1,"updatedAt":2});
+        let path = format!("{RUNTIME_SPACE_MEMBERS_DIR_PATH}/old-peer.preferences.json");
+        let corrupted = serde_json::json!({"record":record.to_string(),
+            "__operit_preferences_schema_version":2});
+        host.writeBytesAtomically(&path, &serde_json::to_vec(&corrupted).unwrap()).unwrap();
+        for _ in 0..2 {
+            let store = CoreSpaceStore::new(host.clone());
+            store.initialize().unwrap();
+            assert_eq!(serde_json::to_value(&store.memberRecords().unwrap()["old-peer"]).unwrap(), record);
+            assert_eq!(store.recordStore(&path).schemaVersion().unwrap(), CORE_SPACE_RECORD_VERSION);
+        }
+        let malformed = serde_json::json!({"record":"broken-json","__operit_preferences_schema_version":2});
+        let badPath = format!("{RUNTIME_SPACE_MEMBERS_DIR_PATH}/broken-peer.preferences.json");
+        let bytes = serde_json::to_vec(&malformed).unwrap();
+        host.writeBytesAtomically(&badPath, &bytes).unwrap();
+        assert!(CoreSpaceStore::new(host.clone()).initialize().is_err());
+        assert_eq!(host.readBytes(&badPath).unwrap(), bytes);
+    }
+
     #[derive(Clone, Default)]
     struct MemoryStorageHost {
         files: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
     }
 
     impl RuntimeStorageHost for MemoryStorageHost {
+        /// Confirms synchronous in-memory publication without copying or rewriting bytes.
+        fn flushFile(&self, path: &str) -> operit_host_api::HostResult<()> {
+            if !self.exists(path)? {
+                return Err(operit_host_api::HostError::new("runtime storage entry not found"));
+            }
+            Ok(())
+        }
+
         /// Returns no physical runtime root for the in-memory test host.
         fn runtimeRootDir(&self) -> Option<std::path::PathBuf> {
             None
@@ -1638,6 +1728,11 @@ mod tests {
                 .ok_or_else(|| HostError::new("runtime storage byte range overflows usize"))?
                 .min(content.len());
             Ok(content[start..end].to_vec())
+        }
+
+        /// Atomically publishes one complete in-memory test entry.
+        fn writeBytesAtomically(&self, path: &str, content: &[u8]) -> operit_host_api::HostResult<()> {
+            self.writeBytes(path, content)
         }
 
         /// Writes one complete virtual file to the in-memory test host.
@@ -1795,6 +1890,50 @@ mod tests {
                 None,
             )
             .expect("test device profile must initialize");
+    }
+
+    /// Schema-only files are incomplete records and must remain explicit errors.
+    #[test]
+    fn topology_rejects_schema_only_records_without_rewriting_them() {
+        let host = Arc::new(MemoryStorageHost::default());
+        let path = format!("{RUNTIME_SPACE_TOPOLOGY_DIR_PATH}/broken-node.preferences.json");
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "__operit_preferences_schema_version": CORE_SPACE_RECORD_VERSION,
+        })).unwrap();
+        host.writeBytes(&path, &bytes).unwrap();
+        let error = CoreSpaceStore::new(host.clone()).topologyRecords().unwrap_err();
+        assert_eq!(error, format!("Device space connection record is empty: {path}"));
+        assert_eq!(host.readBytes(&path).unwrap(), bytes);
+    }
+
+    /// Rejects corrupt committed records, including ordinary dot-prefixed files exposed by the host.
+    #[test]
+    fn record_readers_reject_corrupt_committed_files() {
+        for directory in [
+            RUNTIME_SPACE_MEMBERS_DIR_PATH,
+            RUNTIME_SPACE_TOPOLOGY_DIR_PATH,
+            RUNTIME_SPACE_DEVICE_PROFILES_DIR_PATH,
+            RUNTIME_SPACE_DEVICE_PRESENCE_DIR_PATH,
+        ] {
+            let host = Arc::new(MemoryStorageHost::default());
+            let store = CoreSpaceStore::new(host.clone());
+            host.writeBytes(
+                &format!("{directory}/.corrupt.preferences.json"),
+                b"invalid",
+            )
+            .expect("test record must write");
+            let result = match directory {
+                RUNTIME_SPACE_MEMBERS_DIR_PATH => store.memberRecords().map(|_| ()),
+                RUNTIME_SPACE_TOPOLOGY_DIR_PATH => store.topologyRecords().map(|_| ()),
+                RUNTIME_SPACE_DEVICE_PROFILES_DIR_PATH => store.deviceProfiles().map(|_| ()),
+                RUNTIME_SPACE_DEVICE_PRESENCE_DIR_PATH => store.devicePresences().map(|_| ()),
+                _ => unreachable!(),
+            };
+            assert!(
+                result.is_err(),
+                "Corrupt committed record must fail: {directory}"
+            );
+        }
     }
 
     /// Verifies remote member ejection rewrites the member as a standalone
@@ -2050,6 +2189,56 @@ mod tests {
             .expect("local adjacency record must exist");
         assert!(pruned.peers.is_empty());
         assert!(pruned.links.is_empty());
+    }
+
+    /// Verifies snapshot imports persist remote announcements without
+    /// re-authoring them as local synchronization operations.
+    #[test]
+    fn importing_a_remote_topology_record_publishes_no_local_operation() {
+        let host = Arc::new(MemoryStorageHost::default());
+        let store = CoreSpaceStore::new(host.clone());
+        store
+            .initializeNamed("import-space".to_string())
+            .expect("test space must initialize");
+        let localNodeId = CoreNodeIdentityStore::new(host.clone())
+            .initialize()
+            .expect("test node identity must initialize")
+            .nodeId;
+        store
+            .writeTopologyRecord(&CoreSpaceTopologyRecord {
+                nodeId: localNodeId.clone(),
+                peers: vec!["node-peer".to_string()],
+                links: vec![testLink("node-peer", 0)],
+                updatedAt: currentTimeMillis(),
+            })
+            .expect("local topology must publish");
+        let syncStore = SyncOperationStore::new(host.clone(), RUNTIME_SYNC_DIR_PATH.to_string());
+        // `localClock` flushes staged preference outboxes exactly like a sync
+        // pass does, so the baseline includes the local publication above.
+        let before = syncStore.localClock().expect("local clock must read");
+        assert!(
+            !before.sequences.is_empty(),
+            "a local publication must advance the clock"
+        );
+
+        let imported = CoreSpaceTopologyRecord {
+            nodeId: "node-remote".to_string(),
+            peers: vec![localNodeId.clone()],
+            links: vec![testLink(&localNodeId, 0)],
+            updatedAt: currentTimeMillis() + 1,
+        };
+        store
+            .importTopologyRecords(vec![imported.clone()])
+            .expect("remote announcement import must succeed");
+        assert_eq!(
+            store.topologyRecords().expect("topology must read")["node-remote"],
+            imported
+        );
+        assert_eq!(
+            syncStore.localClock().expect("local clock must read"),
+            before,
+            "importing a snapshot record must not stage a local operation"
+        );
     }
 
     /// Verifies published adjacency resolves one tree path through the middle device.

@@ -94,7 +94,6 @@ pub(crate) async fn run_tui_command(args: &[String]) -> Result<(), String> {
     }
     let (shell_args, link_args) = parse_tui_startup_args(args)?;
     // Exactly one process owns an identity's sync worker and listener state.
-    #[cfg(unix)]
     let mut owner = crate::daemon::OwnerGuard::acquire("tui")?;
     let language_cell = Arc::new(StdMutex::new(None::<TuiLanguage>));
     let (toast_sender, toast_receiver) = mpsc::channel::<String>();
@@ -173,25 +172,16 @@ pub(crate) async fn run_tui_command(args: &[String]) -> Result<(), String> {
     )
     .await?;
     let access_services = core_application.accessServices();
-    // The control socket lets `operit2 cli ...` reuse this Core instead of
+    // The host control channel lets `operit2 cli ...` reuse this Core instead of
     // booting a second owner for the same identity.
-    #[cfg(unix)]
     owner.refresh_log_path()?;
-    #[cfg(unix)]
-    owner.mark_ready()?;
-    #[cfg(unix)]
-    let control_server = crate::daemon::ControlServer::bind(
-        owner.paths(),
-        core_application.localClient(),
-        owner.status().clone(),
-    )
-    .await?;
+    let control_server =
+        crate::daemon::ControlServer::bind(&mut owner, core_application.localClient())?;
     // Runtime peer/proxy futures are not Send. Keep the monitor and the
     // control server on the local executor, independently of the terminal
     // loop, and drop their in-flight operations before shutting down the Core.
     let result = tokio::task::LocalSet::new()
         .run_until(async move {
-            #[cfg(unix)]
             let control_task = control_server.spawn_local();
             let network_event_task = spawn_network_ui_events(
                 network_peers,
@@ -203,11 +193,9 @@ pub(crate) async fn run_tui_command(args: &[String]) -> Result<(), String> {
                 network_event_sender,
             );
             let result = tui.run().await;
-            #[cfg(unix)]
             control_task.abort();
             outgoing_join_task.abort();
             network_event_task.abort();
-            #[cfg(unix)]
             let _ = control_task.await;
             let _ = outgoing_join_task.await;
             let _ = network_event_task.await;
@@ -216,7 +204,6 @@ pub(crate) async fn run_tui_command(args: &[String]) -> Result<(), String> {
         })
         .await;
     core_application.shutdown().await;
-    #[cfg(unix)]
     drop(owner);
     result
 }
@@ -332,7 +319,7 @@ async fn start_tui_listeners(
     let services = core_application.accessServices();
     let explicit = !link_args.listen.is_empty();
     let transports = if explicit {
-        let mut config = crate::cli::link::cli_listener_config(&services)?;
+        let mut config = services.localHostConfig()?.ok_or("Node listener preferences are not initialized")?;
         config.transports = link_args.listen.clone();
         config.updatedAt = operit_host_api::TimeUtils::currentTimeMillis();
         services.saveLocalHostConfig(config)?;

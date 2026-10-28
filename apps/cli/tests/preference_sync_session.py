@@ -145,7 +145,15 @@ async def exercise(binary):
             await select(b, domain, state[domain]['B']['Equal']['id'])
         await call(a, STORAGE, 'setPreferences', fileName='sync_matrix.preferences.json', values={'only_A': True, 'collision': 'A', 'nested': {'A': 1}, 'array': [1, 2], 'delete_me': True})
         await call(b, STORAGE, 'setPreferences', fileName='sync_matrix.preferences.json', values={'only_B': True, 'collision': 'B', 'nested': {'B': 2}, 'array': [3], 'null_value': None})
-        await call(a, 'preferences.envPreferences', 'setEnv', key='OPERIT_SYNC_TEST_LOCAL_ONLY', value='node-A-only')
+        for package_name in ['sync_env_shared', 'sync_env_local']:
+            package_file = run.directory / (package_name + '.js')
+            metadata = {'name': package_name, 'description': 'Environment synchronization fixture',
+                        'env': [{'name': 'TOKEN', 'description': 'Synthetic token'}], 'tools': []}
+            package_file.write_text('/* METADATA\n' + json.dumps(metadata) + '\n*/\n', encoding='utf-8')
+            await call(a, 'application.packageManager', 'addPackageFileFromExternalStorageResult', filePath=str(package_file))
+            await call(a, 'preferences.envPreferences', 'setEnv', packageName=package_name,
+                       key='TOKEN', value=package_name + '-value')
+        await call(a, 'application.packageManager', 'setPackageScope', packageName='sync_env_shared', scope='space')
         await call(a, 'preferences.gitHubAuthPreferences', 'saveAuthInfo', accessToken='synthetic-sync-token-not-a-secret', tokenType='bearer', userInfo=None, grantedScope=None)
         await run.pair(b, a)
         await run.join(b, a, a, [a, b])
@@ -191,13 +199,26 @@ async def exercise(binary):
             await a.wait(('call', STORAGE, 'getPreference', json.dumps({'fileName':'sync_matrix.preferences.json','key':'delete_me'})),lambda x:x is None,timeout=8)
             return left
         await check('generic:distinct-key-conflict-nested-array-null-delete', scalar_case)
-        async def local_case():
-            """Verify device-local environment and encrypted authentication do not leak to peers."""
-            env=await call(b,'preferences.envPreferences','getAllEnv')
-            auth=await call(b,'preferences.gitHubAuthPreferences','getCurrentAccessToken')
-            assert 'OPERIT_SYNC_TEST_LOCAL_ONLY' not in env and auth is None,(env,auth)
-            return {'B_env':env,'B_github_token':auth}
-        await check('node-local:environment-and-github-auth-not-replicated',local_case)
+        async def environment_case():
+            """Verify Space environments replicate while independent device installations stay local."""
+            arguments = json.dumps({'packageName': 'sync_env_shared', 'key': 'TOKEN'})
+            await b.wait(('call', 'preferences.envPreferences', 'getEnv', arguments),
+                         lambda value: value == 'sync_env_shared-value', allow_error=True)
+            local = await call(a, 'preferences.envPreferences', 'getEnv',
+                               packageName='sync_env_local', key='TOKEN')
+            assert local == 'sync_env_local-value', local
+            scopes = await call(b, 'application', 'getExtensionScopes', kind='package')
+            assert scopes['sync_env_shared'] == 'space' and 'sync_env_local' not in scopes, scopes
+            await call(b, 'preferences.envPreferences', 'setEnv', packageName='sync_env_shared',
+                       key='TOKEN', value='updated-on-B')
+            await a.wait(('call', 'preferences.envPreferences', 'getEnv', arguments),
+                         lambda value: value == 'updated-on-B')
+            await call(a, 'preferences.envPreferences', 'removeEnv', packageName='sync_env_shared', key='TOKEN')
+            await b.wait(('call', 'preferences.envPreferences', 'getEnv', arguments), lambda value: value is None)
+            auth = await call(b, 'preferences.gitHubAuthPreferences', 'getCurrentAccessToken')
+            assert auth is None, auth
+            return {'shared_environment': 'bidirectional-set-and-delete', 'device_environment': local}
+        await check('package-environment:installation-scope-and-bidirectional-sync', environment_case)
         # Edit an ordinary shared UUID while the other real CLI is offline.
         await b.stop(crash=True)
         updated={}

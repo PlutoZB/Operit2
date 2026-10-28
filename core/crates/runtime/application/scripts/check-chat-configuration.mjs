@@ -41,14 +41,23 @@ const runtime = source(provider + "runtime_support.rs");
 for (const [name, text] of [["history", history], ["coordinator", coordinator], ["Core", core]]) {
   verify(!/\.character(?:CardName|GroupId)\b/.test(text), `${name} still interprets legacy role fields`);
 }
-const ready = section(support, "pub async fn ready(", "/// Returns the authenticated catalog owner");
+const ready = section(support, "pub async fn ready(", "pub fn extensionOwner(");
 verify((ready.match(/RuntimePackageManager::readySnapshot\(/g) ?? []).length === 1, "Configuration readiness must resolve one canonical snapshot");
-verify(/getEnabledToolPkgContainerRuntimes\(\)/.test(ready) && /runtime\.publicApis/.test(ready), "Owner selection must inspect actual enabled public API registrations");
+verify(/getEnabledToolPkgContainerRuntimes\(\)/.test(ready) && /runtime\s*\.publicApis/.test(ready), "Owner selection must inspect actual enabled public API registrations");
 verify(!/com\.operit\.character_cards|character_cards|HostProvider|PluginStore|callDependency/.test(support), "Native configuration calls must not name a plugin or withdrawn framework");
 verify(/match candidates\.len\(\)/.test(support) && /Duplicate chat\.configuration\.resolve/.test(support), "Duplicate registered owners must be explicit errors");
 verify(/0 => Ok\(MODEL_CONFIGURATION_OWNER\.to_string\(\)\)/.test(support), "An empty enabled catalog must select ordinary native model conversations");
-verify(/fn modelExecution\(/.test(support) && /fn modelDisplay\(/.test(support) && /validateModelExecutionData/.test(support), "Standalone model display, execution and current runtime data must be owned by the native runtime");
+verify(/fn nativeModelExecution\(/.test(support) && /fn modelDisplay\(/.test(support) && /validateModelExecutionData/.test(support), "Standalone model display, execution and current runtime data must be owned by the native runtime");
 verify(support.includes('"chat.configuration.resolve"'), "Missing registered resolve API");
+const resolveBoundary = section(support, "async fn pluginConfiguration<", "fn disablePlugin(");
+verify(/invokeToolPkgPublicApiWithTimeoutMillis/.test(resolveBoundary) && /decode\(raw, &plugin\.owner\)/.test(resolveBoundary), "Configuration plugins must have an engine deadline and strict result validation");
+verify(/Err\(error\)/.test(resolveBoundary) && /disablePlugin\(&error\)/.test(resolveBoundary), "Configuration execution and decoding failures must remove the optional backend");
+const disableConfiguration = section(support, "fn disablePlugin(", "/// Resolves presentation");
+verify(/self\.plugin\.take\(\)/.test(disableConfiguration) && /reportConfigurationFallback/.test(disableConfiguration), "Fallback must remove the failed plugin and attribute its error before continuing");
+const resolveExecution = section(support, "pub async fn resolve(&mut self", "/// A failed participant");
+verify(/nativeModelExecution\(self\.modelProfile\(&request\)\?\)/.test(resolveExecution) && !/request\.chatExtension/.test(resolveExecution), "Native fallback must be built only from application defaults without plugin participant or extension data");
+verify(!/AtomicBool|withModelFallback|configurationOrDefault|invokeResolve|invokeRegisteredResolve/.test(support), "Configuration isolation must use one optional backend rather than parallel recovery wrappers or shared state flags");
+
 verify(!/chat\.configuration\.binding|readBinding|writeBinding|deleteBinding/.test(support + history + core), "Core must not maintain plugin binding mirrors");
 verify(/invokeToolPkgPublicApi/.test(support) && !/SoftwareSettings\.exec|execCore|callDependency/.test(support), "Typed native invocations must use the authenticated existing public API bridge");
 const create = section(history, "async fn createChatDraft(", "/// Opens a real history and marks");
@@ -64,6 +73,14 @@ verify(/if let Some\(participantId\) = &initial\.participantId/.test(create) && 
 verify(!/profile\.openingStatement|participants\.first|configuration\.profile/.test(create), "Core must not infer opening statements or select an execution participant during draft display");
 verify(/purpose: ChatConfigurationPurpose::Display/.test(create) && /resolveDraft/.test(create), "Drafts must resolve the explicit display purpose");
 verify(!/switchConfiguredChat|publishChatConfiguration/.test(processor), "Message execution must not publish an execution descriptor into the presentation cache");
+const deletion = section(history, "pub async fn deleteChatHistory(", "/// Deletes a message from a chat by timestamp.");
+verify(/self\.requireChatExists\(&chatId\)\?;/.test(deletion) && deletion.indexOf("requireChatExists") < deletion.indexOf("canDeleteChatHistory") && deletion.indexOf("if !canDelete") < deletion.indexOf("ChatConfigurationApi::ready"), "Deletion must reject missing or locked histories before invoking their owner");
+verify(/api\.deleteConfiguration\(&chatId\)\.await\?;/.test(deletion), "Owner cleanup errors must stop deletion and propagate to the caller");
+verify(deletion.indexOf("api.deleteConfiguration") < deletion.indexOf(".deleteChatHistory(chatId.clone())"), "Owner cleanup must finish before the Core conversation is deleted");
+verify(/\.deleteChatHistory\(chatId\.clone\(\)\)[\s\S]*?\.map_err\(\|error\| error\.to_string\(\)\)\?;/.test(deletion), "Persistence failures must propagate without panicking or reporting success");
+verify(deletion.indexOf("if !deleted") < deletion.indexOf("self.chatConfigurationsFlow.update") && deletion.indexOf("self.chatConfigurationsFlow.update") < deletion.indexOf("self.finishDestructiveHistoryMutation"), "Deletion may clear projections and publish completion only after persistence succeeds");
+const coreDeletion = section(core, "pub async fn deleteChatHistory(", "/// Deletes one message from an explicit chat");
+verify(/self\s*\.chatHistoryDelegate\s*\.deleteChatHistory\(service, chatId\)\s*\.await\?/.test(coreDeletion) && !/deleteConfiguration|if let Err|AppLogger/.test(coreDeletion), "Core deletion must use the single history lifecycle and retain its errors");
 const startup = section(history, "pub fn initialize(", "/// Loads the newest indexed display window");
 verify(/openChatHistory\(chatId, false\)\?/.test(startup) && !/switchConfiguredChat|\.resolve\(|ChatConfigurationApi/.test(startup), "Unbound startup must restore persisted history without resolving execution configuration");
 const historyOpen = section(history, "pub fn openChatHistory(", "/// Requires an actual Core chat record");
@@ -79,7 +96,7 @@ for (const [start, end] of [["pub async fn switchChat(", "pub async fn switchCha
   verify(/openChatHistory/.test(navigation) && !/enhancedAiService|switchConfiguredChat|\.resolve\(/.test(navigation), "Both public history switch routes must work without configuration or an AI runtime");
 }
 const explicitConfiguration = section(core, "pub async fn chatConfiguration(", "/// Resolves the message author through the current chat configuration");
-verify(/resolveDisplay/.test(explicitConfiguration) && /purpose: ChatConfigurationPurpose::Display/.test(explicitConfiguration) && /\.await\?/.test(explicitConfiguration), "Public presentation resolve must propagate real display API errors without requiring an execution profile");
+verify(/resolveDisplay/.test(explicitConfiguration) && /purpose: ChatConfigurationPurpose::Display/.test(explicitConfiguration) && /\.await\?/.test(explicitConfiguration), "Public presentation resolve must keep native errors visible without requiring an execution profile");
 verify(/ChatConfigurationDisplayResult/.test(explicitConfiguration) && !/resolveChatConfigurationForOptions|\.profile/.test(explicitConfiguration), "Public display results must remain independently typed");
 verify(/pub purpose: ChatConfigurationPurpose/.test(runtime) && !/serde\(default\)[^;]*purpose/s.test(runtime), "Every request must carry an explicit required purpose");
 verify(/purpose: ChatConfigurationPurpose::Execution/.test(enhanced), "Actual sends must resolve the execution purpose");
@@ -157,7 +174,7 @@ verify(/handler\.executeToolInvocation\(&call, ToolExecutionPolicy::Direct\)/.te
 verify(/ownedActiveExecution\(owner, chatId\)/.test(toolsRuntime)
   && /sequence\.owner == owner && sequence\.chatId == chatId/.test(nativeTransport), "Cancellation captures the actual authenticated owner/chat execution before asynchronous model access");
 verify(/source\.sender != "user"/.test(nativeTransport) && /Continuation source was superseded/.test(nativeTransport), "A continuation must identify a real nonsuperseded committed user row");
-verify(/ChatSendRequest::Continue/.test(nativeTransport) && /AdmittedChatTurnWork::Continue \{ userMessageTimestamp, participantId \}/.test(nativeTransport), "Continuation admission never resubmits replacement input or attachments");
+verify(/ChatSendRequest::Continue/.test(nativeTransport) && /AdmittedChatTurnWork::Continue \{ userMessageTimestamp, participantId, summaryPolicy \}/.test(nativeTransport), "Continuation admission never resubmits replacement input or attachments");
 verify(/requestCancellation/.test(nativeTransport) && /cancelled\.store\(true, Ordering::Release\)/.test(nativeTransport), "Cancellation covers the admitted-before-start interval");
 verify(/nativeExecutionId\.as_deref\(\) == Some\(executionId\)/.test(processor) && /isNativeExecutionActive\(chatId, executionId\)/.test(core), "Native cancellation must match the precise runtime execution before touching the model");
 verify(/commitUserMessage/.test(nativeRecordOnly) && /protectRevision/.test(nativeRecordOnly) && /buildRecordedUserMessageContent/.test(nativeRecordOnly), "Record-only must use checked canonical persistence and the real sequence lease");

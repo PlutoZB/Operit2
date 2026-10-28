@@ -34,10 +34,12 @@ pub fn pluginSdkSurface() -> operit_plugin_sdk_ipc::PluginSdkSurface {
 pub struct LocalCoreProxy {
     peerServices: Arc<std::sync::OnceLock<operit_node_runtime::NodeServices::NodeServices>>,
     application: Arc<Mutex<OperitApplication>>,
+    applicationSharedClient: Arc<std::sync::Mutex<std::sync::Weak<LocalApplicationSharedClient<Self>>>>,
     // Retains the shared command view; its executor holds only a Weak reference.
     #[cfg(not(target_arch = "wasm32"))]
     _coreCommandRuntime: Option<Arc<OperitApplication>>,
     chatRuntimeHolder: Arc<tokio::sync::Mutex<ChatRuntimeHolder>>,
+    spaceRuntime: Arc<operit_node_runtime::SpaceRuntime::SpaceRuntime>,
     hostManager: HostManager,
     toolRuntimeSupport: Arc<dyn ToolRuntimeSupport>,
     deviceToolService: Arc<dyn operit_tools::tools::DeviceTools::DeviceToolService>,
@@ -127,6 +129,9 @@ impl LocalCoreProxy {
         let toolRuntimeSupport = application.toolHandler.runtimeSupport();
         let deviceToolService = Arc::new(application.toolHandler.clone());
         let chatRuntimeHolder = application.chatRuntimeHolder.clone();
+        let spaceRuntime = Arc::new(operit_node_runtime::SpaceRuntime::SpaceRuntime::new(
+            chatRuntimeHolder.clone(),
+        ));
         let toolPkgShutdown = Arc::new(application.toolHandler.getOrCreatePackageManager()
             .lock().expect("package manager mutex poisoned").executionEngineShutdown());
         Self {
@@ -136,9 +141,11 @@ impl LocalCoreProxy {
             deviceToolService,
             toolPkgShutdown,
             application: Arc::new(Mutex::new(application)),
+            applicationSharedClient: Arc::new(std::sync::Mutex::new(std::sync::Weak::new())),
             #[cfg(not(target_arch = "wasm32"))]
             _coreCommandRuntime: coreCommandRuntime,
             chatRuntimeHolder,
+            spaceRuntime,
             coreStreamPool: Arc::new(CoreStreamPool::new()),
         }
     }
@@ -229,10 +236,17 @@ impl LocalCoreProxy {
         self.chatRuntimeHolder.clone()
     }
 
-    /// Creates the server-internal client that dispatches only to the local application object.
+    /// Shares the live application client across generated facades without retaining a cycle.
     #[allow(non_snake_case)]
     pub fn localApplicationSharedClient(&self) -> Arc<dyn CoreLinkSharedClient + Send + Sync> {
-        Arc::new(LocalApplicationSharedClient::new(Arc::new(self.clone()), "core/application"))
+        let mut shared = self.applicationSharedClient.lock()
+            .expect("Local application client lock poisoned");
+        if let Some(client) = shared.upgrade() {
+            return client;
+        }
+        let client = Arc::new(LocalApplicationSharedClient::new(Arc::new(self.clone()), "core/application"));
+        *shared = Arc::downgrade(&client);
+        client
     }
 
     /// Builds the shared node capability container over this Core's Host APIs.
@@ -240,9 +254,6 @@ impl LocalCoreProxy {
         &self,
     ) -> operit_node_runtime::CoreNodeRouter::CoreNodeLocalRuntime {
         let proxy = Arc::new(self.clone());
-        let spaceRuntime = Arc::new(operit_node_runtime::SpaceRuntime::SpaceRuntime::new(
-            self.chatRuntimeHolder(),
-        ));
         let sharedClient: Arc<dyn CoreLinkSharedClient + Send + Sync> = proxy.clone();
         let applicationClient = self.localApplicationSharedClient();
         let bindCoreNodeToolRuntime = {
@@ -260,7 +271,7 @@ impl LocalCoreProxy {
             Arc::new(LocalCoreProxy::generatedTargetForSchema),
             bindCoreNodeToolRuntime,
             openPush,
-            spaceRuntime,
+            self.spaceRuntime.clone(),
         ).withPeerServices(self.peerServices.clone())
     }
 

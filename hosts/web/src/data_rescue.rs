@@ -20,13 +20,26 @@ fn json_call(method: &str, args: &[JsValue]) -> Result<Value, String> {
 pub fn executeDataRescue(encoded: &str) -> String {
     let result = (|| -> Result<Value, String> {
         let request: Value = serde_json::from_str(encoded).map_err(|error| error.to_string())?;
+        if request["operation"] == "preferencesExportPath" {
+            let path = request["path"].as_str().ok_or("Missing preference storage path")?;
+            return Ok(Value::Bool(operit_store::PreferencesExport::isPreferencesPath(path)));
+        }
+        if request["operation"] == "exportPreferences" {
+            let path = request["path"].as_str().ok_or("Missing preference storage path")?;
+            let bytes: Vec<u8> = serde_json::from_value(request["bytes"].clone()).map_err(|error| error.to_string())?;
+            let plaintext = operit_store::PreferencesExport::exportPreferences(path, bytes, || {
+                serde_json::from_value::<Vec<u8>>(request["key"].clone())
+                    .map_err(|error| format!("Cannot read the existing preferences key: {error}"))
+            })?;
+            return serde_json::to_value(plaintext).map_err(|error| error.to_string());
+        }
         let mut session = SESSION.get_or_init(|| Mutex::new(None)).lock().map_err(|error| error.to_string())?;
         match request["operation"].as_str() {
             Some("open") => {
                 *session = Some(DataRescue { host: Arc::new(WebRescueHost), archives: Arc::new(crate::WebArchiveStagingHost::new()) });
                 json_call("startup", &[])
             }
-            Some("configure") => json_call("describe", &[]),
+            Some("configure") | Some("configureAutomatic") => json_call("describe", &[]),
             Some("close") => { *session = None; Ok(Value::Null) }
             _ => session.as_ref().ok_or("Open browser data rescue first")?.execute(request),
         }
@@ -38,6 +51,11 @@ pub fn executeDataRescue(encoded: &str) -> String {
 }
 
 impl RescueHost for WebRescueHost {
+    /// Sends measured synchronous WASM progress through the worker Host.
+    fn report_progress(&self, progress: operit_data_rescue::RescueProgress) {
+        json_call("reportProgress", &[JsValue::from_str(&serde_json::to_string(&progress).expect("Serializable rescue progress"))]).expect("Rescue progress Host is available");
+    }
+
     /// Keeps browser physical storage distinct from native directory publication.
     fn layout(&self) -> &str { "operit.browser.v1" }
     /// Describes all origin-owned identities without reading their application configuration.
@@ -51,6 +69,8 @@ impl RescueHost for WebRescueHost {
         let value = call_data_rescue("readFile", &[JsValue::from_str(path), JsValue::from_f64(offset as f64), JsValue::from_f64(length as f64)]).map_err(|error| error.to_string())?;
         Ok(Uint8Array::new(&value).to_vec())
     }
+    /// Uses preferences already converted while the browser Host captures its snapshot.
+    fn export_preferences(&self, _path: &str) -> Result<Option<Vec<u8>>, String> { Ok(None) }
     /// Creates a private import staging tree after the shared engine verifies the entire archive.
     fn begin_restore(&self, id: &str, manifest: &RescueManifest) -> Result<(), String> {
         json_call("beginRestore", &[JsValue::from_str(id), JsValue::from_str(&serde_json::to_string(manifest).map_err(|error| error.to_string())?)])?;

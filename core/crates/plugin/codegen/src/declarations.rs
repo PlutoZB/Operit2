@@ -76,6 +76,7 @@ const MODULES: &[ModuleSpec] = &[
     ModuleSpec { rust_file: "js_sdk/tts.rs", additional_rust_file: None, ts_file: "tts.d.ts", nullable_wire_fields: false },
     ModuleSpec { rust_file: "js_sdk/theme.rs", additional_rust_file: None, ts_file: "theme.d.ts", nullable_wire_fields: false },
     ModuleSpec { rust_file: "js_sdk/catalog.rs", additional_rust_file: None, ts_file: "catalog.d.ts", nullable_wire_fields: false },
+    ModuleSpec { rust_file: "js_sdk/media.rs", additional_rust_file: None, ts_file: "media.d.ts", nullable_wire_fields: false },
     ModuleSpec {
         rust_file: "js_sdk/software_settings.rs",
         additional_rust_file: None,
@@ -1711,6 +1712,7 @@ fn infer_declaration(item: ItemRef<'_>, ts_file: &str) -> Option<(Vec<String>, S
             "SttHost" => Some(vec!["Stt".to_string()]),
             "ThemeHost" => Some(vec!["Theme".to_string()]),
             "CatalogHost" => Some(vec!["Catalog".to_string()]),
+            "MediaHost" => Some(vec!["Media".to_string()]),
             "SoftwareSettingsHost" => Some(vec!["SoftwareSettings".to_string()]),
             "UIHost" => Some(vec!["UI".to_string()]),
             "ChatHost" => Some(vec!["Chat".to_string()]),
@@ -1734,6 +1736,7 @@ fn infer_declaration(item: ItemRef<'_>, ts_file: &str) -> Option<(Vec<String>, S
         "stt.d.ts" => prefixed_path(declaration_name, "Stt"),
         "theme.d.ts" => prefixed_path(declaration_name, "Theme"),
         "catalog.d.ts" => prefixed_path(declaration_name, "Catalog"),
+        "media.d.ts" => prefixed_path(declaration_name, "Media"),
         "software_settings.d.ts" => prefixed_path(declaration_name, "SoftwareSettings"),
         "ui.d.ts" if declaration_name.starts_with("UINode") => {
             vec![declaration_name.to_string()]

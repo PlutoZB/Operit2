@@ -202,12 +202,22 @@ pub struct ChatParticipantProfile {
     pub resources: Vec<ChatResourceRoute>,
 }
 
+/// Declares generic history ownership independently from the plugin's domain entities.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(non_snake_case)]
+#[serde(deny_unknown_fields)]
+pub struct ChatHistoryPolicy {
+    pub isolateParticipants: bool,
+    pub labelUserMessages: bool,
+}
+
 /// Returns one execution participant and its plugin-owned conversation context.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(non_snake_case)]
 #[serde(deny_unknown_fields)]
 pub struct ChatConfigurationResult {
     pub contextKey: String,
+    pub historyPolicy: ChatHistoryPolicy,
     pub profile: ChatParticipantProfile,
     pub participants: Vec<ChatParticipantProfile>,
     /// Contains owner-isolated data for the current execution only; never persisted on messages.
@@ -269,6 +279,12 @@ impl ChatConfigurationResult {
 
 /// Supplies runtime-owned data and plugin operations to provider code.
 pub trait ProviderRuntimeSupport: Send + Sync {
+    /// Executes a local model on the device selected by its inference Binding.
+    fn generateLocalLlm(&self, _bindingKey: String, _modelBinding: String, _request: Value, _settings: Value)
+        -> Pin<Box<dyn Future<Output = Result<Value, String>> + Send + '_>> {
+        Box::pin(async { Err("Local LLM runtime support is unavailable".to_string()) })
+    }
+
     /// Returns the root directory used by provider runtime data.
     fn dataDir(&self) -> Result<PathBuf, String>;
 
@@ -412,7 +428,7 @@ mod chat_configuration_descriptor_tests {
             "toolAccess": { "enabled": true, "allowedBuiltinTools": ["explicit"], "allowedPackages": [], "allowedSkills": [], "allowedMcpServers": [] },
             "resources": [{ "key": "opaque/resource", "readable": true, "writable": false }]
         });
-        json!({ "contextKey": "opaque/conversation", "profile": profile, "participants": [profile], "executionData": { "actor": "participant-1", "voice": "voice", "profileRevision": "7" } })
+        json!({ "contextKey": "opaque/conversation", "historyPolicy":{"isolateParticipants":false,"labelUserMessages":false},"profile": profile, "participants": [profile], "executionData": { "actor": "participant-1", "voice": "voice", "profileRevision": "7" } })
     }
 
     /// Attaches an explicit native fixture owner before testing descriptor-specific validation errors.
@@ -431,6 +447,20 @@ mod chat_configuration_descriptor_tests {
         descriptor.extensionOwner = "org.example.fixture".to_string();
         descriptor.validate().unwrap();
         assert_eq!(serde_json::to_value(descriptor).unwrap(), raw);
+    }
+
+    /// Requires an explicit complete history policy instead of inferring participant isolation from domain identifiers.
+    #[test]
+    fn rejects_missing_or_incomplete_history_policy() {
+        let mut raw = descriptor_json();
+        raw.as_object_mut().unwrap().remove("historyPolicy");
+        assert!(serde_json::from_value::<ChatConfigurationResult>(raw).is_err());
+        for policy in [json!(null), json!({}), json!({"isolateParticipants":true}),
+            json!({"isolateParticipants":true,"labelUserMessages":true,"group":true})] {
+            let mut raw = descriptor_json();
+            raw["historyPolicy"] = policy;
+            assert!(serde_json::from_value::<ChatConfigurationResult>(raw).is_err());
+        }
     }
 
     /// Rejects missing or non-object execution snapshots before runtime owner injection.

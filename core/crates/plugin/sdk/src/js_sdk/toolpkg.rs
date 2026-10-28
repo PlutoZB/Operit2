@@ -518,6 +518,7 @@ pub enum ToolPkgHookEventName {
     Variant21(ToolPkgChatLifecycleEventName),
     Variant17(ToolPkgChatMessageMenuItemEventName),
     Variant18(ToolPkgChatRuntimeEventName),
+    Variant22(ToolPkgChatResponseEventName),
     Variant7(ToolPkgHookEventNameVariant7),
     Variant8(ToolPkgToolLifecycleEventName),
     Variant9(ToolPkgPromptInputEventName),
@@ -662,6 +663,66 @@ pub enum ToolPkgChatViewEventName {
 pub enum ToolPkgChatMessageEventName {
     #[serde(rename = "message_persisted")]
     MessagePersisted,
+}
+/// Names the lifecycle of a plugin-owned native response presentation.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum ToolPkgChatResponseEventName {
+    #[serde(rename = "started")]
+    Started,
+    #[serde(rename = "snapshot")]
+    Snapshot,
+    #[serde(rename = "finished")]
+    Finished,
+    #[serde(rename = "closed")]
+    Closed,
+}
+/// Supplies native identity and semantic parts to the selected response presenter.
+pub struct ToolPkgChatResponseEventPayload {
+    /// Identifies the real conversation.
+    pub chatId: String,
+    /// Identifies the canonical assistant message.
+    pub messageTimestamp: i64,
+    /// Identifies the selected message revision.
+    pub variantIndex: i32,
+    /// Contains the complete, ordered semantic snapshot.
+    pub parts: Vec<super::chat::ChatMessagePart>,
+}
+/// Contains one independently displayed bubble and its delay before delivery.
+pub struct ToolPkgResponseBubble {
+    /// Contains semantic display parts without replacing canonical model history.
+    pub parts: Vec<super::chat::ChatMessagePart>,
+    /// Waits up to 3000 milliseconds before publishing this bubble.
+    pub delayMs: u64,
+}
+/// Appends only newly stable response bubbles.
+pub struct ToolPkgResponsePresentationDelta {
+    /// Contains append-only display work, limited to 256 bubbles per response.
+    pub bubbles: Vec<ToolPkgResponseBubble>,
+}
+/// Combines lifecycle metadata with the native semantic response snapshot.
+pub struct ToolPkgChatResponseHookEvent {
+    /// Carries the lifecycle event and its native response identity.
+    pub base_hook_event_base: ToolPkgHookEventBase<ToolPkgChatResponseEventName, ToolPkgChatResponseEventPayload>,
+}
+/// Describes synchronous results of response presentation hooks.
+pub enum ToolPkgChatResponseHookOutput {
+    Variant1(bool),
+    Variant2(ToolPkgResponsePresentationDelta),
+    Variant3(()),
+}
+/// Supports synchronous or asynchronous response presentation lifecycle callbacks.
+pub enum ToolPkgChatResponseHookReturn {
+    Variant1(bool),
+    Variant2(ToolPkgResponsePresentationDelta),
+    Variant3(()),
+    Variant4(JsFuture<ToolPkgChatResponseHookOutput>),
+}
+/// Registers a generic presenter independent from message persistence notifications.
+pub struct ToolPkgChatResponseHookRegistration {
+    /// Identifies the response hook within its actual package owner.
+    pub id: String,
+    /// Activates on started, emits deltas on snapshot and finished, and releases on closed.
+    pub function: Arc<dyn Fn(ToolPkgChatResponseHookEvent) -> ToolPkgChatResponseHookReturn + Send + Sync>,
 }
 /// Names the click event dispatched for a chat message context-menu item.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -3024,6 +3085,8 @@ pub trait ToolPkgRegistryMethods: Send + Sync {
     /// Registers a callback for chat runtime state changes.
     /// @since ToolPkg API 2.0.0
     fn registerChatRuntimeHook(&self, definition: ToolPkgChatRuntimeHookRegistration) -> ();
+    /// Registers native timed reply presentation without taking ownership of model execution.
+    fn registerChatResponseHook(&self, definition: ToolPkgChatResponseHookRegistration) -> ();
     /// Registers a typed timer, interval, or broadcast hook.
     fn registerHostEventHook_overload_1<TPayload>(
         &self,

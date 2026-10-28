@@ -45,17 +45,23 @@ export function nativeToolParameters(participantId) {
 
 /** Runs actual native-boundary JavaScript with strict transport endpoints; Rust injection itself is not executed by this Node harness. */
 export function createNativeToolRuntime(globals, dispatchIpc) {
-  const terminal = [], pending = new Map();
+  const terminal = [], pending = new Map(), detached = new Set();
   let nextCall = 0;
   const context=vm.createContext({...globals});
   vm.runInContext(nativeToolSource('hosts/web/src/javascript_promises.js'),context);
   const registry=context.__operitHostPromiseRegistry;
+  /** Tracks the native execution owner selected by the production continuation runtime. */
+  context.__operitNativeActivateCall = (callId, interrupt) => {
+    assert.equal(typeof callId, "string");
+    assert.equal(typeof interrupt, "boolean");
+    context.nativeActiveCallId = callId;
+  };
   /** Supplies the trusted library source through the production structured binding. */
   context.__operitNativeReadBootstrapLibrary=registry.syncBinding(bootstrapLibrarySource);
-  context.__operitNativeSetCallResult=registry.syncBinding((callId,value)=>{
+  context.__operitNativeSetCallStructuredResult=(callId,value)=>{
     const request=pending.get(callId);assert.ok(request,'Unexpected native result '+callId);
     pending.delete(callId);terminal.push({callId,type:'result',value});request.resolve(value);
-  });
+  };
   context.__operitNativeSetCallError=registry.syncBinding((callId,value)=>{
     const request=pending.get(callId);assert.ok(request,'Unexpected native failure '+callId);
     pending.delete(callId);terminal.push({callId,type:'error',value});request.reject(new Error(value.message));
@@ -63,6 +69,8 @@ export function createNativeToolRuntime(globals, dispatchIpc) {
   context.__operitNativeLogJsExecutionTrace=(callId,message)=>{assert.equal(typeof callId,'string');assert.equal(typeof message,'string');};
   context.__operitNativeLog=()=>{};
   context.__operitNativeCancelJavaScriptPromises=scope=>registry.cancel(scope);
+  /** Records calls retained by pending JavaScript continuations after terminal delivery. */
+  context.__operitNativeNotifyDetachedCall = callId => { assert.equal(typeof callId, "string"); detached.add(callId); };
   context.__operitNativeHashText=text=>{let hash=0;for(let i=0;i<text.length;i++)hash=(Math.imul(hash,31)+text.charCodeAt(i))>>>0;return hash.toString(16);};
   context.__operitNativeInvokeToolPkgIpc=registry.binding((requestId,packageTarget,callerContextKey,targetContextKey,targetRuntime,channel,payload)=>{
     assert.equal(packageTarget,'com.operit.character_cards');
@@ -87,7 +95,11 @@ export function createNativeToolRuntime(globals, dispatchIpc) {
     );
     const sourceId = callId + ":" + createHash("sha256").update(script).digest("hex");
     context.__operitRegisterScriptSource(sourceId, script);
-    context.__operitExecuteScriptFunction(callId, params, sourceId, name, 10, 10000);
+    context.__operitExecuteScriptFunction(callId, params, sourceId, name, true, {
+      packageTarget: 'com.operit.character_cards',
+      contextKey: 'toolpkg_main:com.operit.character_cards',
+      runtime: params.__operit_toolpkg_runtime_kind,
+    });
     return result;
   }
   return { invoke, terminal };

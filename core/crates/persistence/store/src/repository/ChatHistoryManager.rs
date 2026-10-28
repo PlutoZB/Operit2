@@ -1232,6 +1232,19 @@ impl ChatHistoryManager {
         Ok(())
     }
 
+    /// Persists summary compaction without overwriting totals recorded by a concurrent reply.
+    pub fn updateChatContextWindow(
+        &self,
+        chatId: String,
+        currentWindowSize: i64,
+    ) -> ChatHistoryManagerResult<ChatHistory> {
+        self.chatDao.updateChatContextWindow(&chatId, currentWindowSize, currentTimeMillis())?;
+        self.recordChatMetadata(&chatId)?;
+        self.loadChatHistory(chatId.clone())?.ok_or_else(|| {
+            ChatHistoryManagerError::IllegalArgument(format!("Chat does not exist: {chatId}"))
+        })
+    }
+
     /// Persists the active chat id.
     pub fn setCurrentChatId(&self, chatId: String) -> ChatHistoryManagerResult<()> {
         self.currentChatIdDataStore.edit(|preferences| {

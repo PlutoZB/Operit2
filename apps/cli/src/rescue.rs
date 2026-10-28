@@ -19,7 +19,7 @@ fn option(args: &[String], key: &str) -> Result<Option<String>, String> {
 /// Rejects options that are not part of the explicit rescue command contract.
 fn validate_options(args: &[String], command: &str) -> Result<(), String> {
     let allowed = match command {
-        "export" | "inspect" | "import" => ["--password-file", "--runtime-root", "--workspace-root", "--confirm"].as_slice(),
+        "export" | "inspect" | "import" => ["--runtime-root", "--workspace-root", "--confirm"].as_slice(),
         "resume" => ["--runtime-root", "--workspace-root", "--confirm"].as_slice(),
         "describe" => ["--runtime-root", "--workspace-root"].as_slice(),
         _ => return Err("Unknown rescue command; run operit2 rescue --help".into()),
@@ -41,15 +41,6 @@ fn validate_options(args: &[String], command: &str) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-/// Reads a backup password from an explicitly selected file without exposing it in process arguments.
-fn password(args: &[String]) -> Result<String, String> {
-    let path = option(args, "--password-file")?.ok_or("--password-file is required")?;
-    let value = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
-    let password = value.trim_end_matches(['\r', '\n']).to_string();
-    if password.chars().count() < 12 { return Err("Use a backup password containing at least 12 characters".into()); }
-    Ok(password)
 }
 
 /// Removes an owned temporary archive and preserves both operation and cleanup diagnostics.
@@ -91,7 +82,7 @@ fn upload(session: &mut NativeRescueSession, path: &str) -> Result<String, Strin
 /// Executes the independent rescue command before any normal CLI bootstrap is reached.
 pub(crate) fn run(args: &[String]) -> Result<(), String> {
     if args.is_empty() || args[0] == "--help" || args[0] == "help" {
-        println!("operit2 rescue describe\noperit2 rescue export <new.zip> --password-file <file>\noperit2 rescue inspect <backup.zip> --password-file <file>\noperit2 rescue import <backup.zip> --password-file <file> --confirm\noperit2 rescue resume --confirm\nAll commands accept explicit --runtime-root <directory> --workspace-root <directory>. Close every Operit window and background service first.");
+        println!("operit2 rescue describe\noperit2 rescue export <new.zip>\noperit2 rescue inspect <backup.zip>\noperit2 rescue import <backup.zip> --confirm\noperit2 rescue resume --confirm\nAll commands accept explicit --runtime-root <directory> --workspace-root <directory>. Close every Operit window and background service first.");
         return Ok(());
     }
     validate_options(args, &args[0])?;
@@ -127,14 +118,13 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         _ => return Err("Specify --runtime-root and --workspace-root together".into()),
     };
     let default_runtime = crate::bootstrap::rescue_default_runtime();
-    let secrets = crate::bootstrap::rescue_secret_store(&roots.runtime_root);
-    let mut session = NativeRescueSession::open(default_runtime, secrets)?;
+    let mut session = crate::bootstrap::rescue_session(default_runtime, &roots.runtime_root)?;
     session.execute(json!({"operation": "configure", "roots": roots}))?;
     let value = match command {
         "describe" => session.execute(json!({"operation": "describe"}))?,
         "export" => {
             let destination = args.get(1).filter(|path| !path.starts_with("--")).ok_or("Export destination is required")?;
-            let archive = session.execute(json!({"operation": "export", "password": password(args)?}))?;
+            let archive = session.execute(json!({"operation": "export"}))?;
             let mut created = false;
             let copied = (|| {
                 let reference = archive["fileReference"].as_str().ok_or("Export returned no file reference")?;
@@ -158,10 +148,9 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         "inspect" | "import" => {
             let path = args.get(1).filter(|path| !path.starts_with("--")).ok_or("Backup archive path is required")?;
             if args[0] == "import" && !args.iter().any(|arg| arg == "--confirm") { return Err("Import replaces selected live data and requires --confirm".into()); }
-            let password = password(args)?;
             let id = upload(&mut session, path)?;
             let operation = if args[0] == "import" { "restore" } else { "inspect" };
-            let value = session.execute(json!({"operation": operation, "archiveId": id, "password": password}));
+            let value = session.execute(json!({"operation": operation, "archiveId": id}));
             cleanup_archive(&mut session, &id, value)?
         }
         "resume" => {

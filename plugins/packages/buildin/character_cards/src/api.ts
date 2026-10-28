@@ -23,8 +23,11 @@ export interface MemoryChat {
   isCurrent: boolean; inputTokens: number; outputTokens: number;
 }
 
+/** Publishes the listing contract: surviving bound chats plus bindings whose Core conversation disappeared. */
+export interface MemoryChatListing { chats: MemoryChat[]; missingChatIds: string[] }
+
 /** Publishes the complete MemoryExtractionResult contract in the standalone dependency client. */
-export interface MemoryExtractionResult { ownerKey: string; created: number; updated: number; merged: number; links: number; profileUpdated: boolean }
+export interface MemoryExtractionResult { ownerKey: string; created: number; updated: number; merged: number; links: number; profileUpdated: boolean; skipped: number }
 
 /** Publishes the complete MemoryRebuild contract in the standalone dependency client. */
 export interface MemoryRebuild {
@@ -50,6 +53,8 @@ export interface MemoryRebuildProgress {
 
 /** Publishes the complete MemorySearchOptions contract in the standalone dependency client. */
 export interface MemorySearchOptions {
+  limit?: number;
+  excludeIds?: string[];
   ownerKey: string;
   query: string;
   folderPath: string | null;
@@ -90,6 +95,7 @@ export interface ChatParticipantProfile {
 /** Returns one selected execution profile together with its available participants. */
 export interface ChatConfigurationExecutionResult {
   contextKey: string;
+  historyPolicy: { isolateParticipants: boolean; labelUserMessages: boolean };
   profile: ChatParticipantProfile;
   participants: ChatParticipantProfile[];
   executionData: JsonObject;
@@ -215,8 +221,10 @@ export interface MemoryQueryMatch { ownerKey: string; title: string; content: st
 export interface MemoryQueryResult { memories: MemoryQueryMatch[]; snapshotId: string | null; snapshotCreated: boolean; excludedBySnapshotCount: number }
 /** Maps every published domain method to its exact input and output contract. */
 export interface DomainOperations {
-  "memory.searchWithOptions": { input: MemorySearchOptions; output: { ownerKey: string; items: MemoryRecord[] } };
-  "memory.chat.list": { input: { ownerKey: string }; output: MemoryChat[] };
+  "memory.searchWithOptions": { input: MemorySearchOptions; output: { ownerKey: string; items: MemoryRecord[]; documents: ({ memoryId: string } & DomainOperations["memory.chunks"]["output"])[]; excludedBySnapshotCount: number } };
+  "memory.chunks": { input: OwnerParams & { memoryId: string; query: string; count: number }; output: { total: number; chunks: { id: string; memoryUuid: string; chunkIndex: number; content: string }[] } };
+  "memory.chat.list": { input: { ownerKey: string }; output: MemoryChatListing };
+  "memory.chat.pruneMissing": { input: { ownerKey: string }; output: { removedChatIds: string[]; removedCandidateIds: string[] } };
   "memory.chat.update": { input: { ownerKey: string; chatId: string }; output: MemoryExtractionResult };
   "memory.categorize": { input: { ownerKey: string }; output: number };
   "memory.rebuild.start": { input: { ownerKey: string; rebuild: MemoryRebuild }; output: MemoryRebuildProgress };
@@ -224,7 +232,10 @@ export interface DomainOperations {
   "memory.rebuild.cancel": { input: { ownerKey: string }; output: MemoryRebuildProgress };
   "memory.embeddings.rebuild": { input: { ownerKey: string }; output: number };
   "memory.candidate.enqueue": { input: { chatId: string; timestamp: number; variantIndex: number; sourceType: "reply_finalized_auto" | "selected_user_message"; ownerKey: string | null }; output: { owners: string[]; candidateIds: string[] } };
+  "memory.candidates.retryFailed": { input: { ownerKey: string }; output: { retried: number } };
+  "memory.candidates.clearFailed": { input: { ownerKey: string }; output: { cleared: number } };
   "chat.configuration.resolve": { input: ChatConfigurationRequest; output: ChatConfigurationResult };
+  "chat.configuration.binding.find": { input: { chatId: string }; output: ChatBindingRecord | null };
   "chat.configuration.binding.read": { input: { chatId: string }; output: ChatBindingRecord };
   "chat.configuration.binding.write": { input: ChatBindingRecord; output: ChatBindingRecord };
   "chat.configuration.binding.delete": { input: { chatId: string }; output: { chatId: string; deleted: boolean } };
@@ -398,8 +409,10 @@ export const characterCards = {
     /** Queries participant-bound memories using provider-owned snapshots and document matching. */
     query: (payload: MemoryQueryRequest): Promise<MemoryQueryResult> => ToolPkg.callDependency<MemoryQueryRequest, MemoryQueryResult>("com.operit.character_cards", "memory.query", payload),
     chats: {
-      /** Lists actual generic chat summaries selected by persisted plugin bindings. */
-      list: (payload: OwnerParams): Promise<MemoryChat[]> => call("memory.chat.list", payload),
+      /** Lists actual generic chat summaries selected by persisted plugin bindings, including missing-binding ids. */
+      list: (payload: OwnerParams): Promise<MemoryChatListing> => call("memory.chat.list", payload),
+      /** Deletes bindings whose Core conversation no longer exists. */
+      pruneMissing: (payload: OwnerParams): Promise<{ removedChatIds: string[]; removedCandidateIds: string[] }> => call("memory.chat.pruneMissing", payload),
       /** Applies genuine functional MEMORY extraction to the selected real chat. */
       update: (payload: DomainInput<"memory.chat.update">): Promise<MemoryExtractionResult> => call("memory.chat.update", payload),
     },
@@ -420,6 +433,10 @@ export const characterCards = {
     candidates: {
       /** Enqueues an actual finalized reply or explicit selected-user message. */
       enqueue: (payload: DomainInput<"memory.candidate.enqueue">): Promise<DomainOutput<"memory.candidate.enqueue">> => call("memory.candidate.enqueue", payload),
+      /** Returns terminal failed records to the pending queue for a genuine interval retry. */
+      retryFailed: (payload: OwnerParams): Promise<DomainOutput<"memory.candidates.retryFailed">> => call("memory.candidates.retryFailed", payload),
+      /** Deletes terminal failed records instead of leaving them in the queue permanently. */
+      clearFailed: (payload: OwnerParams): Promise<DomainOutput<"memory.candidates.clearFailed">> => call("memory.candidates.clearFailed", payload),
     },
     shared: {
       /** Lists shared memory libraries. */
@@ -461,7 +478,7 @@ export const characterCards = {
     graph: (payload: OwnerParams): Promise<DomainOutput<"memory.graph">> => call("memory.graph", payload),
     /** Lists memory records. */
     list: (payload: OwnerParams): Promise<DomainOutput<"memory.list">> => call("memory.list", payload),
-    /** Searches full records with explicit filters through the sole service and its durable embedding cache. */
+    /** Searches bounded source and document hits using one ephemeral query vector. */
     searchWithOptions: (payload: MemorySearchOptions): Promise<DomainOutput<"memory.searchWithOptions">> => call("memory.searchWithOptions", payload),
     /** Searches memory records. */
     search: (payload: DomainInput<"memory.search">): Promise<DomainOutput<"memory.search">> => call("memory.search", payload),

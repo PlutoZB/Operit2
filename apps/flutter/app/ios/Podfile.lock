@@ -12,6 +12,8 @@ PODS:
     - Flutter
   - integration_test (0.0.1):
     - Flutter
+  - operit_keep_alive (0.1.0):
+    - Flutter
   - package_info_plus (0.4.5):
     - Flutter
   - printing (1.0.0):
@@ -34,6 +36,7 @@ DEPENDENCIES:
   - geolocator_apple (from `.symlinks/plugins/geolocator_apple/darwin`)
   - image_picker_ios (from `.symlinks/plugins/image_picker_ios/ios`)
   - integration_test (from `.symlinks/plugins/integration_test/ios`)
+  - operit_keep_alive (from `.symlinks/plugins/operit_keep_alive/ios`)
   - package_info_plus (from `.symlinks/plugins/package_info_plus/ios`)
   - printing (from `.symlinks/plugins/printing/ios`)
   - record_ios (from `.symlinks/plugins/record_ios/ios`)
@@ -54,6 +57,8 @@ EXTERNAL SOURCES:
     :path: ".symlinks/plugins/image_picker_ios/ios"
   integration_test:
     :path: ".symlinks/plugins/integration_test/ios"
+  operit_keep_alive:
+    :path: ".symlinks/plugins/operit_keep_alive/ios"
   package_info_plus:
     :path: ".symlinks/plugins/package_info_plus/ios"
   printing:
@@ -74,12 +79,13 @@ SPEC CHECKSUMS:
   geolocator_apple: 66b711889fd333205763b83c9dcf0a57a28c7afd
   image_picker_ios: 4f2f91b01abdb52842a8e277617df877e40f905b
   integration_test: 252f60fa39af5e17c3aa9899d35d908a0721b573
+  operit_keep_alive: a08349ef11bc1577dd06fb7396e520682ff09acc
   package_info_plus: c0502532a26c7662a62a356cebe2692ec5fe4ec4
   printing: 233e1b73bd1f4a05615548e9b5a324c98588640b
   record_ios: 3b171007ae5de51221a3a76d2b379a7105ca98b5
   url_launcher_ios: bb13df5870e8c4234ca12609d04010a21be43dfa
   video_player_avfoundation: e54d03b3b19f64f2c557354f72ce538387541ba6
-  webview_flutter_wkwebview: 29eb20d43355b48fe7d07113835b9128f84e3af4
+  webview_flutter_wkwebview: 08f7e3ddafd07a1c7319987f5af4ddb173964b24
 
 PODFILE CHECKSUM: c3e2fd0b8ba159429b3132aec1be7ffad37086e9
 

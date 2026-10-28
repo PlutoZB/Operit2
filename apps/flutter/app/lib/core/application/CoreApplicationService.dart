@@ -2,9 +2,10 @@
 
 import 'dart:async';
 import 'PluginHotReload.dart';
+import 'WorkActivityPresentationService.dart';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
+import 'package:operit_keep_alive/operit_keep_alive.dart';
 import 'package:flutter/widgets.dart';
 
 import '../bridge/ProxyCoreRuntimeBridge.dart';
@@ -21,7 +22,6 @@ class CoreApplicationService with WidgetsBindingObserver {
 
   static final CoreApplicationService instance = CoreApplicationService._();
   static const String _logTag = 'CoreApplication';
-  static const MethodChannel _runtimeChannel = MethodChannel('operit/runtime');
   static const GeneratedCoreProxyClients _coreClients =
       GeneratedCoreProxyClients(ProxyCoreRuntimeBridge());
 
@@ -32,7 +32,7 @@ class CoreApplicationService with WidgetsBindingObserver {
 
   bool _initialized = false;
   AppLifecycleState? _lastEmittedLifecycleState;
-  bool _localBackgroundServiceStartAttempted = false;
+  KeepAliveLease? _coreResidency;
   Future<void>? _runtimeServicesStart;
   Object? _pendingStartupError;
 
@@ -62,6 +62,7 @@ class CoreApplicationService with WidgetsBindingObserver {
       verboseLevel: VerboseLevel.level1,
     );
     _initialized = true;
+    OperitKeepAlive.instance.report.addListener(_handleResidencyChanged);
     PluginHotReload.register(_coreClients);
     WidgetsBinding.instance.addObserver(this);
     _runtimeManager.addListener(_handleRuntimeBootstrapChanged);
@@ -79,6 +80,7 @@ class CoreApplicationService with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed &&
         _runtimeManager.runtimeConfigured) {
       unawaited(_syncHostSubscriber());
+      unawaited(WorkActivityPresentationService.instance.refreshCapabilities());
     }
     unawaited(_emitLifecycleEvent(state));
   }
@@ -199,9 +201,10 @@ class CoreApplicationService with WidgetsBindingObserver {
         tag: _logTag,
         verboseLevel: VerboseLevel.level1,
       );
-      await _startLocalBackgroundService();
+      await _retainCoreRuntime();
       await _syncHostSubscriber();
       AppNotificationService.instance.initialize();
+      await WorkActivityPresentationService.instance.initialize();
       if (!_runtimeManager.config.confirmed) {
         ClientLogger.i(
           'runtime services start done localStorageConfirmed=false elapsedMs=${stopwatch.elapsedMilliseconds}',
@@ -251,30 +254,28 @@ class CoreApplicationService with WidgetsBindingObserver {
     }
   }
 
-  /// Starts the Android foreground Core service for a local runtime.
-  Future<void> _startLocalBackgroundService() async {
-    if (_localBackgroundServiceStartAttempted ||
-        kIsWeb ||
-        defaultTargetPlatform != TargetPlatform.android) {
-      ClientLogger.v(
-        'local background service not started attempted=$_localBackgroundServiceStartAttempted isWeb=$kIsWeb platform=$defaultTargetPlatform',
-        tag: _logTag,
-        verboseLevel: VerboseLevel.level1,
-      );
-      return;
-    }
-    final stopwatch = Stopwatch()..start();
-    ClientLogger.v(
-      'local background service start',
-      tag: _logTag,
-      verboseLevel: VerboseLevel.level1,
+  /// Retains the process-owned Core independently of pages and window visibility.
+  Future<void> _retainCoreRuntime() async {
+    if (_coreResidency != null) return;
+    final lease = await OperitKeepAlive.instance.acquire(
+      reason: 'Core runtime',
     );
-    _localBackgroundServiceStartAttempted = true;
-    await _runtimeChannel.invokeMethod<void>('startLocalCoreService');
-    ClientLogger.v(
-      'local background service done elapsedMs=${stopwatch.elapsedMilliseconds}',
+    _coreResidency = lease;
+    ClientLogger.i(
+      'Core residency protection=${lease.report.protection.name} '
+      'closeToTray=${lease.report.closeToTray} detail=${lease.report.detail}',
       tag: _logTag,
-      verboseLevel: VerboseLevel.level1,
+    );
+  }
+
+  /// Records actual host protection changes, including expiration and native resource loss.
+  void _handleResidencyChanged() {
+    final report = OperitKeepAlive.instance.report.value;
+    if (report == null) return;
+    ClientLogger.i(
+      'Core residency changed protection=${report.protection.name} '
+      'leases=${report.activeLeases} detail=${report.detail}',
+      tag: _logTag,
     );
   }
 

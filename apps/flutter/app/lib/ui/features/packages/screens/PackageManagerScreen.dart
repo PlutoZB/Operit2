@@ -65,6 +65,7 @@ class _PackageManagerScreenState extends State<PackageManagerScreen>
   Object? _mcpTabToken;
   Widget? _mcpTabWidget;
   bool _loading = true;
+  bool _actionsExpanded = false;
   bool _searchFiltering = false;
   String _searchInput = '';
   String _searchQuery = '';
@@ -77,6 +78,7 @@ class _PackageManagerScreenState extends State<PackageManagerScreen>
   Future<void>? _snapshotLoad;
   bool _snapshotPending = false;
   Map<String, String> _scopes = {};
+  Set<String> _customizedPackageNames = <String>{};
   StreamSubscription<int>? _scopeSubscription;
 
   GeneratedApplicationPackageManagerCoreProxy get _packageManager =>
@@ -181,6 +183,7 @@ class _PackageManagerScreenState extends State<PackageManagerScreen>
         _packageManager.getBundledExternalPackageCandidates(),
         _packageManager.getBundledExternalToolPkgContainerRuntimes(),
         widget.clients.application.getExtensionScopes(kind: 'package'),
+        _packageManager.getCustomizedPackageNames(),
       ]);
       if (!_canApplySnapshot(generation)) {
         return;
@@ -208,6 +211,7 @@ class _PackageManagerScreenState extends State<PackageManagerScreen>
       final enabledPackageNameSet = enabledPackages.toSet();
       setState(() {
         _scopes = scopes;
+        _customizedPackageNames = (results[7] as List<String>).toSet();
         _snapshot = PackageManagerSnapshot(
           availablePackages: availablePackages,
           enabledPackageNames: enabledPackageNameSet,
@@ -328,12 +332,17 @@ class _PackageManagerScreenState extends State<PackageManagerScreen>
     if (!mounted) {
       return;
     }
+    final customized = _customizedPackageNames.contains(package.name);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) {
         return AlertDialog(
-          title: const Text('删除包'),
-          content: Text('确定删除 ${toolPackageDisplayName(package)}？此操作不可撤销。'),
+          title: Text(customized ? '卸载自定义' : '删除包'),
+          content: Text(
+            customized
+                ? '卸载 ${toolPackageDisplayName(package)} 的自定义版本，恢复使用内置版本。数据和配置会保留。'
+                : '确定删除 ${toolPackageDisplayName(package)}？此操作不可撤销。',
+          ),
           actions: <Widget>[
             TextButton(
               onPressed: () => Navigator.of(context).pop(false),
@@ -345,7 +354,7 @@ class _PackageManagerScreenState extends State<PackageManagerScreen>
                 backgroundColor: Theme.of(context).colorScheme.error,
                 foregroundColor: Theme.of(context).colorScheme.onError,
               ),
-              child: const Text('删除'),
+              child: Text(customized ? '卸载自定义' : '删除'),
             ),
           ],
         );
@@ -387,12 +396,17 @@ class _PackageManagerScreenState extends State<PackageManagerScreen>
     if (!mounted) {
       return;
     }
+    final customized = _customizedPackageNames.contains(plugin.packageName);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) {
         return AlertDialog(
-          title: const Text('删除插件'),
-          content: Text('确定删除 ${toolPkgContainerDisplayName(plugin)}？此操作不可撤销。'),
+          title: Text(customized ? '卸载自定义' : '删除插件'),
+          content: Text(
+            customized
+                ? '卸载 ${toolPkgContainerDisplayName(plugin)} 的自定义版本，恢复使用内置版本。数据和配置会保留。'
+                : '确定删除 ${toolPkgContainerDisplayName(plugin)}？此操作不可撤销。',
+          ),
           actions: <Widget>[
             TextButton(
               onPressed: () => Navigator.of(context).pop(false),
@@ -404,7 +418,7 @@ class _PackageManagerScreenState extends State<PackageManagerScreen>
                 backgroundColor: Theme.of(context).colorScheme.error,
                 foregroundColor: Theme.of(context).colorScheme.onError,
               ),
-              child: const Text('删除'),
+              child: Text(customized ? '卸载自定义' : '删除'),
             ),
           ],
         );
@@ -602,7 +616,10 @@ class _PackageManagerScreenState extends State<PackageManagerScreen>
   Widget _buildPluginTab() {
     return PluginTabContent(
       plugins: _filteredPlugins,
+      bundledUpdates: _bundledUpdates,
+      onUpdatePlugin: _updateBundledExternalPackage,
       scopes: _scopes,
+      customizedPackageNames: _customizedPackageNames,
       onMoveScope: _movePackageScope,
       morePlugins: _filteredMorePlugins,
       loadIssues: _filteredPluginLoadIssues,
@@ -621,7 +638,10 @@ class _PackageManagerScreenState extends State<PackageManagerScreen>
   Widget _buildPackageTab() {
     return PackageTabContent(
       packages: _filteredPackages,
+      bundledUpdates: _bundledUpdates,
+      onUpdatePackage: _updateBundledExternalPackage,
       scopes: _scopes,
+      customizedPackageNames: _customizedPackageNames,
       onMoveScope: _movePackageScope,
       enabledPackageNames: _snapshot.enabledPackageNames,
       loadIssues: _filteredPackageLoadIssues,
@@ -667,9 +687,10 @@ class _PackageManagerScreenState extends State<PackageManagerScreen>
     );
   }
 
-  /// Builds package management actions, including the shared environment editor.
+  /// Builds the expandable action button used across the package tabs.
   Widget _buildFloatingActions(BuildContext context) {
     final l10n = AppLocalizations.of(context)!;
+    final colorScheme = Theme.of(context).colorScheme;
     final marketTab = switch (_selectedTab) {
       PackageTab.plugins => MarketHomeTab.all,
       PackageTab.packages => MarketHomeTab.all,
@@ -682,36 +703,90 @@ class _PackageManagerScreenState extends State<PackageManagerScreen>
       PackageTab.skills => '打开技能市场',
       PackageTab.mcp => '打开 MCP 市场',
     };
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: <Widget>[
-        FloatingActionButton.small(
-          heroTag: null,
-          tooltip: l10n.packageConfigureEnvironmentVariables,
-          backgroundColor: Theme.of(context).colorScheme.secondaryContainer,
-          foregroundColor: Theme.of(context).colorScheme.onSecondaryContainer,
-          onPressed: () => PackageEnvironmentVariablesDialog.show(
-            context: context,
-            clients: widget.clients,
+    return TapRegion(
+      onTapOutside: (_) => _setActionsExpanded(false),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: <Widget>[
+          AnimatedSize(
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOutCubic,
+            alignment: Alignment.bottomRight,
+            clipBehavior: Clip.none,
+            child: _actionsExpanded
+                ? Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: <Widget>[
+                        FloatingActionButton.small(
+                          heroTag: null,
+                          tooltip: l10n.packageConfigureEnvironmentVariables,
+                          backgroundColor: colorScheme.secondaryContainer,
+                          foregroundColor: colorScheme.onSecondaryContainer,
+                          onPressed: () {
+                            _setActionsExpanded(false);
+                            PackageEnvironmentVariablesDialog.show(
+                              context: context,
+                              clients: widget.clients,
+                            );
+                          },
+                          child: const Icon(Icons.settings_outlined),
+                        ),
+                        const SizedBox(height: 12),
+                        FloatingActionButton.small(
+                          heroTag: null,
+                          tooltip: marketTooltip,
+                          backgroundColor: colorScheme.secondaryContainer,
+                          foregroundColor: colorScheme.onSecondaryContainer,
+                          onPressed: () {
+                            _setActionsExpanded(false);
+                            _openMarket(marketTab);
+                          },
+                          child: const Icon(Icons.storefront_outlined),
+                        ),
+                        const SizedBox(height: 12),
+                        FloatingActionButton.small(
+                          heroTag: null,
+                          tooltip: _addActionTooltip,
+                          backgroundColor: colorScheme.secondaryContainer,
+                          foregroundColor: colorScheme.onSecondaryContainer,
+                          onPressed: () {
+                            _setActionsExpanded(false);
+                            _handleAddAction();
+                          },
+                          child: const Icon(Icons.add),
+                        ),
+                      ],
+                    ),
+                  )
+                : const SizedBox.shrink(),
           ),
-          child: const Icon(Icons.settings_outlined),
-        ),
-        const SizedBox(height: 12),
-        FloatingActionButton(
-          heroTag: null,
-          onPressed: () => _openMarket(marketTab),
-          tooltip: marketTooltip,
-          child: const Icon(Icons.store_outlined),
-        ),
-        const SizedBox(height: 12),
-        FloatingActionButton(
-          heroTag: null,
-          onPressed: _handleAddAction,
-          tooltip: _addActionTooltip,
-          child: const Icon(Icons.add),
-        ),
-      ],
+          FloatingActionButton(
+            heroTag: null,
+            tooltip: _actionsExpanded ? '收起操作' : '更多操作',
+            onPressed: () => _setActionsExpanded(!_actionsExpanded),
+            child: AnimatedRotation(
+              turns: _actionsExpanded ? 0.25 : 0,
+              duration: const Duration(milliseconds: 180),
+              child: const Icon(Icons.more_horiz),
+            ),
+          ),
+        ],
+      ),
     );
+  }
+
+  /// Updates the expanded state of the floating action menu.
+  void _setActionsExpanded(bool expanded) {
+    if (_actionsExpanded == expanded || !mounted) {
+      return;
+    }
+    setState(() {
+      _actionsExpanded = expanded;
+    });
   }
 
   String get _searchHintText {
@@ -996,11 +1071,24 @@ class _PackageManagerScreenState extends State<PackageManagerScreen>
     }
   }
 
+  /// Indexes bundled source updates owned by installed extensions.
+  Map<String, core_proxy.BundledExternalPackageCandidate> get _bundledUpdates =>
+      {
+        for (final candidate in _snapshot.bundledExternalCandidates)
+          if (_scopes.containsKey(candidate.packageName))
+            candidate.packageName: candidate,
+      };
+
+  /// Lists optional plugins that have no installed owner.
   List<core_proxy.BundledExternalPackageCandidate> get _filteredMorePlugins {
     final query = _searchQuery.trim().toLowerCase();
     final items =
         _snapshot.bundledExternalCandidates
-            .where((candidate) => candidate.isToolPkg)
+            .where(
+              (candidate) =>
+                  candidate.isToolPkg &&
+                  !_scopes.containsKey(candidate.packageName),
+            )
             .toList()
           ..sort(
             (left, right) => bundledExternalPackageDisplayName(
@@ -1021,11 +1109,16 @@ class _PackageManagerScreenState extends State<PackageManagerScreen>
         .toList(growable: false);
   }
 
+  /// Lists optional standalone packages that have no installed owner.
   List<core_proxy.BundledExternalPackageCandidate> get _filteredMorePackages {
     final query = _searchQuery.trim().toLowerCase();
     final items =
         _snapshot.bundledExternalCandidates
-            .where((candidate) => !candidate.isToolPkg)
+            .where(
+              (candidate) =>
+                  !candidate.isToolPkg &&
+                  !_scopes.containsKey(candidate.packageName),
+            )
             .toList()
           ..sort(
             (left, right) => bundledExternalPackageDisplayName(
@@ -1124,6 +1217,7 @@ class _PackageManagerScreenState extends State<PackageManagerScreen>
       builder: (context) {
         return PluginDetailsDialog(
           plugin: plugin,
+          isCustomized: _customizedPackageNames.contains(plugin.packageName),
           enabled: _snapshot.enabledPluginContainerNames.contains(
             plugin.packageName,
           ),
@@ -1134,26 +1228,15 @@ class _PackageManagerScreenState extends State<PackageManagerScreen>
               _openPluginUi(plugin, initialRouteId: initialRouteId);
             }
           },
-          onDeletePackage: _canDeletePlugin(plugin)
-              ? () {
-                  Navigator.of(context).pop();
-                  if (mounted) {
-                    unawaited(_deletePlugin(plugin));
-                  }
-                }
-              : null,
+          onDeletePackage: () {
+            Navigator.of(context).pop();
+            if (mounted) {
+              unawaited(_deletePlugin(plugin));
+            }
+          },
         );
       },
     );
-  }
-
-  /// Returns whether the plugin source can be removed from package storage.
-  bool _canDeletePlugin(core_proxy.ToolPkgContainerRuntime plugin) {
-    return switch (plugin.sourceType) {
-      core_proxy.ToolPkgSourceType.asset => false,
-      core_proxy.ToolPkgSourceType.market ||
-      core_proxy.ToolPkgSourceType.externalValue => true,
-    };
   }
 
   /// Moves an installed package with its configuration and refreshes all rows.
@@ -1174,6 +1257,21 @@ class _PackageManagerScreenState extends State<PackageManagerScreen>
       ).showSnackBar(SnackBar(content: Text(error.toString())));
       await _loadSnapshot();
     }
+  }
+
+  /// Replaces an installed bundled source while retaining its scope and settings.
+  Future<void> _updateBundledExternalPackage(
+    core_proxy.BundledExternalPackageCandidate candidate,
+  ) async {
+    await _runAddAction(
+      () => candidate.isToolPkg
+          ? _packageManager.importBundledExternalToolPkgContainer(
+              containerPackageName: candidate.packageName,
+            )
+          : _packageManager.importBundledExternalPackage(
+              packageName: candidate.packageName,
+            ),
+    );
   }
 
   /// Imports one bundled external ToolPkg container from runtime assets.
@@ -1253,6 +1351,7 @@ class _PackageManagerScreenState extends State<PackageManagerScreen>
       builder: (context) {
         return PackageDetailsDialog(
           package: package,
+          isCustomized: _customizedPackageNames.contains(package.name),
           onDeletePackage: () {
             Navigator.of(context).pop();
             if (mounted) {

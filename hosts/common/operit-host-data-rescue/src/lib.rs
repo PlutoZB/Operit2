@@ -5,16 +5,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use fs2::FileExt;
-use operit_data_rescue::{DataRescue, RescueFile, RescueHost, RescueManifest, validate_path};
+use operit_data_rescue::{DataRescue, RescueFile, RescueHost, RescueManifest, payload_bytes, validate_path};
 use operit_host_api::{HostSecretStore, RuntimeStorageHost};
-use operit_host_native_storage::{NativeArchiveStagingHost, NativeRuntimeStorageHost};
+use operit_host_native_storage::{ARCHIVE_STAGING_DIRECTORY_NAME, NativeArchiveStagingHost, NativeFileSecretStore, NativeRuntimeStorageHost};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use aes_gcm::{aead::{Aead, KeyInit, Payload}, Aes256Gcm, Nonce};
+
+pub use operit_data_rescue::RescueProgress;
 
 const BOOTSTRAP: &str = "runtime/link/local_runtime_storage.json";
 const SECRET_KEYS: &[&str] = &["operit.preferences.encryption_key.v1", "market.github-oauth-pending"];
@@ -29,7 +31,11 @@ impl StorageLease {
         fs::create_dir_all(&application).map_err(text)?;
         let file = private_file(&application.join(".operit-data.lock"), false)?;
         let result = if maintenance { file.try_lock_exclusive() } else { FileExt::try_lock_shared(&file) };
-        result.map_err(|error| format!("Data is in use. Close all Operit windows, background services, and CLI processes before data maintenance: {error}"))?;
+        result.map_err(|error| match (maintenance, error.kind()) {
+            (true, std::io::ErrorKind::WouldBlock) => format!("Data is in use. Close all Operit windows, background services, and CLI processes before data maintenance: {error}"),
+            (false, std::io::ErrorKind::WouldBlock) => format!("Data maintenance is active. Close the Data Rescue session before normal startup: {error}"),
+            _ => format!("Cannot acquire {} storage access at {}: {error}", if maintenance { "exclusive maintenance" } else { "shared runtime" }, application.display()),
+        })?;
         if !maintenance && application.join("data-rescue/commit.json").exists() {
             return Err("An interrupted data import must be completed from Data Rescue before normal startup".into());
         }
@@ -42,20 +48,41 @@ impl StorageLease {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RescueRoots { pub runtime_root: PathBuf, pub workspace_root: PathBuf, #[serde(default)] pub cli_config_root: Option<PathBuf> }
 
+/// Reads only the saved data-location contract without parsing identity or application state.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecordedRescueRoots {
+    confirmed: bool,
+    runtime_root: PathBuf,
+    workspace_root: PathBuf,
+}
+
 /// Owns a maintenance session independently of Flutter and Core.
 pub struct NativeRescueSession {
     _lease: StorageLease,
     default_runtime: PathBuf,
     secret_store: Option<Arc<dyn HostSecretStore>>,
+    profile_file_secrets: bool,
     service: Option<DataRescue>,
+    progress: Arc<Mutex<Option<RescueProgress>>>,
 }
 impl NativeRescueSession {
     /// Opens exclusive maintenance access without parsing the startup configuration.
     pub fn open(default_runtime: PathBuf, secret_store: Option<Arc<dyn HostSecretStore>>) -> Result<Self, String> {
         let default_runtime = absolute_root(&default_runtime)?;
         let lease = StorageLease::acquire(&default_runtime, true)?;
-        Ok(Self { _lease: lease, default_runtime, secret_store, service: None })
+        Ok(Self { _lease: lease, default_runtime, secret_store, profile_file_secrets: false, service: None, progress: Arc::new(Mutex::new(None)) })
     }
+
+    /// Opens maintenance with the CLI profile-file secret contract for every identity.
+    pub fn open_file_secrets(default_runtime: PathBuf) -> Result<Self, String> {
+        let mut session = Self::open(default_runtime, None)?;
+        session.profile_file_secrets = true;
+        Ok(session)
+    }
+
+    /// Shares operation counters independently of the maintenance session lock.
+    pub fn progress(&self) -> Arc<Mutex<Option<RescueProgress>>> { self.progress.clone() }
 
     /// Exposes raw startup bytes and platform defaults even when the saved configuration is damaged.
     pub fn describe_startup(&self) -> Result<Value, String> {
@@ -93,17 +120,75 @@ impl NativeRescueSession {
         }))
     }
 
-    /// Configures explicit source roots and then executes an offline rescue command.
+    /// Resolves the recorded locations without loading Core or requesting user-entered paths.
+    fn automatic_roots(&self) -> Result<RescueRoots, String> {
+        let startup = self.describe_startup()?;
+        if startup["commitPending"] == true {
+            if let Some(error) = startup["recoveryError"].as_str() {
+                return Err(format!("无法定位待恢复的数据：{error}"));
+            }
+            return serde_json::from_value(startup["recoveryRoots"].clone())
+                .map_err(|error| format!("中断的导入记录无法确定数据位置：{error}"));
+        }
+        let encoded = startup["bootstrapBase64"].as_str()
+            .ok_or("找不到应用的数据位置记录，无法自动定位数据。")?;
+        let bytes = STANDARD.decode(encoded).map_err(text)?;
+        let config: RecordedRescueRoots = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("应用的数据位置记录损坏，无法自动定位数据：{error}"))?;
+        if !config.confirmed {
+            return Err("应用尚未完成数据位置设置，无法自动定位数据。".into());
+        }
+        if config.runtime_root.as_os_str().is_empty() || config.workspace_root.as_os_str().is_empty() {
+            return Err("应用的数据位置记录为空，无法自动定位数据。".into());
+        }
+        Ok(RescueRoots {
+            runtime_root: config.runtime_root,
+            workspace_root: config.workspace_root,
+            cli_config_root: None,
+        })
+    }
+
+    /// Configures recorded or explicitly requested roots and executes an offline rescue command.
     pub fn execute(&mut self, request: Value) -> Result<Value, String> {
+        if request["operation"] == "configureAutomatic" {
+            let roots = self.automatic_roots()?;
+            return self.execute(json!({"operation": "configure", "roots": roots}));
+        }
         if request["operation"] == "configure" {
             if self.service.is_some() { return Err("Close the maintenance session before changing selected roots".into()); }
             let roots: RescueRoots = serde_json::from_value(request["roots"].clone()).map_err(text)?;
-            let host = Arc::new(NativeRescueHost::new(&self.default_runtime, roots, self.secret_store.clone())?);
+            let mut host = NativeRescueHost::new(&self.default_runtime, roots, self.secret_store.clone())?;
+            host.profile_file_secrets = self.profile_file_secrets;
+            host.progress = self.progress.clone();
+            host.cleanup_abandoned_archives()?;
+            let host = Arc::new(host);
             let archives = Arc::new(NativeArchiveStagingHost::new(application_root(&self.default_runtime)?.join("data-rescue/staging")));
+            archives.cleanupAbandonedArchivesDuringMaintenance().map_err(text)?;
             self.service = Some(DataRescue { host, archives });
             return self.service.as_ref().ok_or("Rescue service was not created")?.host.describe();
         }
-        self.service.as_ref().ok_or("Confirm the runtime and workspace base directories before continuing")?.execute(request)
+        if request["operation"] == "saveArchive" {
+            let service = self.service.as_ref().ok_or("Prepare the data rescue storage session before continuing")?;
+            let id = request["archiveId"].as_str().ok_or("Missing archive identifier")?;
+            uuid::Uuid::parse_str(id).map_err(text)?;
+            let destination = PathBuf::from(request["destination"].as_str().ok_or("Missing selected save destination")?);
+            let source = PathBuf::from(service.archives.archiveFileReference(id).map_err(text)?);
+            if absolute_root(&source)? == absolute_root(&destination)? { return Err("Save destination is the staged archive".into()); }
+            let length = service.archives.sealArchive(id).map_err(text)?;
+            let mut output = File::create(destination).map_err(text)?;
+            let mut progress = RescueProgress::new("save", Some(length), "bytes");
+            service.host.report_progress(progress.clone());
+            while progress.completed < length {
+                let count = (length - progress.completed).min(operit_data_rescue::CHUNK_BYTES as u64) as usize;
+                let bytes = service.archives.readArchive(id, progress.completed, count).map_err(text)?;
+                if bytes.len() != count { return Err("Truncated exported archive".into()); }
+                output.write_all(&bytes).map_err(text)?;
+                progress.advance(service.host.as_ref(), count as u64);
+            }
+            output.sync_all().map_err(text)?;
+            return Ok(Value::Null);
+        }
+        self.service.as_ref().ok_or("Prepare the data rescue storage session before continuing")?.execute(request)
     }
 }
 
@@ -112,6 +197,8 @@ struct NativeRescueHost {
     application: PathBuf,
     roots: BTreeMap<String, PathBuf>,
     secrets: Option<Arc<dyn HostSecretStore>>,
+    profile_file_secrets: bool,
+    progress: Arc<Mutex<Option<RescueProgress>>>,
 }
 
 /// Records a reversible filesystem move without automatically rolling back any operation.
@@ -146,17 +233,31 @@ struct SecretEnvelope { nonce: String, ciphertext: String }
 struct JournalSecrets { imported: BTreeMap<String, String>, previous: BTreeMap<String, String> }
 
 impl NativeRescueHost {
+    /// Removes interrupted archive transfers from the exact Host-owned staging namespaces.
+    fn cleanup_abandoned_archives(&self) -> Result<(), String> {
+        for parent in [&self.application, &self.roots["runtime"], &self.roots["runtime"].join("identities")] {
+            NativeArchiveStagingHost::cleanupAbandonedArchivesForRuntimeParent(parent).map_err(text)?;
+        }
+        Ok(())
+    }
+
+    /// Identifies temporary Host archives inside the selected complete runtime tree.
+    fn is_archive_staging_path(&self, path: &Path) -> bool {
+        path.starts_with(self.roots["runtime"].join(ARCHIVE_STAGING_DIRECTORY_NAME))
+            || path.starts_with(self.roots["runtime"].join("identities").join(ARCHIVE_STAGING_DIRECTORY_NAME))
+    }
+
     /// Enumerates complete filesystem structure without decoding any business records.
     fn inventory(&self) -> Result<(Vec<RescueFile>, Vec<StorageNode>), String> {
         let mut files = Vec::new();
         let mut nodes = Vec::new();
         for (role, root) in &self.roots {
-            if root.exists() { collect_files(root, role, &mut files, &mut nodes)?; }
+            if root.exists() { collect_files(root, role, &mut files, &mut nodes, self)?; }
         }
         for entry in fs::read_dir(&self.application).map_err(text)? {
             let entry = entry.map_err(text)?;
             let name = entry.file_name().into_string().map_err(|_| "Application filename is not UTF-8")?;
-            if !self.excluded_application_entry(&name) { collect_files(&entry.path(), &format!("application/{name}"), &mut files, &mut nodes)?; }
+            if !self.excluded_application_entry(&name) { collect_files(&entry.path(), &format!("application/{name}"), &mut files, &mut nodes, self)?; }
         }
         Ok((files, nodes))
     }
@@ -226,7 +327,7 @@ impl NativeRescueHost {
                 return Err("Storage roots inside the application directory must be direct children to keep publication namespaces disjoint".into());
             }
         }
-        Ok(Self { application, roots, secrets })
+        Ok(Self { application, roots, secrets, profile_file_secrets: false, progress: Arc::new(Mutex::new(None)) })
     }
 
     /// Returns the private maintenance catalog storage without entering any business service.
@@ -245,18 +346,20 @@ impl NativeRescueHost {
             return checked_descendant(&self.application, relative);
         }
         let root = self.roots.get(role).ok_or("Unknown rescue namespace")?;
-        checked_descendant(root, relative)
+        let path = checked_descendant(root, relative)?;
+        if self.is_archive_staging_path(&path) { return Err("Archive addresses temporary archive staging".into()); }
+        Ok(path)
     }
 
     /// Keeps generated executables, maintenance files, and declared roots out of the extra-data namespace.
     fn excluded_application_entry(&self, name: &str) -> bool {
         let path = self.application.join(name);
-        [".operit-data.lock", "data-rescue", "archive_staging", "android-runtime"].contains(&name)
+        [".operit-data.lock", "data-rescue", ARCHIVE_STAGING_DIRECTORY_NAME, "android-runtime"].contains(&name)
             || name.starts_with(".operit-rescue-") || name.starts_with(".operit-retained-")
             || self.roots.values().any(|root| root == &path)
     }
 
-    /// Reads only registered persistent Host secrets into the encrypted backup payload.
+    /// Reads only registered persistent Host secrets into the portable backup payload.
     fn secret_payload(&self) -> Result<Vec<u8>, String> {
         serde_json::to_vec(&self.read_secrets()?).map_err(text)
     }
@@ -346,6 +449,8 @@ impl NativeRescueHost {
     fn publish(&self, mut journal: Journal) -> Result<Value, String> {
         self.verify_publication(&journal)?;
         let secrets = self.open_journal_secrets(&journal)?;
+        let mut progress = RescueProgress::new("publish", Some((journal.publications.len() + if secrets.is_some() { SECRET_KEYS.len() } else { 0 } + 1) as u64), "items");
+        self.report_progress(progress.clone());
         for index in 0..journal.publications.len() {
             let plan = journal.publications[index].clone();
             if plan.phase == "prepared" {
@@ -370,9 +475,11 @@ impl NativeRescueHost {
                 journal.publications[index].phase = "published".into();
                 self.save_journal(&journal)?;
             }
+            progress.advance(self, 1);
         }
         if let Some(secrets) = secrets {
             let store = self.secrets.as_ref().ok_or("This Host cannot import system secrets")?;
+            progress.advance(self, journal.secret_index as u64);
             for (index, key) in SECRET_KEYS.iter().enumerate().skip(journal.secret_index) {
                 match secrets.imported.get(*key) {
                     Some(encoded) => store.writeSecret(key, &STANDARD.decode(encoded).map_err(text)?).map_err(text)?,
@@ -380,12 +487,14 @@ impl NativeRescueHost {
                 }
                 journal.secret_index = index + 1;
                 self.save_journal(&journal)?;
+                progress.advance(self, 1);
             }
         }
         let retained = self.application.join("data-rescue").join(&journal.id).join("completed.json");
         durable_rename(&self.application.join("data-rescue/commit.json"), &retained)?;
         sync_directory(&self.application.join("data-rescue"))?;
         sync_directory(retained.parent().ok_or("Retained catalog has no parent")?)?;
+        progress.advance(self, 1);
         Ok(json!({"restored": true, "retainedData": journal.publications.iter().filter(|plan| plan.had_original).map(|plan| &plan.retained).collect::<Vec<_>>(), "retainedCatalog": retained}))
     }
 
@@ -421,6 +530,8 @@ impl NativeRescueHost {
                 return Err(format!("Publication node metadata changed: {}", node.path));
             }
         }
+        let mut progress = RescueProgress::new("verifyRestored", Some(payload_bytes(&journal.verified_files)?), "bytes");
+        self.report_progress(progress.clone());
         for expected in &journal.verified_files {
             validate_path(&expected.path)?;
             if !seen.insert(&expected.path) { return Err("Duplicate publication integrity record".into()); }
@@ -434,7 +545,7 @@ impl NativeRescueHost {
             let relative = live.strip_prefix(&plan.target).map_err(text)?;
             let path = base.join(relative);
             reject_linked_descendants(base, &path)?;
-            let actual = hash_file(&path, &expected.path)?;
+            let actual = hash_file(&path, &expected.path, expected.byte_length, self, &mut progress)?;
             if actual.byte_length != expected.byte_length || actual.sha256 != expected.sha256 { return Err(format!("Pending import payload integrity check failed: {}", expected.path)); }
         }
         Ok(())
@@ -442,6 +553,11 @@ impl NativeRescueHost {
 }
 
 impl RescueHost for NativeRescueHost {
+    /// Updates a short-lived counter lock independently of storage operations.
+    fn report_progress(&self, progress: RescueProgress) {
+        *self.progress.lock().expect("Rescue progress lock poisoned") = Some(progress);
+    }
+
     /// Uses a portable directory layout for every native desktop and mobile Host.
     fn layout(&self) -> &str { "operit.files.v1" }
 
@@ -478,6 +594,35 @@ impl RescueHost for NativeRescueHost {
         Ok(bytes)
     }
 
+    /// Decrypts preference payloads using existing Host secrets without changing source files.
+    fn export_preferences(&self, path: &str) -> Result<Option<Vec<u8>>, String> {
+        use operit_store::PreferencesExport::{exportPreferences, isPreferencesPath, readPreferencesExportKey, MAX_PREFERENCES_EXPORT_BYTES};
+        let segments: Vec<_> = path.split('/').collect();
+        let (root, relative) = match segments.as_slice() {
+            ["runtime", "identities", identity, relative @ ..] => (
+                self.roots["runtime"].join("identities").join(identity), relative.join("/"),
+            ),
+            ["runtime", relative @ ..] => (self.roots["runtime"].clone(), relative.join("/")),
+            _ => return Ok(None),
+        };
+        let storage_path = format!("runtime/{relative}");
+        if !isPreferencesPath(&storage_path) { return Ok(None); }
+        let source = self.source_path(path)?;
+        reject_symlink(&source)?;
+        let mut content = Vec::new();
+        File::open(source).map_err(text)?.take(MAX_PREFERENCES_EXPORT_BYTES as u64 + 1).read_to_end(&mut content).map_err(text)?;
+        if content.len() > MAX_PREFERENCES_EXPORT_BYTES { return Err(format!("Preferences exceed 16 MiB: {path}")); }
+        let profile_secrets = NativeFileSecretStore(root.join("secrets"));
+        let storage = NativeRuntimeStorageHost::new(root, self.roots["workspaces"].clone());
+        let secrets = if self.profile_file_secrets {
+            Some(&profile_secrets as &dyn HostSecretStore)
+        } else {
+            self.secrets.as_deref()
+        };
+        exportPreferences(&storage_path, content, || readPreferencesExportKey(&storage, secrets))
+            .map(Some).map_err(|error| format!("{path}: {error}"))
+    }
+
     /// Prepares empty same-volume directories and validates every manifest destination.
     fn begin_restore(&self, id: &str, manifest: &RescueManifest) -> Result<(), String> {
         uuid::Uuid::parse_str(id).map_err(text)?;
@@ -490,7 +635,12 @@ impl RescueHost for NativeRescueHost {
             if staged.exists() { return Err("Import staging directory already exists".into()); }
             fs::create_dir_all(staged).map_err(text)?;
         }
-        for node in nodes.iter().filter(|node| node.directory) { fs::create_dir_all(self.staged_node(id, &node.path)?).map_err(text)?; }
+        let mut progress = RescueProgress::new("prepareRestore", Some(nodes.iter().filter(|node| node.directory).count() as u64), "items");
+        self.report_progress(progress.clone());
+        for node in nodes.iter().filter(|node| node.directory) {
+            fs::create_dir_all(self.staged_node(id, &node.path)?).map_err(text)?;
+            progress.advance(self, 1);
+        }
         Ok(())
     }
 
@@ -557,9 +707,15 @@ impl RescueHost for NativeRescueHost {
             plan.remove = true;
             publications.push(plan);
         }
+        let staged_bytes = manifest.files.iter().filter(|file| file.path != SYSTEM_SECRETS).try_fold(0u64, |total, file| {
+            let length = fs::metadata(self.staged_path(id, &file.path)?).map_err(text)?.len();
+            total.checked_add(length).ok_or_else(|| "Staged payload size overflow".to_string())
+        })?;
+        let mut progress = RescueProgress::new("verifyRestored", Some(staged_bytes), "bytes");
+        self.report_progress(progress.clone());
         let mut verified_files = Vec::new();
         for file in manifest.files.iter().filter(|file| file.path != SYSTEM_SECRETS) {
-            verified_files.push(hash_file(&self.staged_path(id, &file.path)?, &file.path)?);
+            verified_files.push(hash_file(&self.staged_path(id, &file.path)?, &file.path, fs::metadata(self.staged_path(id, &file.path)?).map_err(text)?.len(), self, &mut progress)?);
         }
         for node in nodes.iter().filter(|node| !node.directory) { apply_node_mode(&self.staged_node(id, &node.path)?, node.unix_mode)?; }
         let mut directories: Vec<_> = nodes.iter().filter(|node| node.directory).collect();
@@ -668,16 +824,18 @@ impl RescueHost for NativeRescueHost {
 }
 
 /// Enumerates raw regular files without opening SQLite, plugins, or application preferences.
-fn collect_files(path: &Path, logical: &str, output: &mut Vec<RescueFile>, nodes: &mut Vec<StorageNode>) -> Result<(), String> {
+fn collect_files(path: &Path, logical: &str, output: &mut Vec<RescueFile>, nodes: &mut Vec<StorageNode>, host: &NativeRescueHost) -> Result<(), String> {
+    if host.is_archive_staging_path(path) { return Ok(()); }
     validate_path(logical)?;
     let metadata = fs::symlink_metadata(path).map_err(text)?;
     if is_storage_link(&metadata) { return Err(format!("Filesystem links require an explicit archival policy: {}", path.display())); }
     nodes.push(StorageNode { path: logical.into(), directory: metadata.is_dir(), unix_mode: node_mode(&metadata) });
+    host.report_progress(RescueProgress { phase: "scan".into(), completed: nodes.len() as u64, total: None, unit: "items".into() });
     if metadata.is_dir() {
         for entry in fs::read_dir(path).map_err(text)? {
             let entry = entry.map_err(text)?;
             let name = entry.file_name().into_string().map_err(|_| "Data filename is not UTF-8")?;
-            collect_files(&entry.path(), &format!("{logical}/{name}"), output, nodes)?;
+            collect_files(&entry.path(), &format!("{logical}/{name}"), output, nodes, host)?;
         }
     } else if metadata.is_file() {
         output.push(RescueFile { path: logical.into(), byte_length: metadata.len(), sha256: String::new() });
@@ -700,19 +858,23 @@ fn portable_destination_key(path: &str) -> Result<String, String> {
 }
 
 /// Hashes a complete regular file without loading its contents into memory.
-fn hash_file(path: &Path, logical: &str) -> Result<RescueFile, String> {
+fn hash_file(path: &Path, logical: &str, expected_length: u64, host: &dyn RescueHost, progress: &mut RescueProgress) -> Result<RescueFile, String> {
     reject_symlink(path)?;
     let mut input = File::open(path).map_err(text)?;
     if !input.metadata().map_err(text)?.is_file() { return Err("Expected a regular publication payload".into()); }
+    if input.metadata().map_err(text)?.len() != expected_length { return Err(format!("Publication size changed: {logical}")); }
     let mut hash = Sha256::new();
     let mut length = 0;
     let mut buffer = [0u8; 65536];
-    loop {
-        let count = input.read(&mut buffer).map_err(text)?;
-        if count == 0 { break; }
+    while length < expected_length {
+        let requested = (expected_length - length).min(buffer.len() as u64) as usize;
+        let count = input.read(&mut buffer[..requested]).map_err(text)?;
+        if count == 0 { return Err(format!("Publication payload was truncated: {logical}")); }
         hash.update(&buffer[..count]);
         length += count as u64;
+        progress.advance(host, count as u64);
     }
+    if input.read(&mut buffer[..1]).map_err(text)? != 0 { return Err(format!("Publication payload grew: {logical}")); }
     Ok(RescueFile { path: logical.into(), byte_length: length, sha256: format!("{:x}", hash.finalize()) })
 }
 

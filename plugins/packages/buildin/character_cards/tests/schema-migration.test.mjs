@@ -96,6 +96,26 @@ async function seed(t, count = 3) {
   return { disk, state, chat: chatHost() };
 }
 
+/** Preserves independently queued requests that map to the same exact revision during released-data import. */
+test("released-data import retains repeated candidate sources with independent IDs and original states", async t => {
+  const { disk, state, chat } = await seed(t), original = state.owners[0].candidates[0];
+  state.owners[0].candidates.push({ ...original, id: "2", status: "failed", updatedAt: 3, attemptCount: 5, lastError: "Original extraction failure" });
+  const expected = state.owners[0].candidates.map(({ id, ...record }) => record);
+  disk.replaceState(state);
+  disk.storage.inspectPreferences("meta", values => { values.__operit_preferences_schema_version = 0; values.state.legacyImportPending = true; });
+  await open(disk, chat);
+  const saved = plain(disk.readState()), card = saved.cards.find(value => value.name === state.cards[0].name);
+  const owner = saved.owners.find(value => value.ownerKey === "character:" + card.id);
+  assert.equal(owner.candidates.length, 2);
+  assert.equal(new Set(owner.candidates.map(value => value.id)).size, 2);
+  for (const record of owner.candidates) assert.match(record.id, uuidPattern);
+  assert.deepEqual(owner.candidates.map(({ id, ...record }) => record).sort((left, right) => left.attemptCount - right.attemptCount), expected);
+  assert.equal(owner.memories.length, state.owners[0].memories.length);
+  assert.equal(metadata(disk).legacyImportPending, undefined);
+  const before = disk.stateBytes(); await open(disk, chat);
+  assert.deepEqual(disk.stateBytes(), before);
+});
+
 test("TS released-data import into v1 converts every owned identity and reference and preserves user content", async t => {
   const { disk, state: old, chat } = await seed(t), database = await open(disk, chat), state = plain(disk.readState());
   assert.equal(state.version, 1); assert.equal(disk.storage.inspectPreferences("migration", values => values.plan), undefined);
@@ -274,13 +294,21 @@ test("cleanup response interruption resumes after the already retired source own
   assert.equal(disk.readState().version, 1); assert.equal(disk.storage.inspectPreferences("migration", values => values.plan), undefined);
 });
 
-test("a missing role reference fails before any UUID plan or domain change is committed", async t => {
+/** Keeps released cards usable after one of their group's members was deleted. */
+test("released-data migration removes a deleted group member and retains its group", async t => {
   const { disk, state, chat } = await seed(t);
   state.groups[0].members[0].characterCardId = "missing-character"; disk.replaceState(state);
-  disk.storage.inspectPreferences("meta", values => { values.__operit_preferences_schema_version = 0; values.state.legacyImportPending = true; }); disk.clearCalls();
-  await assert.rejects(open(disk, chat), /missing character|Missing.*member|Missing group|missing member/i);
-  assert.equal(disk.calls.some(call => call.method === "storage.commit"), false);
-  assert.equal(disk.storage.inspectPreferences("migration", values => values.plan), undefined);
+  disk.storage.inspectPreferences("meta", values => { values.__operit_preferences_schema_version = 0; values.state.legacyImportPending = true; });
+  await open(disk, chat);
+  const saved = plain(disk.readState());
+  assert.equal(saved.groups.length, state.groups.length);
+  assert.equal(saved.groups[0].members.length, state.groups[0].members.length - 1);
+  assert.equal(saved.cards.length, state.cards.length);
+  assert.deepEqual(
+    saved.owners.flatMap(owner => owner.memories.map(memory => memory.content)).sort(),
+    state.owners.flatMap(owner => owner.memories.map(memory => memory.content)).sort(),
+  );
+  assert.equal(metadata(disk).legacyImportPending, undefined);
 });
 
 test("malformed persisted migration work fails before filesystem or record changes", async t => {
@@ -288,4 +316,242 @@ test("malformed persisted migration work fails before filesystem or record chang
   disk.storage.inspectPreferences("migration", values => { values.plan = { from: "released", to: 1, phase: "records", cursor: 99, identities: {}, files: [], directories: [], authors: [], changes: [] }; });
   disk.clearCalls(); await assert.rejects(open(disk, chat), /cursor exceeds its work/);
   assert.equal(disk.calls.some(call => call.method === "storage.commit" || call.method === "deleteFile"), false);
+});
+
+/** Completes pending released-data adoption while preserving an unresolved binding for the installed editor. */
+test("pending released-data adoption is not blocked by an unknown model binding", async t => {
+  const { disk, chat } = await seed(t);
+  disk.storage.inspectPreferences("cards", values => Object.assign(values.record_operit, {
+    chatModelBindingMode: "UNRECOGNIZED_MODE", chatProviderId: null, chatModelId: null,
+  }));
+  await open(disk, chat);
+  const state = plain(disk.readState()), card = state.cards.find(value => value.name === "Operit");
+  assert.match(card.id, uuidPattern);
+  assert.equal(card.chatModelBindingMode, "UNRECOGNIZED_MODE");
+  assert.equal(card.chatProviderId, null); assert.equal(card.chatModelId, null);
+  assert.equal(metadata(disk).legacyImportPending, undefined);
+  const before = disk.stateBytes(); await open(disk, chat);
+  assert.deepEqual(disk.stateBytes(), before);
+});
+
+/** Keeps unresolved primary selections exact while converting actual libraries and their references. */
+test("released-data import preserves missing primary libraries through UUID adoption and reopen", async t => {
+  for (const mode of ["SHARED", "CHARACTER"]) {
+    for (const sharedId of [null, "", "  ", "deleted-store"]) {
+      const { disk, state, chat } = await seed(t);
+      disk.storage.inspectPreferences("cards", values => Object.assign(values.record_operit, {
+        memoryBindingMode: mode, sharedMemoryId: sharedId,
+      }));
+      await open(disk, chat);
+      const saved = plain(disk.readState()), card = saved.cards.find(value => value.name === "Operit");
+      const other = saved.cards.find(value => value.name === state.cards[1].name);
+      assert.match(card.id, uuidPattern);
+      assert.equal(card.memoryBindingMode, mode); assert.equal(card.sharedMemoryId, sharedId);
+      assert.equal(saved.stores.length, state.stores.length);
+      assert.match(saved.stores[0].id, uuidPattern);
+      assert.equal(other.sharedMemoryId, saved.stores[0].id);
+      assert.equal(card.sharedMemoryMounts[0].sharedMemoryId, saved.stores[0].id);
+      const owner = saved.owners.find(value => value.ownerKey === "character:" + card.id);
+      assert.equal(owner.memories.length, state.owners[0].memories.length);
+      assert.equal((await bytes(disk, owner.userDocumentPath)).toString(), "# Original USER character:operit\nUnicode 用户资料");
+      assert.equal(metadata(disk).legacyImportPending, undefined);
+      const before = disk.stateBytes(); disk.clearCalls(); await open(disk, chat);
+      assert.deepEqual(disk.stateBytes(), before);
+      assert.equal(disk.calls.some(call => call.method === "storage.commit" || call.method === "storage.preferences.edit"), false);
+    }
+  }
+});
+
+/** Preserves historical authors after their character is deleted while converting surviving authors. */
+test("released-data audit retains a deleted message author during UUID adoption", async t => {
+  const { disk, chat } = await seed(t);
+  chat.extensions.set(2, { participantId: "deleted-character" });
+  await open(disk, chat);
+  const saved = plain(disk.readState());
+  assert.deepEqual(chat.extensions.get(2), { participantId: "deleted-character" });
+  assert.deepEqual(chat.extensions.get(0), { participantId: saved.cards.find(card => card.name === "Operit").id });
+  assert.equal(chat.writes.length, 2);
+  assert.equal(metadata(disk).legacyImportPending, undefined);
+  const before = disk.stateBytes(); await open(disk, chat);
+  assert.deepEqual(disk.stateBytes(), before); assert.equal(chat.writes.length, 2);
+});
+
+/** Retains explicit missing targets in chat bindings, drafts and archived conversation-group scopes. */
+test("released-data audit retains deleted chat targets without replacing their selection", async t => {
+  for (const selection of ["card:deleted-character", "group:deleted-group"]) {
+    const { disk, chat } = await seed(t);
+    disk.storage.inspectPreferences("conversationGroups", values => { values["record_manual-1"].ownerSelection = selection; });
+    const handle = await disk.storage.dataStore.open({ path: disk.directory + "/chats.preferences.json" });
+    await handle.edit(preferences => {
+      preferences.set("binding_core-chat", { version: 1, selection });
+      preferences.set("draft_core-draft", { version: 1, selection });
+    });
+    await handle.close();
+    const database = await open(disk, chat);
+    assert.equal((await database.chats.data()).get("binding_core-chat").selection, selection);
+    assert.equal((await database.chats.data()).get("draft_core-draft").selection, selection);
+    assert.equal(plain(disk.readState()).conversationGroups[0].ownerSelection, selection);
+    assert.equal(metadata(disk).legacyImportPending, undefined);
+    const before = disk.stateBytes(); await open(disk, chat);
+    assert.deepEqual(disk.stateBytes(), before);
+  }
+});
+
+/** Keeps the original unavailable active identity without selecting another role or model. */
+test("released-data audit retains a deleted active character or group", async t => {
+  for (const active of [{ CharacterCard: { id: "deleted-character" } }, { CharacterGroup: { id: "deleted-group" } }]) {
+    const { disk, chat } = await seed(t);
+    disk.storage.inspectPreferences("meta", values => { values.state.active = structuredClone(active); });
+    await open(disk, chat);
+    assert.deepEqual(plain(disk.readState()).active, active);
+    assert.deepEqual(metadata(disk).active, active);
+    assert.equal(metadata(disk).legacyImportPending, undefined);
+    const before = disk.stateBytes(); await open(disk, chat);
+    assert.deepEqual(disk.stateBytes(), before);
+  }
+});
+
+/** Keeps host-owned opaque section tokens out of the character identity conversion. */
+test("released-data audit retains an opaque conversation-group scope token", async t => {
+  const { disk, chat } = await seed(t), scope = "section-scope-opaque-token";
+  disk.storage.inspectPreferences("conversationGroups", values => { values["record_manual-1"].ownerSelection = scope; });
+  await open(disk, chat);
+  assert.equal(plain(disk.readState()).conversationGroups[0].ownerSelection, scope);
+  assert.equal(metadata(disk).legacyImportPending, undefined);
+});
+
+/** Rejects malformed chat tokens before publishing a migration plan or changing owner files. */
+test("released-data audit still rejects malformed chat selections before migration writes", async t => {
+  for (const selection of ["card:", "group:", "model:other", "unknown:target"]) {
+    const { disk, chat } = await seed(t);
+    const handle = await disk.storage.dataStore.open({ path: disk.directory + "/chats.preferences.json" });
+    await handle.edit(preferences => { preferences.set("binding_core-chat", { version: 1, selection }); });
+    await handle.close(); disk.clearCalls();
+    await assert.rejects(open(disk, chat), /Invalid.*selection/);
+    assert.equal(disk.storage.inspectPreferences("migration", values => values.plan), undefined);
+    assert.equal(disk.calls.some(call => ["storage.commit", "copy", "deleteFile"].includes(call.method)), false);
+  }
+});
+
+/** Keeps absolute Files API resource references aligned with the verified owner-directory move. */
+test("released-data audit rewrites absolute document paths before retiring the old owner", async t => {
+  const { disk, state, chat } = await seed(t);
+  const directory = disk.globals.ToolPkg.getSpaceDataDir();
+  const source = state.owners[0].memories[0];
+  const oldDocument = directory + "/" + source.documentPath;
+  const oldIndex = directory + "/" + source.chunkIndexFilePath;
+  source.documentPath = oldDocument; source.chunkIndexFilePath = oldIndex;
+  const external = directory + "/external-document.txt";
+  await disk.files.write(external, "Externally owned document");
+  state.owners[0].memories[1].documentPath = external;
+  disk.replaceState(state);
+  disk.storage.inspectPreferences("meta", values => { values.__operit_preferences_schema_version = 0; values.state.legacyImportPending = true; });
+  await open(disk, chat);
+  const saved = plain(disk.readState()), card = saved.cards.find(value => value.name === "Operit");
+  const owner = saved.owners.find(value => value.ownerKey === "character:" + card.id);
+  const document = owner.memories.find(memory => memory.isDocumentNode);
+  assert.equal((await disk.files.exists(document.documentPath)).exists, true);
+  assert.equal((await disk.files.exists(document.chunkIndexFilePath)).exists, true);
+  assert.equal((await disk.readBytes(document.documentPath)).toString(), "Original document 用户\u0000bytes");
+  assert.equal((await disk.readBytes(document.chunkIndexFilePath)).toString(), "Exact index bytes");
+  assert.equal(document.documentPath, directory + "/owners/" + encodeURIComponent(owner.ownerKey) + "/resources/source.txt");
+  assert.equal((await disk.files.exists(oldDocument)).exists, false);
+  assert.equal((await disk.files.exists(oldIndex)).exists, false);
+  assert.equal(owner.memories.filter(memory => memory.documentPath === external).length, 1);
+  assert.equal((await disk.readBytes(external)).toString(), "Externally owned document");
+  const before = disk.stateBytes(); await open(disk, chat);
+  assert.deepEqual(disk.stateBytes(), before);
+});
+
+/** Repairs stale released lists before UUID conversion while retaining the exact missing primary binding. */
+test("released-data migration cleans deleted references without losing cards or memory text", async t => {
+  const { disk, state, chat } = await seed(t);
+  state.cards[0].attachedTagIds.push("deleted-tag", "");
+  state.cards[0].sharedMemoryMounts.push({ sharedMemoryId: "deleted-store", readable: true, writable: true });
+  state.cards[0].memoryBindingMode = "SHARED"; state.cards[0].sharedMemoryId = "deleted-primary";
+  const owner = state.owners[0];
+  owner.links.push({ ...owner.links[0], id: "stale-link", targetMemoryId: "deleted-memory" });
+  owner.chunks.push({ ...owner.chunks[0], id: "stale-chunk", memoryUuid: "deleted-document" });
+  disk.replaceState(state);
+  disk.storage.inspectPreferences("meta", values => { values.__operit_preferences_schema_version = 0; values.state.legacyImportPending = true; });
+  await open(disk, chat);
+  const saved = plain(disk.readState()), card = saved.cards.find(card => card.name === state.cards[0].name);
+  const memory = saved.owners.find(owner => owner.ownerKey === "character:" + card.id);
+  assert.equal(card.sharedMemoryId, "deleted-primary"); assert.equal(card.memoryBindingMode, "SHARED");
+  assert.equal(card.attachedTagIds.length, state.cards[0].attachedTagIds.length - 2);
+  assert.equal(card.sharedMemoryMounts.length, state.cards[0].sharedMemoryMounts.length - 1);
+  assert.equal(memory.links.length, owner.links.length - 1); assert.equal(memory.chunks.length, owner.chunks.length - 1);
+  assert.deepEqual(memory.memories.map(memory => memory.content).sort(), owner.memories.map(memory => memory.content).sort());
+  const before = disk.stateBytes(); await open(disk, chat); assert.deepEqual(disk.stateBytes(), before);
+});
+
+/** Retains self relationships that were accepted and saved by the released repository. */
+test("released-data migration preserves a historical self relationship", async t => {
+  const { disk, state, chat } = await seed(t);
+  state.owners[0].links[0].targetMemoryId = state.owners[0].links[0].sourceMemoryId;
+  disk.replaceState(state);
+  disk.storage.inspectPreferences("meta", values => { values.__operit_preferences_schema_version = 0; values.state.legacyImportPending = true; });
+  await open(disk, chat);
+  const saved = plain(disk.readState()), card = saved.cards.find(card => card.name === state.cards[0].name);
+  const owner = saved.owners.find(owner => owner.ownerKey === "character:" + card.id);
+  assert.equal(owner.links.length, state.owners[0].links.length);
+  assert.equal(owner.links[0].sourceMemoryId, owner.links[0].targetMemoryId);
+  const before = disk.stateBytes(); await open(disk, chat); assert.deepEqual(disk.stateBytes(), before);
+});
+
+/** Keeps memory text when an optional document or its index no longer exists. */
+test("released-data migration clears missing attachment paths and preserves memory content", async t => {
+  const { disk, state, chat } = await seed(t), root = disk.globals.ToolPkg.getSpaceDataDir();
+  await disk.files.deleteFile(root + "/owners/character%3Aoperit/resources/source.txt", false);
+  await disk.files.deleteFile(root + "/owners/character%3Aoperit/resources/index.bin", false);
+  await open(disk, chat);
+  const saved = plain(disk.readState()), card = saved.cards.find(card => card.name === state.cards[0].name);
+  const owner = saved.owners.find(owner => owner.ownerKey === "character:" + card.id);
+  assert.deepEqual(owner.memories.map(memory => memory.content).sort(), state.owners[0].memories.map(memory => memory.content).sort());
+  const document = owner.memories.find(memory => memory.isDocumentNode);
+  assert.equal(document.documentPath, null); assert.equal(document.chunkIndexFilePath, null);
+  const before = disk.stateBytes(); await open(disk, chat); assert.deepEqual(disk.stateBytes(), before);
+});
+
+/** Starts a fresh editable owner document after the old file was lost. */
+test("released-data migration recreates a missing USER document without changing stored memory text", async t => {
+  for (const missingDirectory of [false, true]) {
+    const { disk, state, chat } = await seed(t), owner = state.owners[1], root = disk.globals.ToolPkg.getSpaceDataDir();
+    await disk.files.deleteFile(root + "/" + (missingDirectory ? owner.userDocumentPath.slice(0, -8) : owner.userDocumentPath), missingDirectory);
+    await open(disk, chat);
+    const saved = plain(disk.readState()), card = saved.cards.find(card => card.name === state.cards[1].name);
+    const memory = saved.owners.find(owner => owner.ownerKey === "character:" + card.id);
+    assert.equal((await bytes(disk, memory.userDocumentPath)).toString(), "");
+    assert.deepEqual(memory.memories.map(memory => memory.content).sort(), owner.memories.map(memory => memory.content).sort());
+    const before = disk.stateBytes(); await open(disk, chat); assert.deepEqual(disk.stateBytes(), before);
+  }
+});
+
+/** Reproduces partial released cards before the UUID migration without losing their surviving content. */
+test("released-data migration completes missing character fields before reading references", async t => {
+  const { disk, state, chat } = await seed(t);
+  const original = structuredClone(state.cards[0]);
+  disk.storage.inspectPreferences("cards", values => {
+    const card = values.record_operit;
+    for (const field of ["createdAt", "updatedAt", "avatarUri", "themeConfigId", "memoryBindingMode", "attachedTagIds", "sharedMemoryMounts"]) delete card[field];
+    card.toolAccessConfig = { enabled: true, allowedPackages: ["retained-package"] };
+  });
+  await open(disk, chat);
+  const migrated = plain(disk.readState());
+  const card = migrated.cards.find(card => card.name === original.name);
+  assert.equal(migrated.cards.length, state.cards.length);
+  assert.equal(card.characterSetting, original.characterSetting);
+  assert.equal(card.openingStatement, original.openingStatement);
+  assert.equal(card.chatModelId, original.chatModelId);
+  assert.equal(card.createdAt, 0); assert.equal(card.updatedAt, 0);
+  assert.equal(card.avatarUri, null); assert.equal(card.themeConfigId, null);
+  assert.equal(card.memoryBindingMode, "CHARACTER");
+  assert.deepEqual(card.attachedTagIds, []); assert.deepEqual(card.sharedMemoryMounts, []);
+  assert.deepEqual(card.toolAccessConfig.allowedPackages, ["retained-package"]);
+  assert.deepEqual(card.toolAccessConfig.allowedSkills, []);
+  assert.deepEqual(migrated.owners.flatMap(owner => owner.memories.map(memory => memory.content)).sort(),
+    state.owners.flatMap(owner => owner.memories.map(memory => memory.content)).sort());
+  assert.equal(metadata(disk).legacyImportPending, undefined);
+  const before = disk.stateBytes(); await open(disk, chat);
+  assert.deepEqual(disk.stateBytes(), before);
 });

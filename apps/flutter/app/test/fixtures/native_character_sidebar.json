@@ -1,15 +1,15 @@
 {
-  "type": "LazyColumn",
+  "type": "Column",
   "props": {
     "key": "native-character-sidebar",
     "fillMaxWidth": true,
     "paddingBottom": 16,
     "spacing": 0,
     "onLoad": {
-      "__actionId": "__action_14"
+      "__actionId": "__action_6"
     },
     "onInputsChanged": {
-      "__actionId": "__action_15"
+      "__actionId": "__action_7"
     }
   },
   "children": [
@@ -32,16 +32,10 @@
             "weight": 1,
             "height": 34,
             "containerColor": {
-              "__colorToken": "primaryContainer",
-              "copy": {
-                "__actionId": "__action_16"
-              }
+              "__colorToken": "primaryContainer"
             },
             "contentColor": {
-              "__colorToken": "onPrimaryContainer",
-              "copy": {
-                "__actionId": "__action_17"
-              }
+              "__colorToken": "onPrimaryContainer"
             },
             "shape": {
               "type": "pill"
@@ -64,7 +58,7 @@
                     "verticalAlignment": "center",
                     "horizontalArrangement": "center",
                     "onClick": {
-                      "__actionId": "__action_18"
+                      "__actionId": "__action_8"
                     },
                     "spacing": 6
                   },
@@ -75,10 +69,7 @@
                         "name": "AddRounded",
                         "size": 17,
                         "tint": {
-                          "__colorToken": "onPrimaryContainer",
-                          "copy": {
-                            "__actionId": "__action_19"
-                          }
+                          "__colorToken": "onPrimaryContainer"
                         }
                       },
                       "children": [],
@@ -91,10 +82,7 @@
                         "fontSize": 13,
                         "fontWeight": "600",
                         "color": {
-                          "__colorToken": "onPrimaryContainer",
-                          "copy": {
-                            "__actionId": "__action_20"
-                          }
+                          "__colorToken": "onPrimaryContainer"
                         },
                         "letterSpacing": -0.1
                       },
@@ -111,10 +99,7 @@
                     "height": 16,
                     "background": {
                       "__colorToken": "onPrimaryContainer",
-                      "alpha": 0.16,
-                      "copy": {
-                        "__actionId": "__action_21"
-                      }
+                      "alpha": 0.16
                     }
                   },
                   "children": [],
@@ -129,7 +114,7 @@
                     "verticalAlignment": "center",
                     "horizontalArrangement": "center",
                     "onClick": {
-                      "__actionId": "__action_22"
+                      "__actionId": "__action_9"
                     }
                   },
                   "children": [
@@ -139,10 +124,7 @@
                         "name": "CreateNewFolderOutlined",
                         "size": 16,
                         "tint": {
-                          "__colorToken": "onPrimaryContainer",
-                          "copy": {
-                            "__actionId": "__action_23"
-                          }
+                          "__colorToken": "onPrimaryContainer"
                         },
                         "contentDescription": "新建分组"
                       },
@@ -167,7 +149,7 @@
             "verticalAlignment": "center",
             "horizontalArrangement": "center",
             "onClick": {
-              "__actionId": "__action_24"
+              "__actionId": "__action_10"
             },
             "modifier": {
               "__modifierOps": [
@@ -183,24 +165,18 @@
             },
             "background": {
               "__colorToken": "surface",
-              "alpha": 0,
-              "copy": {
-                "__actionId": "__action_25"
-              }
+              "alpha": 0
             }
           },
           "children": [
             {
               "type": "Icon",
               "props": {
-                "name": "Search",
+                "name": "SearchRounded",
                 "size": 17,
                 "tint": {
                   "__colorToken": "onSurfaceVariant",
-                  "alpha": 0.78,
-                  "copy": {
-                    "__actionId": "__action_26"
-                  }
+                  "alpha": 0.78
                 },
                 "contentDescription": "搜索对话"
               },
@@ -214,13 +190,36 @@
       "slots": {}
     },
     {
+      "type": "Box",
+      "props": {
+        "key": "sidebar-search-container",
+        "fillMaxWidth": true,
+        "animation": {
+          "durationMillis": 180,
+          "curve": "easeOutCubic",
+          "animateContentSize": true
+        }
+      },
+      "children": [
+        {
+          "type": "Spacer",
+          "props": {
+            "height": 0
+          },
+          "children": [],
+          "slots": {}
+        }
+      ],
+      "slots": {}
+    },
+    {
       "type": "Column",
       "props": {
         "key": "sidebar-section-card:travel",
         "fillMaxWidth": true,
         "paddingStart": 20,
         "paddingEnd": 12,
-        "paddingTop": 10,
+        "paddingTop": 5,
         "paddingBottom": 5
       },
       "children": [
@@ -232,7 +231,7 @@
               "character-sidebar.chat:card:travel"
             ],
             "onDrop": {
-              "__actionId": "__action_128"
+              "__actionId": "__action_39"
             }
           },
           "children": [
@@ -243,7 +242,7 @@
                 "verticalAlignment": "center",
                 "height": 24,
                 "onClick": {
-                  "__actionId": "__action_129"
+                  "__actionId": "__action_40"
                 },
                 "modifier": {
                   "__modifierOps": [
@@ -313,10 +312,7 @@
                       ]
                     },
                     "color": {
-                      "__colorToken": "onSurface",
-                      "copy": {
-                        "__actionId": "__action_130"
-                      }
+                      "__colorToken": "onSurface"
                     }
                   },
                   "children": [],
@@ -338,10 +334,7 @@
                     "fontWeight": "700",
                     "color": {
                       "__colorToken": "onSurfaceVariant",
-                      "alpha": 0.64,
-                      "copy": {
-                        "__actionId": "__action_131"
-                      }
+                      "alpha": 0.64
                     }
                   },
                   "children": [],
@@ -355,17 +348,11 @@
                     "height": 2,
                     "startColor": {
                       "__colorToken": "outlineVariant",
-                      "alpha": 0.62,
-                      "copy": {
-                        "__actionId": "__action_132"
-                      }
+                      "alpha": 0.62
                     },
                     "endColor": {
                       "__colorToken": "outlineVariant",
-                      "alpha": 0,
-                      "copy": {
-                        "__actionId": "__action_133"
-                      }
+                      "alpha": 0
                     }
                   },
                   "children": [],
@@ -378,10 +365,7 @@
                     "size": 23,
                     "tint": {
                       "__colorToken": "onSurfaceVariant",
-                      "alpha": 0.78,
-                      "copy": {
-                        "__actionId": "__action_134"
-                      }
+                      "alpha": 0.78
                     }
                   },
                   "children": [],
@@ -403,8 +387,8 @@
         "fillMaxWidth": true,
         "paddingStart": 46,
         "paddingEnd": 12,
-        "paddingTop": 4,
-        "paddingBottom": 2
+        "paddingTop": 3,
+        "paddingBottom": 3
       },
       "children": [
         {
@@ -416,16 +400,13 @@
             ],
             "hoverBorderColor": {
               "__colorToken": "primary",
-              "alpha": 0.55,
-              "copy": {
-                "__actionId": "__action_135"
-              }
+              "alpha": 0.55
             },
             "shape": {
               "cornerRadius": 12
             },
             "onDrop": {
-              "__actionId": "__action_136"
+              "__actionId": "__action_41"
             }
           },
           "children": [
@@ -444,14 +425,11 @@
                     "verticalAlignment": "center",
                     "paddingStart": 12,
                     "paddingEnd": 8,
-                    "paddingTop": 6,
-                    "paddingBottom": 6,
+                    "paddingTop": 2,
+                    "paddingBottom": 2,
                     "background": {
                       "__colorToken": "surfaceContainerLow",
-                      "alpha": 0.72,
-                      "copy": {
-                        "__actionId": "__action_137"
-                      }
+                      "alpha": 0.72
                     },
                     "backgroundShape": {
                       "cornerRadius": 12
@@ -464,10 +442,7 @@
                             1,
                             {
                               "__colorToken": "outlineVariant",
-                              "alpha": 0.24,
-                              "copy": {
-                                "__actionId": "__action_138"
-                              }
+                              "alpha": 0.24
                             },
                             {
                               "cornerRadius": 12
@@ -477,7 +452,7 @@
                       ]
                     },
                     "onClick": {
-                      "__actionId": "__action_139"
+                      "__actionId": "__action_42"
                     }
                   },
                   "children": [
@@ -488,10 +463,7 @@
                         "size": 16,
                         "tint": {
                           "__colorToken": "onSurfaceVariant",
-                          "alpha": 0.76,
-                          "copy": {
-                            "__actionId": "__action_140"
-                          }
+                          "alpha": 0.76
                         }
                       },
                       "children": [],
@@ -516,10 +488,7 @@
                         "overflow": "ellipsis",
                         "color": {
                           "__colorToken": "onSurface",
-                          "alpha": 1,
-                          "copy": {
-                            "__actionId": "__action_141"
-                          }
+                          "alpha": 1
                         }
                       },
                       "children": [],
@@ -540,10 +509,7 @@
                         "size": 12,
                         "tint": {
                           "__colorToken": "onSurfaceVariant",
-                          "alpha": 0.65,
-                          "copy": {
-                            "__actionId": "__action_142"
-                          }
+                          "alpha": 0.65
                         }
                       },
                       "children": [],
@@ -594,7 +560,7 @@
                             ],
                             "enabled": true,
                             "onSelected": {
-                              "__actionId": "__action_143"
+                              "__actionId": "__action_43"
                             }
                           },
                           "children": [
@@ -605,10 +571,7 @@
                                 "size": 16,
                                 "tint": {
                                   "__colorToken": "onSurfaceVariant",
-                                  "alpha": 0.78,
-                                  "copy": {
-                                    "__actionId": "__action_144"
-                                  }
+                                  "alpha": 0.78
                                 }
                               },
                               "children": [],
@@ -635,10 +598,7 @@
                         "size": 20,
                         "tint": {
                           "__colorToken": "onSurfaceVariant",
-                          "alpha": 0.62,
-                          "copy": {
-                            "__actionId": "__action_145"
-                          }
+                          "alpha": 0.62
                         }
                       },
                       "children": [],
@@ -668,17 +628,14 @@
         ],
         "hoverBorderColor": {
           "__colorToken": "primary",
-          "alpha": 0.55,
-          "copy": {
-            "__actionId": "__action_146"
-          }
+          "alpha": 0.55
         },
         "shape": {
           "cornerRadius": 8
         },
         "fillMaxWidth": true,
         "onDrop": {
-          "__actionId": "__action_147"
+          "__actionId": "__action_44"
         }
       },
       "children": [
@@ -717,10 +674,7 @@
                         "height": 34,
                         "backgroundColor": {
                           "__colorToken": "outlineVariant",
-                          "alpha": 0.45,
-                          "copy": {
-                            "__actionId": "__action_148"
-                          }
+                          "alpha": 0.45
                         }
                       },
                       "children": [],
@@ -733,10 +687,7 @@
                         "width": 2,
                         "height": 16,
                         "backgroundColor": {
-                          "__colorToken": "primary",
-                          "copy": {
-                            "__actionId": "__action_149"
-                          }
+                          "__colorToken": "primary"
                         },
                         "backgroundShape": {
                           "cornerRadius": 1.5
@@ -749,10 +700,7 @@
                           "width": 2,
                           "height": 16,
                           "backgroundColor": {
-                            "__colorToken": "primary",
-                            "copy": {
-                              "__actionId": "__action_150"
-                            }
+                            "__colorToken": "primary"
                           }
                         }
                       },
@@ -776,10 +724,7 @@
                     "weight": 1,
                     "hoverBackground": {
                       "__colorToken": "onSurfaceVariant",
-                      "alpha": 0.07,
-                      "copy": {
-                        "__actionId": "__action_151"
-                      }
+                      "alpha": 0.07
                     },
                     "shape": {
                       "cornerRadius": 8
@@ -805,10 +750,10 @@
                           ]
                         },
                         "onStartAction": {
-                          "__actionId": "__action_152"
+                          "__actionId": "__action_45"
                         },
                         "onEndAction": {
-                          "__actionId": "__action_153"
+                          "__actionId": "__action_46"
                         }
                       },
                       "children": [
@@ -835,10 +780,7 @@
                                   "args": [
                                     {
                                       "__colorToken": "secondaryContainer",
-                                      "alpha": 0.78,
-                                      "copy": {
-                                        "__actionId": "__action_154"
-                                      }
+                                      "alpha": 0.78
                                     },
                                     {
                                       "cornerRadius": 8
@@ -851,10 +793,7 @@
                                     1,
                                     {
                                       "__colorToken": "onSecondaryContainer",
-                                      "alpha": 0.08,
-                                      "copy": {
-                                        "__actionId": "__action_155"
-                                      }
+                                      "alpha": 0.08
                                     },
                                     {
                                       "cornerRadius": 8
@@ -866,10 +805,10 @@
                                   "args": [
                                     {
                                       "onClick": {
-                                        "__actionId": "__action_156"
+                                        "__actionId": "__action_47"
                                       },
                                       "onLongClick": {
-                                        "__actionId": "__action_157"
+                                        "__actionId": "__action_48"
                                       }
                                     }
                                   ]
@@ -897,16 +836,10 @@
                                     "selected": true,
                                     "restingColor": {
                                       "__colorToken": "onSecondaryContainer",
-                                      "alpha": 0.7,
-                                      "copy": {
-                                        "__actionId": "__action_158"
-                                      }
+                                      "alpha": 0.7
                                     },
                                     "activeColor": {
-                                      "__colorToken": "primary",
-                                      "copy": {
-                                        "__actionId": "__action_159"
-                                      }
+                                      "__colorToken": "primary"
                                     }
                                   },
                                   "children": [],
@@ -923,10 +856,7 @@
                                       "paddingHorizontal": 10,
                                       "verticalAlignment": "center",
                                       "background": {
-                                        "__colorToken": "surfaceContainerHighest",
-                                        "copy": {
-                                          "__actionId": "__action_160"
-                                        }
+                                        "__colorToken": "surfaceContainerHighest"
                                       },
                                       "backgroundShape": {
                                         "cornerRadius": 8
@@ -942,10 +872,7 @@
                                           "overflow": "ellipsis",
                                           "fontSize": 13,
                                           "color": {
-                                            "__colorToken": "onSurface",
-                                            "copy": {
-                                              "__actionId": "__action_161"
-                                            }
+                                            "__colorToken": "onSurface"
                                           }
                                         },
                                         "children": [],
@@ -976,10 +903,7 @@
                                 "maxLines": 1,
                                 "overflow": "ellipsis",
                                 "color": {
-                                  "__colorToken": "onSecondaryContainer",
-                                  "copy": {
-                                    "__actionId": "__action_162"
-                                  }
+                                  "__colorToken": "onSecondaryContainer"
                                 },
                                 "letterSpacing": -0.1
                               },
@@ -1001,10 +925,7 @@
                                 "size": 12,
                                 "tint": {
                                   "__colorToken": "onSecondaryContainer",
-                                  "alpha": 0.6,
-                                  "copy": {
-                                    "__actionId": "__action_163"
-                                  }
+                                  "alpha": 0.6
                                 }
                               },
                               "children": [],
@@ -1053,7 +974,7 @@
                                       }
                                     ],
                                     "onSelected": {
-                                      "__actionId": "__action_164"
+                                      "__actionId": "__action_49"
                                     }
                                   },
                                   "children": [
@@ -1064,10 +985,7 @@
                                         "size": 16,
                                         "tint": {
                                           "__colorToken": "onSurfaceVariant",
-                                          "alpha": 0.78,
-                                          "copy": {
-                                            "__actionId": "__action_165"
-                                          }
+                                          "alpha": 0.78
                                         }
                                       },
                                       "children": [],
@@ -1091,10 +1009,7 @@
                               "fillMaxSize": true,
                               "paddingStart": 12,
                               "background": {
-                                "__colorToken": "primary",
-                                "copy": {
-                                  "__actionId": "__action_166"
-                                }
+                                "__colorToken": "primary"
                               },
                               "contentAlignment": "start"
                             },
@@ -1107,10 +1022,7 @@
                                   "width": 18,
                                   "height": 18,
                                   "tint": {
-                                    "__colorToken": "onPrimary",
-                                    "copy": {
-                                      "__actionId": "__action_167"
-                                    }
+                                    "__colorToken": "onPrimary"
                                   }
                                 },
                                 "children": [],
@@ -1127,10 +1039,7 @@
                               "fillMaxSize": true,
                               "paddingEnd": 12,
                               "background": {
-                                "__colorToken": "error",
-                                "copy": {
-                                  "__actionId": "__action_168"
-                                }
+                                "__colorToken": "error"
                               },
                               "contentAlignment": "end"
                             },
@@ -1143,10 +1052,7 @@
                                   "width": 18,
                                   "height": 18,
                                   "tint": {
-                                    "__colorToken": "onError",
-                                    "copy": {
-                                      "__actionId": "__action_169"
-                                    }
+                                    "__colorToken": "onError"
                                   }
                                 },
                                 "children": [],
@@ -1182,17 +1088,14 @@
         ],
         "hoverBorderColor": {
           "__colorToken": "primary",
-          "alpha": 0.55,
-          "copy": {
-            "__actionId": "__action_170"
-          }
+          "alpha": 0.55
         },
         "shape": {
           "cornerRadius": 8
         },
         "fillMaxWidth": true,
         "onDrop": {
-          "__actionId": "__action_171"
+          "__actionId": "__action_50"
         }
       },
       "children": [
@@ -1231,10 +1134,7 @@
                         "height": 34,
                         "backgroundColor": {
                           "__colorToken": "outlineVariant",
-                          "alpha": 0.45,
-                          "copy": {
-                            "__actionId": "__action_172"
-                          }
+                          "alpha": 0.45
                         }
                       },
                       "children": [],
@@ -1248,10 +1148,7 @@
                         "height": 0,
                         "backgroundColor": {
                           "__colorToken": "onSurface",
-                          "alpha": 0,
-                          "copy": {
-                            "__actionId": "__action_173"
-                          }
+                          "alpha": 0
                         },
                         "backgroundShape": {
                           "cornerRadius": 1.5
@@ -1265,10 +1162,7 @@
                           "height": 10,
                           "backgroundColor": {
                             "__colorToken": "onSurface",
-                            "alpha": 0.55,
-                            "copy": {
-                              "__actionId": "__action_174"
-                            }
+                            "alpha": 0.55
                           }
                         }
                       },
@@ -1292,10 +1186,7 @@
                     "weight": 1,
                     "hoverBackground": {
                       "__colorToken": "onSurfaceVariant",
-                      "alpha": 0.07,
-                      "copy": {
-                        "__actionId": "__action_175"
-                      }
+                      "alpha": 0.07
                     },
                     "shape": {
                       "cornerRadius": 8
@@ -1321,10 +1212,10 @@
                           ]
                         },
                         "onStartAction": {
-                          "__actionId": "__action_176"
+                          "__actionId": "__action_51"
                         },
                         "onEndAction": {
-                          "__actionId": "__action_177"
+                          "__actionId": "__action_52"
                         }
                       },
                       "children": [
@@ -1351,10 +1242,7 @@
                                   "args": [
                                     {
                                       "__colorToken": "secondaryContainer",
-                                      "alpha": 0,
-                                      "copy": {
-                                        "__actionId": "__action_178"
-                                      }
+                                      "alpha": 0
                                     },
                                     {
                                       "cornerRadius": 8
@@ -1367,10 +1255,7 @@
                                     1,
                                     {
                                       "__colorToken": "onSecondaryContainer",
-                                      "alpha": 0,
-                                      "copy": {
-                                        "__actionId": "__action_179"
-                                      }
+                                      "alpha": 0
                                     },
                                     {
                                       "cornerRadius": 8
@@ -1382,10 +1267,10 @@
                                   "args": [
                                     {
                                       "onClick": {
-                                        "__actionId": "__action_180"
+                                        "__actionId": "__action_53"
                                       },
                                       "onLongClick": {
-                                        "__actionId": "__action_181"
+                                        "__actionId": "__action_54"
                                       }
                                     }
                                   ]
@@ -1413,16 +1298,10 @@
                                     "selected": false,
                                     "restingColor": {
                                       "__colorToken": "onSurfaceVariant",
-                                      "alpha": 0.3,
-                                      "copy": {
-                                        "__actionId": "__action_182"
-                                      }
+                                      "alpha": 0.3
                                     },
                                     "activeColor": {
-                                      "__colorToken": "primary",
-                                      "copy": {
-                                        "__actionId": "__action_183"
-                                      }
+                                      "__colorToken": "primary"
                                     }
                                   },
                                   "children": [],
@@ -1439,10 +1318,7 @@
                                       "paddingHorizontal": 10,
                                       "verticalAlignment": "center",
                                       "background": {
-                                        "__colorToken": "surfaceContainerHighest",
-                                        "copy": {
-                                          "__actionId": "__action_184"
-                                        }
+                                        "__colorToken": "surfaceContainerHighest"
                                       },
                                       "backgroundShape": {
                                         "cornerRadius": 8
@@ -1458,10 +1334,7 @@
                                           "overflow": "ellipsis",
                                           "fontSize": 13,
                                           "color": {
-                                            "__colorToken": "onSurface",
-                                            "copy": {
-                                              "__actionId": "__action_185"
-                                            }
+                                            "__colorToken": "onSurface"
                                           }
                                         },
                                         "children": [],
@@ -1493,10 +1366,7 @@
                                 "overflow": "ellipsis",
                                 "color": {
                                   "__colorToken": "onSurfaceVariant",
-                                  "alpha": 0.8,
-                                  "copy": {
-                                    "__actionId": "__action_186"
-                                  }
+                                  "alpha": 0.8
                                 },
                                 "letterSpacing": -0.1
                               },
@@ -1518,10 +1388,7 @@
                                 "size": 12,
                                 "tint": {
                                   "__colorToken": "onSurfaceVariant",
-                                  "alpha": 0.6,
-                                  "copy": {
-                                    "__actionId": "__action_187"
-                                  }
+                                  "alpha": 0.6
                                 }
                               },
                               "children": [],
@@ -1570,7 +1437,7 @@
                                       }
                                     ],
                                     "onSelected": {
-                                      "__actionId": "__action_188"
+                                      "__actionId": "__action_55"
                                     }
                                   },
                                   "children": [
@@ -1581,10 +1448,7 @@
                                         "size": 16,
                                         "tint": {
                                           "__colorToken": "onSurfaceVariant",
-                                          "alpha": 0.78,
-                                          "copy": {
-                                            "__actionId": "__action_189"
-                                          }
+                                          "alpha": 0.78
                                         }
                                       },
                                       "children": [],
@@ -1608,10 +1472,7 @@
                               "fillMaxSize": true,
                               "paddingStart": 12,
                               "background": {
-                                "__colorToken": "primary",
-                                "copy": {
-                                  "__actionId": "__action_190"
-                                }
+                                "__colorToken": "primary"
                               },
                               "contentAlignment": "start"
                             },
@@ -1624,10 +1485,7 @@
                                   "width": 18,
                                   "height": 18,
                                   "tint": {
-                                    "__colorToken": "onPrimary",
-                                    "copy": {
-                                      "__actionId": "__action_191"
-                                    }
+                                    "__colorToken": "onPrimary"
                                   }
                                 },
                                 "children": [],
@@ -1644,10 +1502,7 @@
                               "fillMaxSize": true,
                               "paddingEnd": 12,
                               "background": {
-                                "__colorToken": "error",
-                                "copy": {
-                                  "__actionId": "__action_192"
-                                }
+                                "__colorToken": "error"
                               },
                               "contentAlignment": "end"
                             },
@@ -1660,10 +1515,7 @@
                                   "width": 18,
                                   "height": 18,
                                   "tint": {
-                                    "__colorToken": "onError",
-                                    "copy": {
-                                      "__actionId": "__action_193"
-                                    }
+                                    "__colorToken": "onError"
                                   }
                                 },
                                 "children": [],
@@ -1694,8 +1546,8 @@
         "fillMaxWidth": true,
         "paddingStart": 46,
         "paddingEnd": 12,
-        "paddingTop": 4,
-        "paddingBottom": 2
+        "paddingTop": 3,
+        "paddingBottom": 3
       },
       "children": [
         {
@@ -1707,16 +1559,13 @@
             ],
             "hoverBorderColor": {
               "__colorToken": "primary",
-              "alpha": 0.55,
-              "copy": {
-                "__actionId": "__action_194"
-              }
+              "alpha": 0.55
             },
             "shape": {
               "cornerRadius": 12
             },
             "onDrop": {
-              "__actionId": "__action_195"
+              "__actionId": "__action_56"
             }
           },
           "children": [
@@ -1735,14 +1584,11 @@
                     "verticalAlignment": "center",
                     "paddingStart": 12,
                     "paddingEnd": 8,
-                    "paddingTop": 6,
-                    "paddingBottom": 6,
+                    "paddingTop": 2,
+                    "paddingBottom": 2,
                     "background": {
                       "__colorToken": "surfaceContainerLow",
-                      "alpha": 0.72,
-                      "copy": {
-                        "__actionId": "__action_196"
-                      }
+                      "alpha": 0.72
                     },
                     "backgroundShape": {
                       "cornerRadius": 12
@@ -1755,10 +1601,7 @@
                             1,
                             {
                               "__colorToken": "outlineVariant",
-                              "alpha": 0.24,
-                              "copy": {
-                                "__actionId": "__action_197"
-                              }
+                              "alpha": 0.24
                             },
                             {
                               "cornerRadius": 12
@@ -1768,7 +1611,7 @@
                       ]
                     },
                     "onClick": {
-                      "__actionId": "__action_198"
+                      "__actionId": "__action_57"
                     }
                   },
                   "children": [
@@ -1779,10 +1622,7 @@
                         "size": 16,
                         "tint": {
                           "__colorToken": "onSurfaceVariant",
-                          "alpha": 0.76,
-                          "copy": {
-                            "__actionId": "__action_199"
-                          }
+                          "alpha": 0.76
                         }
                       },
                       "children": [],
@@ -1807,10 +1647,7 @@
                         "overflow": "ellipsis",
                         "color": {
                           "__colorToken": "onSurface",
-                          "alpha": 1,
-                          "copy": {
-                            "__actionId": "__action_200"
-                          }
+                          "alpha": 1
                         }
                       },
                       "children": [],
@@ -1861,7 +1698,7 @@
                               }
                             ],
                             "onSelected": {
-                              "__actionId": "__action_201"
+                              "__actionId": "__action_58"
                             }
                           },
                           "children": [
@@ -1872,10 +1709,7 @@
                                 "size": 16,
                                 "tint": {
                                   "__colorToken": "onSurfaceVariant",
-                                  "alpha": 0.78,
-                                  "copy": {
-                                    "__actionId": "__action_202"
-                                  }
+                                  "alpha": 0.78
                                 }
                               },
                               "children": [],
@@ -1902,10 +1736,7 @@
                         "size": 20,
                         "tint": {
                           "__colorToken": "onSurfaceVariant",
-                          "alpha": 0.62,
-                          "copy": {
-                            "__actionId": "__action_203"
-                          }
+                          "alpha": 0.62
                         }
                       },
                       "children": [],
@@ -1935,17 +1766,14 @@
         ],
         "hoverBorderColor": {
           "__colorToken": "primary",
-          "alpha": 0.55,
-          "copy": {
-            "__actionId": "__action_204"
-          }
+          "alpha": 0.55
         },
         "shape": {
           "cornerRadius": 8
         },
         "fillMaxWidth": true,
         "onDrop": {
-          "__actionId": "__action_205"
+          "__actionId": "__action_59"
         }
       },
       "children": [
@@ -1984,10 +1812,7 @@
                         "height": 34,
                         "backgroundColor": {
                           "__colorToken": "outlineVariant",
-                          "alpha": 0.45,
-                          "copy": {
-                            "__actionId": "__action_206"
-                          }
+                          "alpha": 0.45
                         }
                       },
                       "children": [],
@@ -2001,10 +1826,7 @@
                         "height": 0,
                         "backgroundColor": {
                           "__colorToken": "onSurface",
-                          "alpha": 0,
-                          "copy": {
-                            "__actionId": "__action_207"
-                          }
+                          "alpha": 0
                         },
                         "backgroundShape": {
                           "cornerRadius": 1.5
@@ -2018,10 +1840,7 @@
                           "height": 10,
                           "backgroundColor": {
                             "__colorToken": "onSurface",
-                            "alpha": 0.55,
-                            "copy": {
-                              "__actionId": "__action_208"
-                            }
+                            "alpha": 0.55
                           }
                         }
                       },
@@ -2045,10 +1864,7 @@
                     "weight": 1,
                     "hoverBackground": {
                       "__colorToken": "onSurfaceVariant",
-                      "alpha": 0.07,
-                      "copy": {
-                        "__actionId": "__action_209"
-                      }
+                      "alpha": 0.07
                     },
                     "shape": {
                       "cornerRadius": 8
@@ -2074,10 +1890,10 @@
                           ]
                         },
                         "onStartAction": {
-                          "__actionId": "__action_210"
+                          "__actionId": "__action_60"
                         },
                         "onEndAction": {
-                          "__actionId": "__action_211"
+                          "__actionId": "__action_61"
                         }
                       },
                       "children": [
@@ -2104,10 +1920,7 @@
                                   "args": [
                                     {
                                       "__colorToken": "secondaryContainer",
-                                      "alpha": 0,
-                                      "copy": {
-                                        "__actionId": "__action_212"
-                                      }
+                                      "alpha": 0
                                     },
                                     {
                                       "cornerRadius": 8
@@ -2120,10 +1933,7 @@
                                     1,
                                     {
                                       "__colorToken": "onSecondaryContainer",
-                                      "alpha": 0,
-                                      "copy": {
-                                        "__actionId": "__action_213"
-                                      }
+                                      "alpha": 0
                                     },
                                     {
                                       "cornerRadius": 8
@@ -2135,10 +1945,10 @@
                                   "args": [
                                     {
                                       "onClick": {
-                                        "__actionId": "__action_214"
+                                        "__actionId": "__action_62"
                                       },
                                       "onLongClick": {
-                                        "__actionId": "__action_215"
+                                        "__actionId": "__action_63"
                                       }
                                     }
                                   ]
@@ -2166,16 +1976,10 @@
                                     "selected": false,
                                     "restingColor": {
                                       "__colorToken": "onSurfaceVariant",
-                                      "alpha": 0.3,
-                                      "copy": {
-                                        "__actionId": "__action_216"
-                                      }
+                                      "alpha": 0.3
                                     },
                                     "activeColor": {
-                                      "__colorToken": "primary",
-                                      "copy": {
-                                        "__actionId": "__action_217"
-                                      }
+                                      "__colorToken": "primary"
                                     }
                                   },
                                   "children": [],
@@ -2192,10 +1996,7 @@
                                       "paddingHorizontal": 10,
                                       "verticalAlignment": "center",
                                       "background": {
-                                        "__colorToken": "surfaceContainerHighest",
-                                        "copy": {
-                                          "__actionId": "__action_218"
-                                        }
+                                        "__colorToken": "surfaceContainerHighest"
                                       },
                                       "backgroundShape": {
                                         "cornerRadius": 8
@@ -2211,10 +2012,7 @@
                                           "overflow": "ellipsis",
                                           "fontSize": 13,
                                           "color": {
-                                            "__colorToken": "onSurface",
-                                            "copy": {
-                                              "__actionId": "__action_219"
-                                            }
+                                            "__colorToken": "onSurface"
                                           }
                                         },
                                         "children": [],
@@ -2246,10 +2044,7 @@
                                 "overflow": "ellipsis",
                                 "color": {
                                   "__colorToken": "onSurfaceVariant",
-                                  "alpha": 0.8,
-                                  "copy": {
-                                    "__actionId": "__action_220"
-                                  }
+                                  "alpha": 0.8
                                 },
                                 "letterSpacing": -0.1
                               },
@@ -2299,7 +2094,7 @@
                                       }
                                     ],
                                     "onSelected": {
-                                      "__actionId": "__action_221"
+                                      "__actionId": "__action_64"
                                     }
                                   },
                                   "children": [
@@ -2310,10 +2105,7 @@
                                         "size": 16,
                                         "tint": {
                                           "__colorToken": "onSurfaceVariant",
-                                          "alpha": 0.78,
-                                          "copy": {
-                                            "__actionId": "__action_222"
-                                          }
+                                          "alpha": 0.78
                                         }
                                       },
                                       "children": [],
@@ -2337,10 +2129,7 @@
                               "fillMaxSize": true,
                               "paddingStart": 12,
                               "background": {
-                                "__colorToken": "primary",
-                                "copy": {
-                                  "__actionId": "__action_223"
-                                }
+                                "__colorToken": "primary"
                               },
                               "contentAlignment": "start"
                             },
@@ -2353,10 +2142,7 @@
                                   "width": 18,
                                   "height": 18,
                                   "tint": {
-                                    "__colorToken": "onPrimary",
-                                    "copy": {
-                                      "__actionId": "__action_224"
-                                    }
+                                    "__colorToken": "onPrimary"
                                   }
                                 },
                                 "children": [],
@@ -2373,10 +2159,7 @@
                               "fillMaxSize": true,
                               "paddingEnd": 12,
                               "background": {
-                                "__colorToken": "error",
-                                "copy": {
-                                  "__actionId": "__action_225"
-                                }
+                                "__colorToken": "error"
                               },
                               "contentAlignment": "end"
                             },
@@ -2389,10 +2172,7 @@
                                   "width": 18,
                                   "height": 18,
                                   "tint": {
-                                    "__colorToken": "onError",
-                                    "copy": {
-                                      "__actionId": "__action_226"
-                                    }
+                                    "__colorToken": "onError"
                                   }
                                 },
                                 "children": [],

@@ -63,6 +63,18 @@ pub(crate) fn create_cli_host_manager() -> HostManager {
     create_cli_host_manager_with_toast_host(Arc::new(console_toast))
 }
 
+/// Returns the OS host name so CLI Cores on different machines stay distinguishable.
+#[allow(non_snake_case)]
+fn cliHostName() -> Option<String> {
+    gethostname::gethostname().into_string().ok()
+}
+
+/// Builds the CLI presentation identity used by pairing and the device space.
+#[allow(non_snake_case)]
+fn cliDeviceInfo(role: &str) -> LinkDeviceInfo {
+    LinkDeviceInfo::nativeCliOnHost(role, cliHostName().as_deref())
+}
+
 /// Writes one non-TUI toast into the active CLI terminal.
 fn console_toast(message: &str) -> HostResult<()> {
     eprintln!("{message}");
@@ -120,11 +132,9 @@ fn create_cli_host_manager_with_toast_host(toastHost: Arc<dyn ToastHost>) -> Hos
     ));
     let runtimeStorageHost = Arc::new(NativeRuntimeStorageHost::new(
         runtimeRoot.clone(),
-        workspaceRoot.clone(),
+        workspaceRoot,
     ));
-    let runtimeStorageWriteHost = Arc::new(
-        operit_host_native_common::NativeRuntimeStorageHost::new(runtimeRoot.clone(), workspaceRoot),
-    );
+    let runtimeStorageWriteHost = runtimeStorageHost.clone();
     let runtimeSqliteHost = runtimeStorageHost.clone();
     let hostSecretStore: Arc<dyn operit_host_api::HostSecretStore> =
         if env::var("OPERIT_CLI_SECRET_STORE").as_deref() == Ok("file") {
@@ -216,7 +226,7 @@ pub(crate) async fn create_cli_core_application(
 ) -> Result<CoreApplication, String> {
     let mut config = CoreApplicationConfig::new(
         create_cli_host_manager(),
-        LinkDeviceInfo::nativeCli(deviceName),
+        cliDeviceInfo(deviceName),
     );
     // A short-lived CLI Core running next to the daemon/TUI must not claim
     // the persistent Space sync worker as well.
@@ -239,7 +249,7 @@ pub(crate) async fn create_cli_core_application_with_node_services(
     services: Option<operit_node_runtime::NodeServices::NodeServices>,
 ) -> Result<CoreApplication, String> {
     let mut config = CoreApplicationConfig::new(
-        create_cli_host_manager(), LinkDeviceInfo::nativeCli(deviceName),
+        create_cli_host_manager(), cliDeviceInfo(deviceName),
     ).withSpaceSync(false);
     if let Some(services) = services { config = config.withNodeServices(services); }
     CoreApplication::start(config).await
@@ -253,7 +263,7 @@ pub(crate) async fn create_cli_core_application_configured(
     CoreApplication::start(
         CoreApplicationConfig::new(
             create_cli_host_manager(),
-            LinkDeviceInfo::nativeCli(deviceName),
+            cliDeviceInfo(deviceName),
         )
         .withLocalClientConfigurator(configurator),
     )
@@ -269,7 +279,7 @@ pub(crate) async fn create_cli_core_application_configured_with_toast_host(
     CoreApplication::start(
         CoreApplicationConfig::new(
             create_cli_host_manager_with_toast_host(toastHost),
-            LinkDeviceInfo::nativeCli(deviceName),
+            cliDeviceInfo(deviceName),
         )
         .withLocalClientConfigurator(configurator),
     )
@@ -743,12 +753,12 @@ pub(crate) fn rescue_roots() -> Result<operit_host_data_rescue::RescueRoots, Str
 /// Returns the CLI configuration directory for an explicitly selected damaged-config rescue.
 pub(crate) fn rescue_config_root() -> PathBuf { cli_config_dir() }
 
-/// Creates only the selected secret-store adapter for a CLI maintenance session.
-pub(crate) fn rescue_secret_store(root: &std::path::Path) -> Option<Arc<dyn operit_host_api::HostSecretStore>> {
+/// Opens maintenance with the same explicitly selected secret contract as normal CLI profiles.
+pub(crate) fn rescue_session(default_runtime: PathBuf, root: &std::path::Path) -> Result<operit_host_data_rescue::NativeRescueSession, String> {
     if env::var("OPERIT_CLI_SECRET_STORE").as_deref() == Ok("file") {
-        // Every identity's file-backed secrets are already included in the raw runtime namespace.
-        return None;
+        return operit_host_data_rescue::NativeRescueSession::open_file_secrets(default_runtime);
     }
-    Some(Arc::new(NativeRuntimeStorageHost::new(root.to_path_buf(), root.with_file_name("workspaces"))))
+    let secrets = Arc::new(NativeRuntimeStorageHost::new(root.to_path_buf(), root.with_file_name("workspaces")));
+    operit_host_data_rescue::NativeRescueSession::open(default_runtime, Some(secrets))
 }
 

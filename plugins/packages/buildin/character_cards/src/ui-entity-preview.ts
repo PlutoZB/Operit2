@@ -1,3 +1,4 @@
+import { characterModelBindingStatus } from "./model-binding";
 import type { ComposeDslContext, ComposeNode } from "../../../../types/compose-dsl";
 import type { Card, Group, Snapshot, TagEdit } from "./model";
 import type { ThemeChoice } from "./selection-application";
@@ -59,8 +60,7 @@ export function renderEntityPreview(ctx: ComposeDslContext, input: PreviewConten
     contents.push(...contentSection("opening", "开场白", card.openingStatement, true), ...contentSection("setting", "角色设定", card.characterSetting),
       ...contentSection("chat", "聊天附加内容", card.otherContentChat), ...contentSection("voice", "语音附加内容", card.otherContentVoice),
       ...contentSection("prompt", "高级自定义 Prompt", card.advancedCustomPrompt), ...contentSection("notes", "备注", card.marks));
-    const model = input.snapshot.models.find(model => model.providerId === card.chatProviderId && model.modelId === card.chatModelId);
-    rows.push({ key: "model", label: "聊天模型", value: card.chatModelBindingMode === "FIXED_MODEL" ? model === undefined ? "固定模型已不可用" : model.providerName + " · " + model.modelId : "跟随全局模型" },
+    rows.push({ key: "model", label: "聊天模型", value: characterModelBindingStatus(card, input.snapshot.models).label },
       { key: "theme", label: "主题", value: themeLabel },
       { key: "tts", label: "语音", value: card.ttsConfigId === null ? "跟随全局语音配置" : input.snapshot.ttsConfigs.find(config => config.id === card.ttsConfigId)?.name ?? "语音配置已不可用" },
       { key: "memory", label: "记忆库", value: card.memoryBindingMode === "SHARED" ? input.snapshot.stores.find(store => store.id === card.sharedMemoryId)?.name ?? "共享记忆库已不可用" : "角色独立记忆库" });

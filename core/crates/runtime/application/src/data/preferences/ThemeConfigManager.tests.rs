@@ -17,6 +17,11 @@ struct RecordingStorageHost {
 }
 
 impl RuntimeStorageHost for RecordingStorageHost {
+    /// Delegates durability to the real storage host without rewriting the file.
+    fn flushFile(&self, path: &str) -> operit_host_api::HostResult<()> {
+        self.inner.flushFile(path)
+    }
+
     /// Reads the physical root from the real storage host.
     fn runtimeRootDir(&self) -> Option<PathBuf> {
         self.inner.runtimeRootDir()
@@ -37,14 +42,19 @@ impl RuntimeStorageHost for RecordingStorageHost {
         self.inner.readBytesRange(path, offset, length)
     }
 
-    /// Records ordinary preference writes and delegates successful commits to the real host.
-    fn writeBytes(&self, path: &str, content: &[u8]) -> HostResult<()> {
+    /// Records and atomically publishes one complete preference commit through the real host.
+    fn writeBytesAtomically(&self, path: &str, content: &[u8]) -> HostResult<()> {
         if path == OperitPaths::USER_PREFERENCES_PATH {
             if self.failPreferenceWrite.load(Ordering::SeqCst) {
                 return Err(HostError::new("injected theme preference write failure"));
             }
             self.preferenceWrites.fetch_add(1, Ordering::SeqCst);
         }
+        self.inner.writeBytesAtomically(path, content)
+    }
+
+    /// Delegates ordinary nontransactional test writes to the real host.
+    fn writeBytes(&self, path: &str, content: &[u8]) -> HostResult<()> {
         self.inner.writeBytes(path, content)
     }
 
@@ -248,7 +258,7 @@ fn initial_catalog_initializes_only_schema_metadata() {
         values.get(&stringPreferencesKey(
             operit_store::PreferencesDataStore::PREFERENCES_SCHEMA_VERSION_KEY_NAME
         )),
-        Some(&json!(3))
+        Some(&json!(4))
     );
 }
 
@@ -835,7 +845,7 @@ fn user_schema_one_migration_preserves_declared_native_types() {
     })).unwrap()).unwrap();
     let preferences = fixture.preferences();
     let values = preferences.data().unwrap();
-    assert_eq!(preferences.schemaVersion().unwrap(), 3);
+    assert_eq!(preferences.schemaVersion().unwrap(), 4);
     assert_eq!(
         values.get(&stringPreferencesKey("font_scale")),
         Some(&json!(1.25))
@@ -1044,7 +1054,7 @@ fn user_schema_two_migration_preserves_records_and_active_appearance() {
     let writes = fixture.writes();
     let entries = fixture.preferences().data().unwrap();
     assert_eq!(fixture.writes(), writes + 1);
-    assert_eq!(entries.get(&stringPreferencesKey("__operit_preferences_schema_version")), Some(&json!(3)));
+    assert_eq!(entries.get(&stringPreferencesKey("__operit_preferences_schema_version")), Some(&json!(4)));
     let migratedBytes = fixture.bytes();
     let manager = fixture.manager();
     assert_eq!(manager.list().unwrap(), vec![first.clone(), second.clone()]);
@@ -1132,11 +1142,169 @@ fn synchronized_themes_preserve_independent_identity_records() {
         &history,
         &operations,
         |_, _| true,
-        true,
     )
     .unwrap();
     let manager = target.manager();
     assert_eq!(manager.list().unwrap().len(), 2);
     assert_eq!(manager.get(first.id.clone()).unwrap(), first);
     assert_eq!(manager.get(second.id.clone()).unwrap(), second);
+}
+
+/// Repairs installed schema-one, schema-two and schema-three color representations before any active-theme validation.
+#[test]
+fn legacy_color_migration_covers_existing_user_schema_versions() {
+    use super::super::ThemePreferenceSnapshot::{snapshotFields, FieldKind};
+    for version in [1, 2, 3] {
+        let fixture = StoreFixture::new();
+        let canonical = snapshot();
+        let mut saved = Preferences::default();
+        writeThemePreferenceSnapshot(&mut saved, &canonical).unwrap();
+        let mut old_snapshot = canonical;
+        for field in snapshotFields().filter(|field| matches!(field.kind, FieldKind::OptionalColor))
+        {
+            old_snapshot.insert(field.json_key.to_string(), json!(-16711936));
+            saved.set(
+                &stringPreferencesKey(field.preference_key),
+                if version == 1 {
+                    json!("-16711936")
+                } else {
+                    json!(-16711936)
+                },
+            );
+        }
+        old_snapshot.insert("retiredHistoricalSetting".to_string(), json!(true));
+        let old = ThemeConfig {
+            id: "legacy-color".into(),
+            name: "My theme".into(),
+            snapshot: old_snapshot,
+            createdAt: 10,
+            updatedAt: 20,
+        };
+        saved.set(
+            &stringPreferencesKey("__operit_preferences_schema_version"),
+            json!(version),
+        );
+        saved.set(
+            &stringPreferencesKey("active_theme_config_id"),
+            if version == 1 {
+                json!("\"legacy-color\"")
+            } else {
+                json!("legacy-color")
+            },
+        );
+        match version {
+            1 => saved.set(
+                &stringPreferencesKey("theme_configs"),
+                serde_json::to_string(&vec![old.clone()]).unwrap(),
+            ),
+            2 => saved.set(&stringPreferencesKey("theme_configs"), json!([old.clone()])),
+            3 => saved.set(
+                &stringPreferencesKey("theme_config_legacy-color"),
+                json!(old.clone()),
+            ),
+            _ => unreachable!(),
+        }
+        saved.set(&stringPreferencesKey("unrelated"), json!({"keep":true}));
+        fixture
+            .host
+            .writeBytes(
+                OperitPaths::USER_PREFERENCES_PATH,
+                &serde_json::to_vec(&saved).unwrap(),
+            )
+            .unwrap();
+        let entries = fixture.preferences().data().unwrap();
+        assert_eq!(fixture.preferences().schemaVersion().unwrap(), 4);
+        let mut expected = old;
+        expected.snapshot.remove("retiredHistoricalSetting");
+        for field in snapshotFields().filter(|field| matches!(field.kind, FieldKind::OptionalColor))
+        {
+            expected
+                .snapshot
+                .insert(field.json_key.to_string(), json!(4278255360_u32));
+            assert_eq!(
+                entries.get(&stringPreferencesKey(field.preference_key)),
+                Some(&json!(4278255360_u32))
+            );
+        }
+        let manager = fixture.manager();
+        assert_eq!(manager.getActive().unwrap(), Some(expected.clone()));
+        assert_eq!(manager.get(expected.id.clone()).unwrap(), expected);
+        assert_eq!(
+            entries.get(&stringPreferencesKey("unrelated")),
+            Some(&json!({"keep":true}))
+        );
+        assert!(entries
+            .get(&stringPreferencesKey("theme_configs"))
+            .is_none());
+        let committed = fixture.bytes();
+        fixture.preferences().data().unwrap();
+        assert_eq!(fixture.bytes(), committed);
+    }
+}
+
+/// Rejects values that do not encode a 32-bit ARGB integer without manufacturing a replacement color.
+#[test]
+fn legacy_color_conversion_checks_exact_bit_width() {
+    use super::super::ThemePreferenceSnapshot::{
+        decodeLegacyThemePreference, snapshotFields, FieldKind,
+    };
+    for field in snapshotFields().filter(|field| matches!(field.kind, FieldKind::OptionalColor)) {
+        for raw in [
+            json!(-2147483649_i64),
+            json!(4294967296_i64),
+            json!(1.5),
+            json!(true),
+            json!("invalid"),
+        ] {
+            assert!(
+                decodeLegacyThemePreference(field, raw).is_err(),
+                "{}",
+                field.json_key
+            );
+        }
+        assert_eq!(
+            decodeLegacyThemePreference(field, json!(i32::MIN)).unwrap(),
+            json!(2147483648_u32)
+        );
+        assert_eq!(
+            decodeLegacyThemePreference(field, json!(u32::MAX)).unwrap(),
+            json!(u32::MAX)
+        );
+    }
+}
+
+/// Migrates all 78 fields emitted by the October 8 writer (425074726), including already installed schema markers.
+#[test]
+fn october_eighth_preferences_migrate_all_released_field_types() {
+    let released: Value =
+        serde_json::from_str(include_str!("theme_preferences_oct08_fixture.json")).unwrap();
+    let expected: BTreeMap<String, Value> =
+        serde_json::from_value(released["snapshot"].clone()).unwrap();
+    for version in [0, 1, 2, 3] {
+        let fixture = StoreFixture::new();
+        let mut saved = released["preferences"].clone();
+        if version != 0 {
+            saved["__operit_preferences_schema_version"] = json!(version.to_string());
+        }
+        fixture
+            .host
+            .writeBytes(
+                OperitPaths::USER_PREFERENCES_PATH,
+                &serde_json::to_vec(&saved).unwrap(),
+            )
+            .unwrap();
+        let initial_writes = fixture.writes();
+        let preferences = fixture.preferences();
+        let migrated = preferences.data().unwrap();
+        assert_eq!(preferences.schemaVersion().unwrap(), 4);
+        assert_eq!(
+            readThemePreferenceSnapshot(&migrated, &snapshot()).unwrap(),
+            expected
+        );
+        assert_eq!(fixture.writes(), initial_writes + 1);
+        let committed = fixture.bytes();
+        preferences.data().unwrap();
+        assert_eq!(fixture.bytes(), committed);
+        assert_eq!(fixture.writes(), initial_writes + 1);
+    }
 }

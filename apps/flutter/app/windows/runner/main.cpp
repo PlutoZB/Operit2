@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "crash_channel.h"
+#include "native_crash_report.h"
 #include "engine_channel_lifetime.h"
 #include "flutter_window.h"
 #include "operit_runtime_channel.h"
@@ -197,9 +198,8 @@ bool ForwardNotificationActivationToExistingWindow(const std::string& uri) {
 }  // namespace
 
 /// Presents the native crash dialog for unhandled Windows exceptions.
-LONG WINAPI OperitUnhandledExceptionFilter(EXCEPTION_POINTERS*) {
-  ShowOperitWindowsCrashScreen("Unhandled Windows exception outside Flutter.");
-  return EXCEPTION_EXECUTE_HANDLER;
+LONG WINAPI OperitUnhandledExceptionFilter(EXCEPTION_POINTERS* exception) {
+  return ReportOperitWindowsNativeCrash(exception);
 }
 
 /// Runs the Windows Flutter application message loop.

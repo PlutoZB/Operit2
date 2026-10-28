@@ -1,5 +1,5 @@
 use super::ThemeConfigManager::{validateConfig, ThemeConfig, THEME_CONFIG_PREFIX};
-use super::ThemePreferenceSnapshot::{FieldKind, SNAPSHOT_FIELDS};
+use super::ThemePreferenceSnapshot::{migrateLegacyThemePreferences, migrateLegacyThemeSnapshot};
 use operit_host_api::RuntimeStorageHost;
 use operit_store::PreferencesDataStore::{
     stringPreferencesKey, Flow, Preferences, PreferencesDataStore, PreferencesDataStoreError,
@@ -34,7 +34,16 @@ impl UserPreferencesManager {
     /// Opens the single versioned owner of global user and appearance preferences.
     pub(crate) fn store(storage: Arc<dyn RuntimeStorageHost>) -> PreferencesDataStore {
         PreferencesDataStore::newWithStorage(storage, OperitPaths::USER_PREFERENCES_PATH)
-            .withSchema(3, Self::migratePreferences)
+            .withSchema(4, Self::migratePreferences)
+    }
+
+    /// Converts historical user preference values without running store initialization.
+    pub(crate) fn decodeSyncedEntry(entry: &mut operit_store::PreferencesDataStore::PreferencesSyncedEntry) -> Result<(), PreferencesDataStoreError> {
+        entry.decodeHistoricalValues(|version, values| {
+            if version > 4 { return Err(PreferencesDataStoreError::SchemaVersionTooNew { actual: version, expected: 4 }); }
+            for version in version.max(1)..4 { Self::migratePreferences(version, values)?; }
+            Ok(())
+        })
     }
 
     /// Applies each versioned migration owned by the user preferences file.
@@ -45,24 +54,6 @@ impl UserPreferencesManager {
         match version {
             0 => Ok(()),
             1 => {
-                for field in SNAPSHOT_FIELDS {
-                    let key = stringPreferencesKey(field.preference_key);
-                    if let Some(encoded) = preferences.getTyped::<String>(&key)? {
-                        let value = match field.kind {
-                            FieldKind::Boolean => {
-                                serde_json::to_value(serde_json::from_str::<bool>(&encoded)?)?
-                            }
-                            FieldKind::OptionalColor => {
-                                serde_json::to_value(serde_json::from_str::<u32>(&encoded)?)?
-                            }
-                            FieldKind::Number { .. } => {
-                                serde_json::to_value(serde_json::from_str::<f64>(&encoded)?)?
-                            }
-                            _ => Value::String(encoded),
-                        };
-                        preferences.set(&key, value);
-                    }
-                }
                 for key in ["use_system_theme", "long_pasted_text_input_enabled"] {
                     let key = stringPreferencesKey(key);
                     if let Some(encoded) = preferences.getTyped::<String>(&key)? {
@@ -89,7 +80,8 @@ impl UserPreferencesManager {
                 let key = stringPreferencesKey("theme_configs");
                 if let Some(configs) = preferences.getTyped::<Vec<ThemeConfig>>(&key)? {
                     let mut ids = BTreeSet::new();
-                    for config in configs {
+                    for mut config in configs {
+                        migrateLegacyThemeSnapshot(&mut config.snapshot)?;
                         validateConfig(&config)?;
                         if !ids.insert(config.id.clone()) {
                             return Err(PreferencesDataStoreError::Message(
@@ -106,6 +98,21 @@ impl UserPreferencesManager {
                         preferences.set(&recordKey, serde_json::to_value(config)?);
                     }
                     preferences.remove(&key);
+                }
+                Ok(())
+            }
+            3 => {
+                migrateLegacyThemePreferences(preferences)?;
+                let records = preferences
+                    .iterEntries()
+                    .filter(|(key, _)| key.starts_with(THEME_CONFIG_PREFIX))
+                    .map(|(key, value)| (key.to_string(), value.clone()))
+                    .collect::<Vec<_>>();
+                for (key, value) in records {
+                    let mut config: ThemeConfig = serde_json::from_value(value)?;
+                    migrateLegacyThemeSnapshot(&mut config.snapshot)?;
+                    validateConfig(&config)?;
+                    preferences.set(&stringPreferencesKey(&key), serde_json::to_value(config)?);
                 }
                 Ok(())
             }

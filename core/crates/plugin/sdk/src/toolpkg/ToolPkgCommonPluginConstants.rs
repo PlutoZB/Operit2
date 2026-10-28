@@ -57,6 +57,8 @@ pub const TOOLPKG_REGISTRATION_CHAT_MESSAGE_HOOK: &str = "ToolPkg.registerChatMe
 /// Names capture of the single registered conversation creation handler.
 pub const TOOLPKG_REGISTRATION_CHAT_LIFECYCLE_HOOK: &str = "ToolPkg.registerChatLifecycleHook";
 pub const TOOLPKG_REGISTRATION_CHAT_MESSAGE_MENU_ITEM: &str = "ToolPkg.registerChatMessageMenuItem";
+pub const TOOLPKG_REGISTRATION_CHAT_RESPONSE_HOOK: &str = "ToolPkg.registerChatResponseHook";
+pub const TOOLPKG_EVENT_CHAT_RESPONSE: &str = "chat_response";
 pub const TOOLPKG_REGISTRATION_CHAT_RUNTIME_HOOK: &str = "ToolPkg.registerChatRuntimeHook";
 pub const TOOLPKG_REGISTRATION_HOST_EVENT_HOOK: &str = "ToolPkg.registerHostEventHook";
 pub const TOOLPKG_REGISTRATION_TOOL_LIFECYCLE_HOOK: &str = "ToolPkg.registerToolLifecycleHook";

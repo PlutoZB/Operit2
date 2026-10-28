@@ -588,7 +588,7 @@ export namespace ToolPkg {
   /**
    * Enumerates every hook event that a ToolPkg plugin may register.
    */
-  export type HookEventName = AppLifecycleEvent | HookEventNameVariant2 | HookEventNameVariant3 | HookEventNameVariant4 | ChatInputEventName | ChatViewEventName | ChatMessageEventName | ChatLifecycleEventName | ChatMessageMenuItemEventName | ChatRuntimeEventName | HookEventNameVariant7 | ToolLifecycleEventName | PromptInputEventName | PromptHistoryEventName | SystemPromptComposeEventName | ToolPromptComposeEventName | PromptFinalizeEventName | SummaryGenerateEventName | CoreCommandEventName | HostEventName | HookEventNameVariant20;
+  export type HookEventName = AppLifecycleEvent | HookEventNameVariant2 | HookEventNameVariant3 | HookEventNameVariant4 | ChatInputEventName | ChatViewEventName | ChatMessageEventName | ChatLifecycleEventName | ChatMessageMenuItemEventName | ChatRuntimeEventName | ChatResponseEventName | HookEventNameVariant7 | ToolLifecycleEventName | PromptInputEventName | PromptHistoryEventName | SystemPromptComposeEventName | ToolPromptComposeEventName | PromptFinalizeEventName | SummaryGenerateEventName | CoreCommandEventName | HostEventName | HookEventNameVariant20;
 
   /**
    * Accepts a JSON result, no result, or asynchronous completion from a generic hook.
@@ -728,6 +728,87 @@ export namespace ToolPkg {
    * Names chat message persistence notifications.
    */
   export type ChatMessageEventName = "message_persisted";
+
+  /**
+   * Names the lifecycle of a plugin-owned native response presentation.
+   */
+  export type ChatResponseEventName = "started" | "snapshot" | "finished" | "closed";
+
+  /**
+   * Supplies native identity and semantic parts to the selected response presenter.
+   */
+  export interface ChatResponseEventPayload {
+    /**
+     * Identifies the real conversation.
+     */
+    chatId: string;
+    /**
+     * Identifies the canonical assistant message.
+     */
+    messageTimestamp: number;
+    /**
+     * Identifies the selected message revision.
+     */
+    variantIndex: number;
+    /**
+     * Contains the complete, ordered semantic snapshot.
+     */
+    parts: Chat.MessagePart[];
+  }
+
+  /**
+   * Contains one independently displayed bubble and its delay before delivery.
+   */
+  export interface ResponseBubble {
+    /**
+     * Contains semantic display parts without replacing canonical model history.
+     */
+    parts: Chat.MessagePart[];
+    /**
+     * Waits up to 3000 milliseconds before publishing this bubble.
+     */
+    delayMs: number;
+  }
+
+  /**
+   * Appends only newly stable response bubbles.
+   */
+  export interface ResponsePresentationDelta {
+    /**
+     * Contains append-only display work, limited to 256 bubbles per response.
+     */
+    bubbles: ResponseBubble[];
+  }
+
+  /**
+   * Combines lifecycle metadata with the native semantic response snapshot.
+   */
+  export interface ChatResponseHookEvent extends HookEventBase<ChatResponseEventName, ChatResponseEventPayload> {
+  }
+
+  /**
+   * Describes synchronous results of response presentation hooks.
+   */
+  export type ChatResponseHookOutput = boolean | ResponsePresentationDelta | void;
+
+  /**
+   * Supports synchronous or asynchronous response presentation lifecycle callbacks.
+   */
+  export type ChatResponseHookReturn = boolean | ResponsePresentationDelta | void | Promise<ChatResponseHookOutput>;
+
+  /**
+   * Registers a generic presenter independent from message persistence notifications.
+   */
+  export interface ChatResponseHookRegistration {
+    /**
+     * Identifies the response hook within its actual package owner.
+     */
+    id: string;
+    /**
+     * Activates on started, emits deltas on snapshot and finished, and releases on closed.
+     */
+    function: (arg0: ChatResponseHookEvent) => ChatResponseHookReturn;
+  }
 
   /**
    * Names the click event dispatched for a chat message context-menu item.
@@ -3953,6 +4034,10 @@ export namespace ToolPkg {
      */
     registerChatRuntimeHook(definition: ChatRuntimeHookRegistration): void;
     /**
+     * Registers native timed reply presentation without taking ownership of model execution.
+     */
+    registerChatResponseHook(definition: ChatResponseHookRegistration): void;
+    /**
      * Registers a typed timer, interval, or broadcast hook.
      */
     registerHostEventHook<TPayload>(definition: HostEventTimerHookRegistration<TPayload>): void;
@@ -4093,6 +4178,10 @@ export namespace ToolPkg {
    * @since ToolPkg API 2.0.0
    */
   function registerChatMessageMenuItem(definition: ChatMessageMenuItemRegistration): void;
+  /**
+   * Registers native timed reply presentation without taking ownership of model execution.
+   */
+  function registerChatResponseHook(definition: ChatResponseHookRegistration): void;
   /**
    * Registers a callback for chat runtime state changes.
    * @since ToolPkg API 2.0.0

@@ -16,7 +16,7 @@ async function environment(t) {
     /** Records tool reads so execution tests can reject unnecessary catalog loads. */
     async readToolCatalog() { calls.push("tools"); return plain(directories.toolCatalog); },
   });
-  const service = loadModule("src/service.ts", disk.globals).createCharacterCardsService(repository);
+  const service = loadModule("src/service-runtime.ts", disk.globals).createCharacterCardsService(repository);
   /** Discards setup reads while retaining the actual database and all service state. */
   function reset() { disk.clearCalls(); calls.length = 0; }
   /** Resolves through the real service dispatcher and its live privacy check. */
@@ -178,4 +178,100 @@ test("configuration reads: the final privacy check observes a flag changed durin
   const result = plain(await loadModule("src/operations.ts", h.disk.globals).resolveConfiguration(request("card:default"), port));
   assert.equal(result.profile.userPreferencesText, "");
   assert.equal(result.participants[0].userPreferencesText, "");
+});
+
+/** Resolves the exact legacy fixed binding even when the request's global model cannot be used. */
+test("legacy FIXED_CONFIG executes its stored provider and model without rewriting the card", async t => {
+  const h = await environment(t), model = h.directories.models[0];
+  h.disk.storage.inspectPreferences("cards", values => Object.assign(values.record_default, {
+    chatModelBindingMode: "FIXED_CONFIG", chatProviderId: model.providerId, chatModelId: model.modelId,
+  }));
+  const before = h.disk.stateBytes();
+  const result = plain(await h.resolve(request("card:default", { defaultModelBinding: { providerId: "unused-global-provider", modelId: "unused-global-model" } })));
+  assert.deepEqual(result.profile.modelBinding, { providerId: model.providerId, modelId: model.modelId });
+  assert.deepEqual(h.disk.stateBytes(), before);
+});
+
+/** Keeps damaged selections local to their execution while allowing content edits and an explicit replacement binding. */
+test("invalid installed bindings allow ordinary edits and explicit rebinding through the real service", async t => {
+  for (const binding of [
+    { chatModelBindingMode: "UNRECOGNIZED_MODE", chatModelId: "old-model", chatProviderId: "old-provider" },
+    { chatModelBindingMode: "FIXED_CONFIG", chatModelId: "old-model", chatProviderId: null },
+    { chatModelBindingMode: "FIXED_MODEL", chatModelId: null, chatProviderId: null },
+  ]) {
+    const h = await environment(t), model = h.directories.models[0];
+    h.disk.storage.inspectPreferences("cards", values => Object.assign(values.record_default, binding));
+    const saved = await h.service.dispatchDomain("character.update", { id: "default", changes: { description: "Content remains editable" } });
+    assert.equal(saved.description, "Content remains editable");
+    for (const [key, value] of Object.entries(binding)) assert.equal(saved[key], value);
+    const other = await h.service.dispatchDomain("character.create", { values: { name: "Working unaffected role" } });
+    assert.equal((await h.resolve(request("card:" + other.id))).profile.id, other.id);
+    const failure = binding.chatModelBindingMode === "UNRECOGNIZED_MODE" ? /模型绑定模式无效/ : /profile.fixedModelId|Fixed model provider must be explicitly selected/;
+    await assert.rejects(h.resolve(request("card:default")), failure);
+    const before = h.disk.stateBytes();
+    await assert.rejects(h.service.dispatchDomain("character.update", { id: "default", changes: { chatModelBindingMode: "FIXED_MODEL", chatProviderId: "explicit-provider", chatModelId: null } }), /固定聊天模型/);
+    assert.deepEqual(h.disk.stateBytes(), before);
+    const repaired = await h.service.dispatchDomain("character.update", { id: "default", changes: {
+      chatModelBindingMode: "FIXED_MODEL", chatProviderId: model.providerId, chatModelId: model.modelId,
+    } });
+    assert.equal(repaired.chatModelBindingMode, "FIXED_MODEL");
+    const result = plain(await h.resolve(request("card:default")));
+    assert.deepEqual(result.profile.modelBinding, { providerId: model.providerId, modelId: model.modelId });
+  }
+});
+
+/** Opens damaged selections for editing while requiring a real library for new bindings and execution. */
+test("missing primary memory libraries stay editable and require explicit valid rebinding", async t => {
+  for (const sharedId of [null, "", "  ", "deleted-store"]) {
+    const h = await environment(t);
+    h.disk.storage.inspectPreferences("cards", values => Object.assign(values.record_default, {
+      memoryBindingMode: "SHARED", sharedMemoryId: sharedId,
+    }));
+    const initial = h.disk.stateBytes();
+    await loadModule("src/storage/database.ts", h.disk.globals).DatabaseCharacterRepository.open();
+    assert.deepEqual(h.disk.stateBytes(), initial);
+    const listed = await h.service.dispatchDomain("character.list", {});
+    assert.equal(listed.find(card => card.id === "default").sharedMemoryId, sharedId);
+    const saved = await h.service.dispatchDomain("character.update", { id: "default", changes: { description: "Memory choice stays editable" } });
+    assert.equal(saved.description, "Memory choice stays editable");
+    assert.equal(saved.memoryBindingMode, "SHARED"); assert.equal(saved.sharedMemoryId, sharedId);
+    const other = await h.service.dispatchDomain("character.create", { values: { name: "Unaffected role" } });
+    assert.equal((await h.resolve(request("card:" + other.id))).profile.id, other.id);
+    await assert.rejects(h.resolve(request("card:default")), /profile.sharedMemoryId|Shared memory not found/);
+    const before = h.disk.stateBytes();
+    await assert.rejects(h.service.dispatchDomain("character.create", { values: {
+      name: "Invalid new role", memoryBindingMode: "SHARED", sharedMemoryId: sharedId,
+    } }), /共享记忆库/);
+    await assert.rejects(h.service.dispatchDomain("character.update", { id: "default", changes: { sharedMemoryId: "another-deleted-store" } }), /共享记忆库/);
+    assert.deepEqual(h.disk.stateBytes(), before);
+    const store = await h.service.dispatchDomain("memory.shared.create", { name: "Explicitly selected library" });
+    const repaired = await h.service.dispatchDomain("character.update", { id: "default", changes: { sharedMemoryId: store.id } });
+    assert.equal(repaired.memoryBindingMode, "SHARED"); assert.equal(repaired.sharedMemoryId, store.id);
+    assert.equal((await h.resolve(request("card:default"))).profile.id, "default");
+  }
+});
+
+/** Keeps unavailable active choices readable while requiring explicit valid selection before execution. */
+test("deleted active roles allow repository reopen and edits without choosing a replacement", async t => {
+  for (const active of [{ CharacterCard: { id: "deleted-character" } }, { CharacterGroup: { id: "deleted-group" } }]) {
+    const h = await environment(t);
+    h.disk.storage.inspectPreferences("meta", values => { values.state.active = structuredClone(active); });
+    const before = h.disk.stateBytes();
+    await loadModule("src/storage/database.ts", h.disk.globals).DatabaseCharacterRepository.open();
+    assert.deepEqual(plain(await h.service.dispatchDomain("activePrompt.get", {})), active);
+    assert.deepEqual(h.disk.stateBytes(), before);
+    const edited = await h.service.dispatchDomain("character.update", { id: "default", changes: { description: "Editable before reselection" } });
+    assert.equal(edited.description, "Editable before reselection");
+    assert.deepEqual(plain(await h.service.dispatchDomain("activePrompt.get", {})), active);
+    const selection = "CharacterCard" in active ? "card:deleted-character" : "group:deleted-group";
+    await assert.rejects(h.resolve(request(selection)), /Character not found|Group not found/);
+    const unchanged = h.disk.stateBytes();
+    await assert.rejects(h.service.dispatchDomain("activePrompt.setCard", { id: "deleted-character" }), /character does not identify exactly one record/);
+    await assert.rejects(h.service.dispatchDomain("activePrompt.setGroup", { id: "deleted-group" }), /group does not identify exactly one record/);
+    await assert.rejects(h.service.dispatchDomain("activePrompt.resolvedCard", {}), /character does not identify exactly one record|requires an explicit execution participant/);
+    assert.deepEqual(h.disk.stateBytes(), unchanged);
+    await h.service.dispatchDomain("activePrompt.setCard", { id: "default" });
+    assert.deepEqual(plain(await h.service.dispatchDomain("activePrompt.get", {})), { CharacterCard: { id: "default" } });
+    assert.equal((await h.resolve(request("card:default"))).profile.id, "default");
+  }
 });

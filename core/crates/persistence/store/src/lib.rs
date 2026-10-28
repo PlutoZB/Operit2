@@ -12,6 +12,8 @@ pub mod CoreNodeBindingStore;
 pub mod CoreNodeIdentityStore;
 #[path = "CoreSpaceStore.rs"]
 pub mod CoreSpaceStore;
+#[path = "NetworkControlReadModel.rs"]
+mod NetworkControlReadModel;
 #[path = "NetworkControlStore.rs"]
 pub mod NetworkControlStore;
 #[cfg(feature = "full")]
@@ -21,6 +23,8 @@ pub mod PluginStorage;
 pub mod PreferenceMerge;
 #[path = "PreferencesDataStore.rs"]
 pub mod PreferencesDataStore;
+#[path = "PreferencesExport.rs"]
+pub mod PreferencesExport;
 #[path = "PreferencesEncryption.rs"]
 pub mod PreferencesEncryption;
 #[cfg(feature = "full")]
@@ -36,6 +40,10 @@ pub mod RuntimeStorePaths;
 #[cfg(feature = "full")]
 #[path = "SqliteStore.rs"]
 pub mod SqliteStore;
+#[path = "SyncReceiveJournal.rs"]
+mod SyncReceiveJournal;
+#[path = "SyncOperationJournal.rs"]
+mod SyncOperationJournal;
 #[path = "SyncOperationStore.rs"]
 pub mod SyncOperationStore;
 

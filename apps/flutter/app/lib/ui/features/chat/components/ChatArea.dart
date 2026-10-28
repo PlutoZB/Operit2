@@ -1,8 +1,8 @@
 // ignore_for_file: file_names
 
 import 'dart:async';
-import 'dart:collection';
 
+import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -23,9 +23,7 @@ import 'style/ThemedChatMessage.dart';
 
 const Duration _navigatorHideDelay = Duration(milliseconds: 1200);
 const Duration _viewportResizeSettleDelay = Duration(milliseconds: 120);
-const Duration _bottomFollowRateWindow = Duration(milliseconds: 600);
-const double _bottomFollowOutputVelocityGain = 0.65;
-const double _bottomFollowGapCorrectionRate = 0.8;
+const Duration _bottomFollowDuration = Duration(milliseconds: 240);
 const double _bottomFollowPositionTolerance = 1;
 
 class ChatArea extends StatefulWidget {
@@ -128,6 +126,7 @@ class _ChatAreaState extends State<ChatArea>
   );
   final Map<int, _CachedMessageRow> _messageRowCache =
       <int, _CachedMessageRow>{};
+  late final ValueNotifier<bool> _chatBusyNotifier;
   Timer? _navigatorHideTimer;
   Timer? _viewportResizeTimer;
   bool _userScrollSessionActive = false;
@@ -143,8 +142,7 @@ class _ChatAreaState extends State<ChatArea>
   /// Uses the scheduler timeline shared by layout, animation and test frames.
   int get _bottomFollowNowMicroseconds =>
       SchedulerBinding.instance.currentSystemFrameTimeStamp.inMicroseconds;
-  final Queue<_BottomGrowthSample> _bottomGrowthSamples =
-      Queue<_BottomGrowthSample>();
+  int? _bottomFollowDeadlineMicroseconds;
   late final Ticker _bottomFollowTicker;
   int? _bottomFollowLastFrameMicroseconds;
   bool _bottomFollowCompleting = false;
@@ -160,6 +158,7 @@ class _ChatAreaState extends State<ChatArea>
   @override
   void initState() {
     super.initState();
+    _chatBusyNotifier = ValueNotifier<bool>(widget.isLoading);
     _layoutScrollController = _ChatLayoutScrollController(
       delegate: widget.scrollController,
       shouldAlignBottom: _shouldAlignBottomDuringLayout,
@@ -599,22 +598,18 @@ class _ChatAreaState extends State<ChatArea>
         !widget.scrollController.hasClients) {
       return;
     }
-    if (heightDelta > _bottomFollowPositionTolerance) {
-      _bottomGrowthSamples.add(
-        _BottomGrowthSample(
-          timestampMicroseconds: nowMicroseconds,
-          heightDelta: heightDelta,
-        ),
-      );
+    if (heightDelta > _bottomFollowPositionTolerance ||
+        !_bottomFollowTicker.isActive) {
+      _bottomFollowDeadlineMicroseconds =
+          nowMicroseconds + _bottomFollowDuration.inMicroseconds;
     }
-    _pruneBottomGrowthSamples(nowMicroseconds);
     if (!_bottomFollowTicker.isActive) {
       _bottomFollowLastFrameMicroseconds = nowMicroseconds;
       _bottomFollowTicker.start();
     }
   }
 
-  /// Advances the scroll position from recent output growth and baseline error.
+  /// Follows measured growth and settles within a bounded animation window.
   void _tickBottomFollow(Duration elapsed) {
     final nowMicroseconds = _bottomFollowNowMicroseconds;
     if (!mounted ||
@@ -627,70 +622,38 @@ class _ChatAreaState extends State<ChatArea>
       return;
     }
     if (_activeUserScrollPointers.isNotEmpty) {
-      _bottomFollowLastFrameMicroseconds = nowMicroseconds;
-      _pruneBottomGrowthSamples(nowMicroseconds);
+      _stopBottomFollow();
       return;
     }
     final previousMicroseconds = _bottomFollowLastFrameMicroseconds!;
     _bottomFollowLastFrameMicroseconds = nowMicroseconds;
-    _pruneBottomGrowthSamples(nowMicroseconds);
 
     final position = widget.scrollController.position;
     final gap = position.maxScrollExtent - position.pixels;
     if (gap <= _bottomFollowPositionTolerance) {
-      if (_bottomGrowthSamples.isEmpty) {
-        _stopBottomFollow();
-      }
+      _stopBottomFollow();
       return;
     }
-    final elapsedSeconds =
-        (nowMicroseconds - previousMicroseconds) /
-        Duration.microsecondsPerSecond;
-    final outputDelta =
-        _bottomOutputVelocity(nowMicroseconds) *
-        _bottomFollowOutputVelocityGain *
-        elapsedSeconds;
-    final gapCorrectionDelta =
-        gap * _bottomFollowGapCorrectionRate * elapsedSeconds;
-    final scrollDelta = outputDelta + gapCorrectionDelta;
-    final target = (position.pixels + scrollDelta).clamp(
+    final deadline = _bottomFollowDeadlineMicroseconds ?? nowMicroseconds;
+    final remaining = deadline - previousMicroseconds;
+    final elapsed = nowMicroseconds - previousMicroseconds;
+    final fraction = remaining <= 0
+        ? 1.0
+        : (elapsed / remaining).clamp(0.0, 1.0);
+    final target = (position.pixels + gap * fraction).clamp(
       position.pixels,
       position.maxScrollExtent,
     );
-    widget.scrollController.jumpTo(target);
+    if (target != position.pixels) widget.scrollController.jumpTo(target);
+    if (nowMicroseconds >= deadline) _stopBottomFollow();
   }
 
-  /// Computes a linearly weighted output velocity over the active time window.
-  double _bottomOutputVelocity(int nowMicroseconds) {
-    final windowMicroseconds = _bottomFollowRateWindow.inMicroseconds;
-    var weightedGrowth = 0.0;
-    for (final sample in _bottomGrowthSamples) {
-      final ageMicroseconds = nowMicroseconds - sample.timestampMicroseconds;
-      final remainingWeight = 1 - ageMicroseconds / windowMicroseconds;
-      weightedGrowth += sample.heightDelta * remainingWeight;
-    }
-    return weightedGrowth *
-        2 *
-        Duration.microsecondsPerSecond /
-        windowMicroseconds;
-  }
-
-  /// Removes growth samples that no longer contribute to the time window.
-  void _pruneBottomGrowthSamples(int nowMicroseconds) {
-    final oldestTimestamp =
-        nowMicroseconds - _bottomFollowRateWindow.inMicroseconds;
-    while (_bottomGrowthSamples.isNotEmpty &&
-        _bottomGrowthSamples.first.timestampMicroseconds <= oldestTimestamp) {
-      _bottomGrowthSamples.removeFirst();
-    }
-  }
-
-  /// Stops live following and clears its temporal growth model.
+  /// Stops live following and releases its frame callback.
   void _stopBottomFollow() {
     _bottomFollowTicker.stop();
     _bottomFollowLastFrameMicroseconds = null;
     _bottomFollowCompleting = false;
-    _bottomGrowthSamples.clear();
+    _bottomFollowDeadlineMicroseconds = null;
   }
 
   /// Reports whether bottom following should continue for live or completing rows.
@@ -714,6 +677,8 @@ class _ChatAreaState extends State<ChatArea>
     }
     final nowMicroseconds = _bottomFollowNowMicroseconds;
     _bottomFollowCompleting = true;
+    _bottomFollowDeadlineMicroseconds =
+        nowMicroseconds + _bottomFollowDuration.inMicroseconds;
     if (!_bottomFollowTicker.isActive) {
       _bottomFollowLastFrameMicroseconds = nowMicroseconds;
       _bottomFollowTicker.start();
@@ -875,6 +840,7 @@ class _ChatAreaState extends State<ChatArea>
   @override
   void didUpdateWidget(ChatArea oldWidget) {
     super.didUpdateWidget(oldWidget);
+    _chatBusyNotifier.value = widget.isLoading;
     _layoutScrollController.delegate = widget.scrollController;
     final chatChanged = oldWidget.currentChatId != widget.currentChatId;
     if (chatChanged) {
@@ -955,16 +921,18 @@ class _ChatAreaState extends State<ChatArea>
     _viewportResizeTimer?.cancel();
     _layoutScrollController.dispose();
     _bottomFollowTicker.dispose();
-    _bottomGrowthSamples.clear();
+    _bottomFollowDeadlineMicroseconds = null;
     _messageAnchorsNotifier.dispose();
     _viewportHeightNotifier.dispose();
     _showNavigatorChipNotifier.dispose();
+    _chatBusyNotifier.dispose();
     _messageKeys.clear();
     _messageRowCache.clear();
     _disposeRowExtents();
     super.dispose();
   }
 
+  /// Reuses transcript content while each menu observes current chat activity.
   Widget _messageRowFor(int messageIndex, ChatUiMessage message) {
     final selected = widget.selectedMessageTimestamps.contains(
       message.timestamp,
@@ -1030,28 +998,33 @@ class _ChatAreaState extends State<ChatArea>
           )
         : widget.currentChatId == null
         ? messageContent
-        : MessageContextMenu(
-            key: ValueKey<String>('menu-${_messageWidgetKey(message)}'),
-            message: message,
-            chatId: widget.currentChatId!,
-            messageIndex: messageIndex,
-            clients: widget.clients,
-            packageManager: widget.packageManager,
-            onToggleFavoriteMessage: widget.onToggleFavoriteMessage,
-            onDeleteMessage: widget.onDeleteMessage,
-            onDeleteMessagesFrom: widget.onDeleteMessagesFrom,
-            onDeleteMessageVariant: widget.onDeleteMessageVariant,
-            onRollbackToMessage: widget.onRollbackToMessage,
-            onSelectMessageToEdit: widget.onSelectMessageToEdit,
-            onRegenerateMessage: widget.onRegenerateMessage,
-            onInsertSummary: widget.onInsertSummary,
-            onCreateBranch: widget.onCreateBranch,
-            onReplyToMessage: widget.onReplyToMessage,
-            onPlayVoice: widget.onPlayVoice,
-            onToggleMultiSelectMode: widget.onToggleMultiSelectMode,
-            onRefresh: widget.onRefreshRequested,
-            splitMarkdownContent: widget.splitMarkdownContent,
+        : ValueListenableBuilder<bool>(
+            valueListenable: _chatBusyNotifier,
             child: messageContent,
+            builder: (context, isChatBusy, child) => MessageContextMenu(
+              key: ValueKey<String>('menu-${_messageWidgetKey(message)}'),
+              message: message,
+              chatId: widget.currentChatId!,
+              messageIndex: messageIndex,
+              clients: widget.clients,
+              packageManager: widget.packageManager,
+              onToggleFavoriteMessage: widget.onToggleFavoriteMessage,
+              onDeleteMessage: widget.onDeleteMessage,
+              onDeleteMessagesFrom: widget.onDeleteMessagesFrom,
+              onDeleteMessageVariant: widget.onDeleteMessageVariant,
+              onRollbackToMessage: widget.onRollbackToMessage,
+              onSelectMessageToEdit: widget.onSelectMessageToEdit,
+              onRegenerateMessage: widget.onRegenerateMessage,
+              isChatBusy: isChatBusy,
+              onInsertSummary: widget.onInsertSummary,
+              onCreateBranch: widget.onCreateBranch,
+              onReplyToMessage: widget.onReplyToMessage,
+              onPlayVoice: widget.onPlayVoice,
+              onToggleMultiSelectMode: widget.onToggleMultiSelectMode,
+              onRefresh: widget.onRefreshRequested,
+              splitMarkdownContent: widget.splitMarkdownContent,
+              child: child!,
+            ),
           );
     _messageRowCache[message.timestamp] = _CachedMessageRow(
       index: messageIndex,
@@ -1123,30 +1096,53 @@ class _ChatLayoutScrollController extends ScrollController {
   ScrollController _delegate;
   final ValueGetter<bool> shouldAlignBottom;
   final ValueGetter<bool> shouldInitiallyAlignBottom;
+  ScrollPosition? _origin;
 
-  /// Transfers attached positions when the owner replaces its controller.
+  /// Moves the active layout origin when the owner replaces its controller.
   set delegate(ScrollController value) {
     if (identical(value, _delegate)) {
       return;
     }
-    for (final position in positions) {
-      _delegate.detach(position);
-      value.attach(position);
-    }
+    final origin = _origin;
+    final previous = _delegate;
     _delegate = value;
+    if (origin == null) {
+      return;
+    }
+    previous.detach(origin);
+    value.attach(origin);
   }
 
-  /// Exposes the same position to the owner's navigation and scroll listeners.
+  /// The active layout origin. A replaced viewport stays registered until it
+  /// unmounts, so [positions] can briefly contain that deactivated origin.
+  @override
+  ScrollPosition get position {
+    final origin = _origin;
+    if (origin == null) {
+      throw StateError('ScrollController not attached to any scroll views.');
+    }
+    return origin;
+  }
+
+  /// Registers a new layout origin and publishes only that origin to the owner.
   @override
   void attach(ScrollPosition position) {
     super.attach(position);
+    final previous = _origin;
+    _origin = position;
+    if (previous != null) {
+      _delegate.detach(previous);
+    }
     _delegate.attach(position);
   }
 
-  /// Releases the position from both controllers when a viewport is replaced.
+  /// Releases a viewport position. Only the active origin is on the owner.
   @override
   void detach(ScrollPosition position) {
-    _delegate.detach(position);
+    if (identical(position, _origin)) {
+      _delegate.detach(position);
+      _origin = null;
+    }
     super.detach(position);
   }
 
@@ -1386,6 +1382,7 @@ class _SelectableMessageFrame extends StatelessWidget {
 }
 
 class _CachedMessageRow {
+  /// Records the message and rendering state represented by one retained row.
   const _CachedMessageRow({
     required this.index,
     required this.message,
@@ -1416,7 +1413,11 @@ class _CachedMessageRow {
 /// Reports whether one cached message row can be reused unchanged.
 bool _sameMessageForRender(ChatUiMessage left, ChatUiMessage right) {
   final contentStreamSame = identical(left.contentStream, right.contentStream);
-  return left.sender == right.sender &&
+  return const DeepCollectionEquality().equals(
+        left.pluginExtensions,
+        right.pluginExtensions,
+      ) &&
+      left.sender == right.sender &&
       (_sameMessagePartsForRender(left, right) ||
           _sameLiveAiStreamForRender(left, right, contentStreamSame)) &&
       left.timestamp == right.timestamp &&
@@ -1554,18 +1555,6 @@ class _LiveBottomStreamSizeRenderObject extends RenderProxyBox {
       _onSizeGrown(heightDelta);
     });
   }
-}
-
-/// Stores one measured live-row height increase in monotonic time.
-class _BottomGrowthSample {
-  /// Creates one timestamped height-growth sample.
-  const _BottomGrowthSample({
-    required this.timestampMicroseconds,
-    required this.heightDelta,
-  });
-
-  final int timestampMicroseconds;
-  final double heightDelta;
 }
 
 class _EmptyChatArea extends StatelessWidget {

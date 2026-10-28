@@ -8,7 +8,7 @@
 
 `HostJavaScriptRuntime` 必须实现：
 
-- `registerHostJavaScriptJsonFunction`：同步传递拥有所有权的结构化参数和结果。
+- `registerHostJavaScriptFunction`：同步传递结构化参数或拥有所有权的二进制缓冲区，返回结构化结果。
 - `registerHostJavaScriptAsyncJsonFunction`：创建由 host 持有完成句柄的 scoped Promise。
 - `settleHostJavaScriptPromise`：在所属执行器完成 Promise，释放 resolve / reject 句柄。
 - `cancelHostJavaScriptPromises`：释放指定 scope 的待完成句柄。
@@ -41,7 +41,7 @@ executor，cooperative continuation 使用 host 明确实现的非阻塞 executo
 
 ## Host 边界与生命周期
 
-- Native host 使用 rquickjs 的值转换、Promise 和 Persistent 完成句柄。
+- Native host 使用 V8 的值转换及 Promise 句柄；Compose 的 Uint8Array 脱离 JS 后转交 backing-store 所有权，不再递归转换布局对象。
 - Web host 的值快照和 Promise 注册表位于 `hosts/web/src/javascript_promises.js`，
   Rust host 通过函数调用和对象属性 API 传递数据。转换捕获原始内建函数，
   不依赖插件可修改的 JSON、Map 或 Array 方法。
@@ -150,7 +150,7 @@ cargo test --release --manifest-path core/Cargo.toml -p operit-js-bridge \
 ```
 
 基准涵盖 engine owner、工具调度、Promise jobs 与 SDK 包装，不包含真实业务 I/O。
-历史协议比较不再是可执行测试路径，也不能当作本次修改的性能结论。
+该基准仅衡量结构化链路，不能用于比较已移除的历史协议。
 
 固定结构记录的基准可分别观察额外 Rust 深拷贝、所有权转移和完整读取：
 

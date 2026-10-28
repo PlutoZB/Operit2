@@ -160,12 +160,13 @@ impl ToolPkgLoader {
                     None
                 }
             },
-            |mainScriptText, toolPkgId, mainScriptPath, apiVersion| {
+            |mainScriptText, toolPkgId, mainScriptPath, apiVersion, environmentNames| {
                 parseMainRegistration(
                     mainScriptText,
                     toolPkgId,
                     mainScriptPath,
                     apiVersion,
+                    environmentNames,
                     configScope,
                     jsEngine,
                     textResources.clone(),
@@ -183,6 +184,7 @@ fn parseMainRegistration(
     toolPkgId: &str,
     mainScriptPath: &str,
     apiVersion: &str,
+    environmentNames: &[String],
     configScope: ToolPkgConfigScope,
     jsEngine: &dyn JsExecutionEngine,
     textResources: Arc<std::collections::BTreeMap<String, String>>,
@@ -192,6 +194,7 @@ fn parseMainRegistration(
         toolPkgId,
         mainScriptPath,
         apiVersion,
+        environmentNames,
         configScope,
         jsEngine,
         Some(textResources),

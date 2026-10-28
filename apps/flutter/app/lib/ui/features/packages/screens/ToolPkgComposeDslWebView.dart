@@ -2,7 +2,6 @@
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
@@ -41,11 +40,13 @@ class ComposeDslWebViewHostContext {
     required this.executionContextKey,
     required this.dispatchAction,
     required this.runtimeOptionsProvider,
+    this.clients = const GeneratedCoreProxyClients(ProxyCoreRuntimeBridge()),
     this.onActionResultDelivered,
     this.readFileBytes,
   });
 
   /// Stable plugin package identity, not the transient execution/session key.
+  final GeneratedCoreProxyClients clients;
   final String packageName;
   final String routeInstanceId;
   final String executionContextKey;
@@ -61,6 +62,20 @@ class ComposeDslWebViewHostContext {
 
   /// Observes action results only after the WebView receives its bridge response.
   final ValueChanged<Object?>? onActionResultDelivered;
+
+  /// Binds blocking actions to an occurrence while preserving its host services and result observer.
+  ComposeDslWebViewHostContext withActionDispatcher(
+    ComposeDslWebViewActionDispatcher dispatcher,
+  ) => ComposeDslWebViewHostContext(
+    clients: clients,
+    packageName: packageName,
+    routeInstanceId: routeInstanceId,
+    executionContextKey: executionContextKey,
+    dispatchAction: dispatcher,
+    runtimeOptionsProvider: runtimeOptionsProvider,
+    readFileBytes: readFileBytes,
+    onActionResultDelivered: onActionResultDelivered,
+  );
 
   /// Executes an action while retaining errors for the requesting WebView.
   Future<ComposeDslWebViewBlockingActionResult> executeAction({
@@ -762,26 +777,14 @@ class _ComposeDslWebViewState extends State<ComposeDslWebView> {
     super.dispose();
   }
 
-  /// Linux hosts the WebView in a native GTK overlay above Flutter's entire
-  /// layer tree, so a covering route would otherwise paint behind it. Other
-  /// platforms composite platform views with Flutter and keep the view visible.
-  bool get _hidesPlatformViewUnderCoveringRoutes =>
-      !kIsWeb && defaultTargetPlatform == TargetPlatform.linux;
-
+  /// Composes the WebView with Flutter overlays through the shared platform view.
   @override
   Widget build(BuildContext context) {
     final errorText = _error;
-    // Keep the page mounted but stop painting it while a dialog route is on
-    // top; the Linux widget hides its native overlay once it is not painted.
-    final route = ModalRoute.of(context);
-    final hidePlatformView =
-        _hidesPlatformViewUnderCoveringRoutes &&
-        route != null &&
-        !route.isCurrent;
     return Stack(
       fit: StackFit.expand,
       children: <Widget>[
-        Offstage(offstage: hidePlatformView, child: _webViewWidget),
+        _webViewWidget,
         if (_progress > 0 && _progress < 100)
           const Positioned(
             top: 0,

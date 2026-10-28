@@ -79,6 +79,20 @@ impl Fixture {
 /// Constructs one native preference assignment.
 fn set(key: &str,value: Value) -> Value {json!({"op":"set","key":key,"value":value})}
 
+/// Builds an explicit owner alias transaction independently of receiving or paging business data.
+fn aliasOperation(path: &str, source: &str, target: &str) -> SyncOperation {
+    let origin = format!("test-owner-{}", uuid::Uuid::new_v4());
+    let key = format!("card_{source}");
+    SyncOperation {
+        opId: format!("{origin}:1"), originDeviceId: origin, sequence: 1,
+        domain: "preferences".into(), entityType: "entry".into(),
+        entityId: serde_json::to_string(&(path, &key)).unwrap(), operation: "alias".into(),
+        semantics: operit_store::SyncOperationStore::SyncOperationSemantics::Transaction,
+        payload: json!({"storagePath":path,"key":key,"value":format!("card_{target}"),"encrypted":false,"formatVersion":2,"schemaVersion":0}),
+        createdAt: operit_host_api::TimeUtils::tryCurrentTimeMillis().unwrap(), schemaVersion: 1,
+    }
+}
+
 /// Keeps typed JSON, stored null, absent keys, schema metadata and reopened snapshots distinct.
 #[test]
 fn preferences_are_native_json_without_object_tables_or_hidden_key_versions() {
@@ -116,7 +130,7 @@ fn preferences_are_native_json_without_object_tables_or_hidden_key_versions() {
 fn cancelled_and_rejected_edits_preserve_json_and_native_history() {
     let fixture=Fixture::new("space");let handle=fixture.open();
     fixture.edit(&handle,json!([set("counter",json!("invalid integer"))]));
-    let before=fixture.host.readBytes(&fixture.path).unwrap();let history=fixture.history();
+    let history=fixture.history();let before=fixture.host.readBytes(&fixture.path).unwrap();
     let token=fixture.begin(&handle);
     fixture.call(json!({"op":"preferences_cancel_edit","handle":handle,"token":token})).unwrap();
     let token=fixture.begin(&handle);
@@ -157,8 +171,8 @@ fn native_preference_delta_and_field_sync_converge_between_spaces() {
     let leftHistory=first.history();let rightHistory=second.history();
     let schema=PreferenceMergeSchema::default();
     for _ in 0..2 {
-        PreferenceMerge::applyOperations(first.host.clone(),&schema,&leftHistory,&rightHistory,|_,_|true,true).unwrap();
-        PreferenceMerge::applyOperations(second.host.clone(),&schema,&rightHistory,&leftHistory,|_,_|true,true).unwrap();
+        PreferenceMerge::applyOperations(first.host.clone(),&schema,&leftHistory,&rightHistory,|_,_|true).unwrap();
+        PreferenceMerge::applyOperations(second.host.clone(),&schema,&rightHistory,&leftHistory,|_,_|true).unwrap();
         for (fixture,handle) in [(&first,&left),(&second,&right)] {
             let data=fixture.data(handle);
             assert_eq!(data["values"]["counter"],18);
@@ -195,7 +209,7 @@ fn descriptor(path: &str) -> Value {
 
 /// Executes plugin-declared content/name merging and array references on a peer without loading the plugin.
 #[test]
-fn merge_declarations_travel_with_json_and_use_the_existing_complete_executor() {
+fn declarations_preserve_stable_ids_and_local_storage_version_boundaries() {
     let first=Fixture::new("space");let second=Fixture::new("space");let receiver=Fixture::new("space");
     let open=json!({"op":"open_preferences","path":first.path,"merge":descriptor(&first.path)});
     let left=first.call(open.clone()).unwrap()["handle"].as_str().unwrap().to_owned();
@@ -205,20 +219,63 @@ fn merge_declarations_travel_with_json_and_use_the_existing_complete_executor() 
     first.finish(&left,&token,json!([set(&format!("card_{small}"),json!({"id":small,"name":"Same","text":"identical","updatedAt":1})),set("selection",json!([small]))]),2).unwrap();
     let token=second.begin(&right);
     second.finish(&right,&token,json!([set(&format!("card_{large}"),json!({"id":large,"name":"Same","text":"identical","updatedAt":2})),set("selection",json!([large]))]),2).unwrap();
-    let leftHistory=first.history();let rightHistory=second.history();
+    PreferencesDataStore::newWithStorage(receiver.host.clone(), &receiver.path)
+        .withSchema(2, |_, _| Ok(())).data().unwrap();
+    let leftOriginal=first.history();let rightOriginal=second.history();
+    let leftHistory=leftOriginal.iter().filter(|op| op.payload["schemaVersion"] == 2).cloned().collect::<Vec<_>>();
+    let rightHistory=rightOriginal.iter().filter(|op| op.payload["schemaVersion"] == 2).cloned().collect::<Vec<_>>();
     let schema=PreferenceMergeSchema::default();
-    let refs=PreferenceMerge::applyOperations(receiver.host.clone(),&schema,&leftHistory,&rightHistory,|_,_|true,true).unwrap();
-    assert_eq!(refs.get(&format!("{}\u{001f}{large}",first.path)),Some(&small.to_owned()));
+    let refs=PreferenceMerge::applyOperations(receiver.host.clone(),&schema,&leftHistory,&rightHistory,|_,_|true).unwrap();
+    assert!(refs.is_empty());
     let handle=receiver.open();let snapshot=receiver.data(&handle);
     assert_eq!(snapshot["schemaVersion"],2);
     assert!(snapshot["values"].get(format!("card_{small}")).is_some());
-    assert!(snapshot["values"].get(format!("card_{large}")).is_none());
-    assert_eq!(snapshot["values"]["selection"],json!([small]));
+    assert!(snapshot["values"].get(format!("card_{large}")).is_some());
+    let order = operit_store::SyncOperationStore::SyncOperationOrder::fromOperation;
+    let selected = if order(leftHistory.last().unwrap()) < order(rightHistory.last().unwrap()) { large } else { small };
+    assert_eq!(snapshot["values"]["selection"],json!([selected]));
     assert!(snapshot["values"].get("__operit_preferences_merge").is_none());
-    assert_eq!(first.history(),leftHistory);assert_eq!(second.history(),rightHistory);
+    assert_eq!(first.history(),leftOriginal);assert_eq!(second.history(),rightOriginal);
     let mut changed=descriptor(&receiver.path);changed["catalog"]["nameField"]=json!("title");
     assert!(receiver.call(json!({"op":"open_preferences","path":receiver.path,"merge":changed})).is_err());
     first.dispose();second.dispose();receiver.dispose();
+}
+
+/// Retires an already materialized source identity when an explicit alias arrives later.
+#[test]
+fn aliases_retire_existing_catalog_sources_on_every_peer() {
+    let source = Fixture::new("space");
+    let receiver = Fixture::new("space");
+    let handle = source.call(json!({
+        "op":"open_preferences", "path":source.path, "merge":descriptor(&source.path)
+    })).unwrap()["handle"].as_str().unwrap().to_owned();
+    source.edit(&handle, json!([
+        set("card_old", json!({"id":"old", "name":"Role"})),
+        set("card_current", json!({"id":"current", "name":"Role"})),
+        set("selection", json!(["old"])),
+        set("unrelated", json!(true))
+    ]));
+    let history = source.history();
+    let schema = PreferenceMergeSchema::default();
+    PreferenceMerge::applyOperations(receiver.host.clone(), &schema, &[], &history, |_, _| true).unwrap();
+    let received = receiver.open();
+    assert!(receiver.data(&received)["values"].get("card_old").is_some());
+    let alias = aliasOperation(&source.path, "old", "current");
+    for _ in 0..2 {
+        PreferenceMerge::applyOperations(receiver.host.clone(), &schema, &history, &[alias.clone()], |_, _| true).unwrap();
+        let values = receiver.data(&received)["values"].clone();
+        assert!(values.get("card_old").is_none(), "Retired identity survived alias replay: {values}");
+        assert_eq!(values["card_current"]["id"], "current");
+        assert_eq!(values["selection"], json!(["current"]));
+        assert_eq!(values["unrelated"], true);
+    }
+    let mut expected = history;
+    expected.push(alias);
+    let archived = receiver.history();
+    assert_eq!(archived.len(), expected.len());
+    assert!(expected.iter().all(|operation| archived.contains(operation)));
+    source.dispose();
+    receiver.dispose();
 }
 
 /// Rejects old object operations, wrong file kinds and malicious metadata edits explicitly.
@@ -256,8 +313,10 @@ fn dependent_json_catalogs_merge_after_nested_reference_rewrites() {
         fixture.edit(&cardHandle,json!([set(&format!("card_{card}"),json!({"id":card,"name":"Role","tags":[tag]})),set("selection",json!(card))]));
     }
     let schema=PreferenceMergeSchema::default();
-    let left=first.history();let right=second.history();
-    let refs=PreferenceMerge::applyOperations(receiver.host.clone(),&schema,&left,&right,|_,_|true,true).unwrap();
+    let left=first.history();let mut right=second.history();
+    right.push(aliasOperation(&tagsPath, largeTag, smallTag));
+    right.push(aliasOperation(&first.path, large, small));
+    let refs=PreferenceMerge::applyOperations(receiver.host.clone(),&schema,&left,&right,|_,_|true).unwrap();
     assert_eq!(refs.get(&format!("{}\u{001f}{large}",first.path)),Some(&small.to_owned()));
     assert_eq!(refs.get(&format!("{tagsPath}\u{001f}{largeTag}")),Some(&smallTag.to_owned()));
     let handle=receiver.open();let snapshot=receiver.data(&handle);
@@ -279,12 +338,15 @@ fn json_catalog_name_collisions_preserve_uuid_order_and_history() {
     let schema=PreferenceMergeSchema::default();
     let left=first.history();let right=second.history();
     for (fixture,history,incoming) in [(&first,&left,&right),(&second,&right,&left)] {
-        let refs=PreferenceMerge::applyOperations(fixture.host.clone(),&schema,history,incoming,|_,_|true,true).unwrap();
+        let refs=PreferenceMerge::applyOperations(fixture.host.clone(),&schema,history,incoming,|_,_|true).unwrap();
         assert!(refs.is_empty());
         let handle=fixture.open();let snapshot=fixture.data(&handle);
         assert_eq!(snapshot["values"][format!("card_{small}")]["name"],"Same");
         assert_eq!(snapshot["values"][format!("card_{large}")]["name"],"Same（1）");
-        assert_eq!(&fixture.history(),history);
+        let archived = fixture.history();
+        assert_eq!(archived.len(), left.len() + right.len());
+        assert!(archived.iter().all(|operation| left.iter().chain(&right).any(|original| original == operation)));
+        assert!(archived.iter().all(|operation| operation.operation != "alias"));
     }
     first.dispose();second.dispose();
 }
@@ -336,7 +398,7 @@ fn remote_preferences_cannot_write_node_local_plugin_data() {
     operation.payload["storagePath"]=json!(receiver.path);
     operation.entityId=serde_json::to_string(&(&receiver.path,"one")).unwrap();
     let schema=PreferenceMergeSchema::default();
-    assert!(PreferenceMerge::applyOperations(receiver.host.clone(),&schema,&[],&[operation],|_,_|true,true).unwrap_err().contains("Space-owned"));
+    assert!(PreferenceMerge::applyOperations(receiver.host.clone(),&schema,&[],&[operation],|_,_|true).unwrap_err().contains("Space-owned"));
     assert!(!receiver.host.exists(&receiver.path).unwrap());
     source.dispose();receiver.dispose();
 }
@@ -366,7 +428,9 @@ fn declared_variants_and_prefixed_references_use_native_aliases() {
         ]));
     }
     let schema = PreferenceMergeSchema::default();
-    PreferenceMerge::applyOperations(receiver.host.clone(), &schema, &first.history(), &second.history(), |_, _| true, true).unwrap();
+    let mut right = second.history();
+    right.push(aliasOperation(&first.path, large, small));
+    PreferenceMerge::applyOperations(receiver.host.clone(), &schema, &first.history(), &right, |_, _| true).unwrap();
     let handle = receiver.open();
     let snapshot = receiver.data(&handle);
     assert_eq!(snapshot["values"]["active"], json!({"CharacterCard":{"id":small}}));
@@ -391,6 +455,8 @@ fn rust_owner_and_plugin_declarations_share_catalog_aliases() {
     native["references"] = json!([]);
     let schema = PreferenceMergeSchema { stores: vec![PreferenceMergeStore {
         path: native_path.to_string(), encrypted: false,
+            storageVersion: None,
+            decode: None,
         merge: serde_json::from_value(native).unwrap(),
     }] };
     let mut plugin = descriptor(&first.path);
@@ -403,7 +469,9 @@ fn rust_owner_and_plugin_declarations_share_catalog_aliases() {
         let handle = fixture.call(json!({"op":"open_preferences","path":first.path,"merge":plugin})).unwrap()["handle"].as_str().unwrap().to_owned();
         fixture.edit(&handle, json!([set("selection", json!([id]))]));
     }
-    let aliases = PreferenceMerge::applyOperations(receiver.host.clone(), &schema, &first.history(), &second.history(), |_, _| true, true).unwrap();
+    let mut right = second.history();
+    right.push(aliasOperation(native_path, large, small));
+    let aliases = PreferenceMerge::applyOperations(receiver.host.clone(), &schema, &first.history(), &right, |_, _| true).unwrap();
     assert_eq!(aliases.get(&format!("{native_path}\u{001f}{large}")), Some(&small.to_string()));
     let handle = receiver.open();
     assert_eq!(receiver.data(&handle)["values"]["selection"], json!([small]));
@@ -426,9 +494,11 @@ fn shared_declaration_validation_precedes_storage_publication() {
         invalid["references"][0]["path"] = path;
         let schema = PreferenceMergeSchema { stores: vec![PreferenceMergeStore {
             path: fixture.path.clone(), encrypted: false,
+            storageVersion: None,
+            decode: None,
             merge: serde_json::from_value(invalid.clone()).unwrap(),
         }] };
-        assert!(PreferenceMerge::applyOperations(fixture.host.clone(), &schema, &[], &[], |_, _| true, true).is_err());
+        assert!(PreferenceMerge::applyOperations(fixture.host.clone(), &schema, &[], &[], |_, _| true).is_err());
         assert!(fixture.call(json!({"op":"open_preferences","path":fixture.path,"merge":invalid})).is_err());
         assert!(!fixture.host.exists(&fixture.path).unwrap());
         assert!(fixture.history().is_empty());

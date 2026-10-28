@@ -3,6 +3,7 @@ package app.operit
 import android.os.Bundle
 import android.os.Process
 import android.content.Intent
+import android.util.Log
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -12,6 +13,7 @@ import org.json.JSONObject
 /** Hosts storage maintenance in a separate process without normal owner-system initialization. */
 class DataRescueActivity : FlutterActivity() {
     private lateinit var storageHost: AndroidRuntimeHost
+    private val rescueRequests = HostTaskExecutor(serial = true)
 
     /** Selects the maintenance route before Dart initializes any business service. */
     override fun getInitialRoute(): String = "/data-rescue"
@@ -43,7 +45,7 @@ class DataRescueActivity : FlutterActivity() {
                                 }
                                 result.success("{\"ok\":true,\"value\":null}")
                             }
-                            else -> storageHost.runBackground {
+                            else -> rescueRequests.execute {
                                 try {
                                     val response = OperitRuntimeNative.dataRescue(storageHost.defaultRuntimeRootPath(), encoded, storageHost)
                                     runOnUiThread { result.success(response) }
@@ -57,4 +59,27 @@ class DataRescueActivity : FlutterActivity() {
             }
         }
     }
+
+    /** Closes queued maintenance work and releases its lease when the owning window is destroyed. */
+    override fun onDestroy() {
+        if (::storageHost.isInitialized) {
+            rescueRequests.execute {
+                try {
+                    val response = JSONObject(OperitRuntimeNative.dataRescue(
+                        storageHost.defaultRuntimeRootPath(),
+                        "{\"operation\":\"close\"}",
+                        storageHost,
+                    ))
+                    if (!response.getBoolean("ok")) {
+                        Log.e("DataRescueActivity", "Cannot close maintenance session: " + response.getString("error"))
+                    }
+                } finally {
+                    storageHost.destroy()
+                }
+            }
+        }
+        rescueRequests.shutdown()
+        super.onDestroy()
+    }
+
 }

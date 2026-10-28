@@ -1,4 +1,7 @@
 declare global {
+    /** Alias of the standard global object, shared by all plugin API versions. */
+    var global: typeof globalThis;
+
     /** Diagnostic depth shared with Rust AppLogger and Flutter ClientLogger. */
     type VerboseLogLevel = 1 | 2 | 3 | 4 | 5 | 6;
 

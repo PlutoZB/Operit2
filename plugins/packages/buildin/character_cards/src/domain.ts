@@ -1,3 +1,4 @@
+import { characterModelBindingMode } from "./model-binding";
 import { parseChatSelection } from "./chat-bindings";
 import type { CharacterRepository } from "./canonical";
 import { configurationReadScope } from "./configuration-reads";
@@ -48,6 +49,8 @@ function number(value: unknown, path: string): void {
 function integer(value: unknown, path: string): void {
   if (typeof value !== "number" || !Number.isSafeInteger(value)) throw new Error(`${path} must be a safe integer`);
 }
+/** Validates bounded collection counts without accepting negative slicing offsets. */
+function nonnegativeInteger(value: unknown, path: string): void { integer(value, path); nonnegative(value, path); }
 /** Requires one explicit persisted message revision inside the generic host's i32 range. */
 function messageVariant(value: unknown, path: string): void {
   integer(value, path);
@@ -151,8 +154,10 @@ export function parseMemoryQueryRequest(payload: unknown): MemoryQueryRequest {
 }
 
 const validators: Record<DomainOperation, Validator> = {
-  "memory.searchWithOptions": shape({ ownerKey: required(owner), query: required(text), folderPath: required(nullable(text)), relevanceThreshold: required(nonnegative), createdAtStartMs: required(nullable(integer)), createdAtEndMs: required(nullable(integer)) }),
+  "memory.chunks": shape({ ownerKey: required(owner), memoryId: required(nonblank), query: required(nonblank), count: required(nonnegativeInteger) }),
+  "memory.searchWithOptions": shape({ limit: optional(integer), excludeIds: optional(strings), ownerKey: required(owner), query: required(nonblank), folderPath: required(nullable(text)), relevanceThreshold: required(nonnegative), createdAtStartMs: required(nullable(integer)), createdAtEndMs: required(nullable(integer)) }),
   "memory.chat.list": ownerOnly,
+  "memory.chat.pruneMissing": ownerOnly,
   "memory.chat.update": shape({ ownerKey: required(owner), chatId: required(nonblank) }),
   "memory.categorize": ownerOnly,
   "memory.rebuild.start": shape({ ownerKey: required(owner), rebuild: required(shape({ chatIds: required(strings), windowMessageCount: required(integer), fromInclusive: required(nullable(integer)), toInclusive: required(nullable(integer)) })) }),
@@ -160,7 +165,10 @@ const validators: Record<DomainOperation, Validator> = {
   "memory.rebuild.cancel": ownerOnly,
   "memory.embeddings.rebuild": ownerOnly,
   "memory.candidate.enqueue": shape({ chatId: required(nonblank), timestamp: required(integer), variantIndex: required(messageVariant), sourceType: required(enumeration("reply_finalized_auto", "selected_user_message")), ownerKey: required(nullable(owner)) }),
+  "memory.candidates.retryFailed": ownerOnly,
+  "memory.candidates.clearFailed": ownerOnly,
   "chat.configuration.resolve": parseChatConfigurationRequest,
+  "chat.configuration.binding.find": shape({ chatId: required(nonblank) }),
   "chat.configuration.binding.read": shape({ chatId: required(nonblank) }),
   "chat.configuration.binding.write": shape({ chatId: required(nonblank), selection: required(nonblank) }),
   "chat.configuration.binding.delete": shape({ chatId: required(nonblank) }),
@@ -316,7 +324,7 @@ async function chatParticipant(
   nonblank(card.name, "profile.name");
   const models = await service.listModels();
   let modelBinding: ChatConfigurationRequest["defaultModelBinding"];
-  switch (card.chatModelBindingMode) {
+  switch (characterModelBindingMode(card.chatModelBindingMode)) {
     case "FOLLOW_GLOBAL": modelBinding = { ...request.defaultModelBinding }; break;
     case "FIXED_MODEL": {
       nonblank(card.chatModelId, "profile.fixedModelId");
@@ -331,7 +339,7 @@ async function chatParticipant(
       modelBinding = { providerId: candidates[0].providerId, modelId: candidates[0].modelId };
       break;
     }
-    default: throw new Error("Invalid model binding mode: " + card.chatModelBindingMode);
+    default: throw new Error("角色卡“" + card.name + "”的模型绑定模式无效，请在角色卡设置中重新绑定模型：" + card.chatModelBindingMode);
   }
   const resolvedModels = models.filter(
     /** Requires the actual configured provider/model pair. */
@@ -390,7 +398,7 @@ export async function resolveChatExecution(request: ChatConfigurationRequest, se
     const [models, ttsConfigs] = await Promise.all([service.listModels(), service.listTtsConfigs()]);
     const profile = modelParticipant(request, { models, ttsConfigs }), participants = [profile];
     const executionData = encodeExecutionData({ version: 1, selection: marker.selection, promptFunctionType: request.promptFunctionType, primaryOwnerKey: "", profile, participants });
-    return { contextKey: marker.selection, profile, participants, executionData };
+    return { contextKey: marker.selection, historyPolicy: { isolateParticipants: false, labelUserMessages: false }, profile, participants, executionData };
   }
   let cards: CharacterRecord[];
   if (selection.kind === "card") cards = [await service.getCharacter(selection.id)];
@@ -427,5 +435,5 @@ export async function resolveChatExecution(request: ChatConfigurationRequest, se
   const card = chatRecord(cards, profile.id, "selected participant");
   const primaryOwnerKey = (card.memoryBindingMode === "CHARACTER" ? "character:" + card.id : "shared:" + card.sharedMemoryId);
   const executionData = encodeExecutionData({ version: 1, selection: marker.selection, promptFunctionType: request.promptFunctionType, primaryOwnerKey, profile, participants });
-  return { contextKey: marker.selection, profile, participants, executionData };
+  return { contextKey: marker.selection, historyPolicy: { isolateParticipants: selection.kind === "group", labelUserMessages: selection.kind === "group" }, profile, participants, executionData };
 }

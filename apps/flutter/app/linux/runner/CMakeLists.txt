@@ -32,13 +32,14 @@ set(OPERIT_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../")
 set(OPERIT_PLUGIN_SYNC_PYTHON "${OPERIT_REPO_ROOT}/.venv/bin/python")
 set(OPERIT_PLUGIN_SYNC_SCRIPT "${OPERIT_REPO_ROOT}/plugins/tools/sync_plugin_packages.py")
 add_custom_target(sync_operit_plugins ALL
-  COMMAND "${OPERIT_PLUGIN_SYNC_PYTHON}" "${OPERIT_PLUGIN_SYNC_SCRIPT}" --source buildin --no-hot-reload
+  COMMAND "${OPERIT_PLUGIN_SYNC_PYTHON}" "${OPERIT_PLUGIN_SYNC_SCRIPT}" --source runtime --no-hot-reload
   WORKING_DIRECTORY "${OPERIT_REPO_ROOT}"
 )
 
 set(OPERIT_FLUTTER_BRIDGE_CRATE "${CMAKE_CURRENT_SOURCE_DIR}/../../../native/operit-flutter-bridge")
 add_custom_target(operit_flutter_bridge ALL
-  COMMAND cargo build --manifest-path "${OPERIT_FLUTTER_BRIDGE_CRATE}/Cargo.toml" $<$<NOT:$<CONFIG:Debug>>:--release>
+  COMMAND "${OPERIT_PLUGIN_SYNC_PYTHON}" "${OPERIT_REPO_ROOT}/tools/build_scripts/cargo_build.py"
+    cargo build --manifest-path "${OPERIT_FLUTTER_BRIDGE_CRATE}/Cargo.toml" $<$<NOT:$<CONFIG:Debug>>:--release>
   WORKING_DIRECTORY "${OPERIT_FLUTTER_BRIDGE_CRATE}"
 )
 add_dependencies(operit_flutter_bridge sync_operit_plugins)

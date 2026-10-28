@@ -3,7 +3,7 @@ import path from "node:path";
 import { readFile } from "node:fs/promises";
 import { createDiskHarness } from "./disk-files.mjs";
 import { openPlugin } from "./plugin-entry-harness.mjs";
-import { loadModule, plain } from "./runtime.mjs";
+import { plain } from "./runtime.mjs";
 
 export const CONTROLLED_CHAT_ID = "memory-jobs-controlled-chat";
 export const CONTROLLED_OWNER = "character:default";
@@ -21,7 +21,7 @@ function strictCapability(name, members) {
 }
 
 /** Creates explicit Chat/AI fixtures around real temporary disk IO, never a substitute domain backend. */
-export async function createMemoryJobsHarness(testContext) {
+export async function createMemoryJobsHarness(testContext, producerNodeId = "controlled-node") {
   const disk = await createDiskHarness(testContext, { legacyIdentity: "default" }), modelCalls = [], rangeCalls = [], findCalls = [], outcomes = [];
   const history = [];
   for (let index = 0; index < 32; index += 1) {
@@ -132,15 +132,20 @@ export async function createMemoryJobsHarness(testContext) {
   });
   const tools = strictCapability("Tools", { Files: disk.files, Storage: disk.storage, Chat: controlledChat });
   const statePath = path.join(disk.directory, "character-memory", "state.json");
-  const chatStorage = loadModule("src/chat-storage.ts", { ...disk.globals, Tools: tools });
   /** Assigns only the real author identity; no plugin record is written. */
   async function saveMessageAuthor(timestamp, variantIndex) {
     executionDatas.set(JSON.stringify([timestamp, variantIndex]), messageMarker());
   }
 
+  /** Supplies the native discovery result with an explicitly selected stable device identity. */
+  async function toolCall(name, params) {
+    assert.equal(name, "list_core_nodes"); assert.deepEqual(plain(params), {});
+    return JSON.stringify({ currentNodeId: producerNodeId, nodes: [] });
+  }
+
   /** Opens a fresh production main module against the same real disk after the previous runtime is retired. */
   function openRuntime(runtimeGlobals = {}) {
-    const plugin = openPlugin({ ...disk, globals: { ...disk.globals, ...runtimeGlobals, Tools: tools } });
+    const plugin = openPlugin({ ...disk, globals: { ...disk.globals, toolCall, ...runtimeGlobals, Tools: tools } });
     assert.equal(plugin.toolLifecycleHooks.length, 1); assert.equal(plugin.toolPromptHooks.length, 1);
     return {
       ...plugin,
@@ -207,7 +212,11 @@ export async function createMemoryJobsHarness(testContext) {
     /** Removes one explicitly saved assistant author identity while leaving the actual message revision present. */
     removeExecutionData(timestamp, variantIndex) { assert.equal(executionDatas.delete(JSON.stringify([timestamp, variantIndex])), true); },
     /** Removes the current chat marker to prove background assistant work uses only the author identity and current role settings. */
-    async removeChatMarker() { await chatStorage.deleteChatBinding(chat.id); },
+    async removeChatMarker() {
+      const chats = await disk.storage.dataStore.open({ path: disk.directory + "/chats.preferences.json" });
+      await chats.edit(preferences => preferences.remove("binding_" + chat.id));
+      await chats.close();
+    },
     /** Selects a genuinely present controlled variant and changes source metadata before the next scheduled read. */
     async selectNewVariant(timestamp) {
       const messages = history.filter(
