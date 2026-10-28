@@ -51,11 +51,22 @@ jobs:
             xz-utils
 
       - name: Fetch Android runtime sources
-        shell: pwsh
-        run: pwsh -NoProfile -File tools/android-runtime/fetch_sources.ps1
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 25
+          max_attempts: 5
+          retry_wait_seconds: 30
+          shell: bash
+          command: pwsh -NoProfile -File tools/android-runtime/fetch_sources.ps1
 
       - name: Fetch Android NDK
-        run: bash tools/android-runtime/fetch_ndk_wsl.sh
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 25
+          max_attempts: 5
+          retry_wait_seconds: 30
+          shell: bash
+          command: bash tools/android-runtime/fetch_ndk_wsl.sh
 
       - name: Build Android terminal runtime
         run: |
