@@ -123,8 +123,18 @@ jobs:
             libssl-dev ninja-build pkg-config python3 python3-pip \
             unzip xz-utils zlib1g-dev
           # depot_tools 未用：prepare_android_v8.py 通过 CIPD 自行拉取 pinned gn/ninja。
-          # V8 的 bindings 生成需要 libclang 21.1+（BUILDING.md 第 6 条）。
-          sudo apt-get install -y llvm-21-dev lld-21
+          # V8 的 bindings 生成需要 libclang 21.1+、链接需要 ld.lld
+          # （BUILDING.md 第 6 条）。ubuntu-24.04 默认源没有 llvm-21，
+          # 必须加 apt.llvm.org 源，否则报 "Unable to locate package llvm-21-dev"。
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo gpg --dearmor -o /usr/share/keyrings/llvm-snapshot.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-21.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y llvm-21-dev lld-21 libclang-21-dev
+          # 供 find_libclang() 校验
+          ls -l /usr/lib/llvm-21/lib/libclang.so* || true
+          ls -l /usr/lib/llvm-21/bin/ld.lld || true
 
       - name: Fetch Android NDK
         uses: nick-fields/retry@v4
@@ -168,8 +178,9 @@ jobs:
           retention-days: 30
 
   build-android:
+    # 必须等到 runtime 与 V8 两个产物 job 都成功；否则下载 artifact 会失败，
+    # 白白浪费一次 30 分钟的 Windows 构建。
     needs: [build-android-runtime, build-android-v8]
-    if: ${{ !cancelled() }}
     runs-on: windows-2025
     timeout-minutes: 180
     env:
