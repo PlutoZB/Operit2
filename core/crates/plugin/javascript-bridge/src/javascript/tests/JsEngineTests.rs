@@ -180,6 +180,63 @@ fn newTestIpcEngine(executionHost: Arc<dyn JsExecutionHost>) -> super::JsEngine 
     ).expect("test engine must initialize")
 }
 
+/// Exercises the public getters through real scheduled engines for both legacy and current APIs.
+#[tokio::test]
+async fn hook_caller_getters_use_native_snapshot_in_v1_and_v2() {
+    const SCRIPT: &str = r#"
+        exports.inspect = async function(params) {
+            await Promise.resolve();
+            var card;
+            try { card = typeof getCallerCardId === 'function' ? getCallerCardId() : null; }
+            catch (error) { card = error.message; }
+            return { chatId: getChatId(), participantId: getCallerParticipantId(), cardId: card };
+        };
+    "#;
+    for version in ["1.0.0", "1.0.1", "2.0.0"] {
+        testJavaScriptRuntimeHost();
+        register_test_runtime_storage("js-engine-tests");
+        let host = Arc::new(TestPluginConfigExecutionHost::default());
+        let engine = super::JsEngine::new_toolpkg_execution_engine(host.clone(), ToolPkgExecutionContext {
+            context_key: format!("caller-test:{version}"),
+            container_package_name: "test.package".into(), api_version: version.into(),
+            text_resource_host: Arc::new(StaticToolPkgTextResourceHost { resources: BTreeMap::new() }),
+        }).unwrap();
+        *host.callerContext.lock().unwrap() = Some(serde_json::json!({
+            "chatId":"chat-a", "participantId":"participant-a", "extensionOwner":"com.operit.character_cards",
+        }));
+        let params = BTreeMap::from([
+            ("__operit_package_chat_id".into(), serde_json::json!("stale-chat")),
+            ("__operit_package_caller_participant_id".into(), serde_json::json!("stale-participant")),
+            ("__operit_package_caller_owner".into(), serde_json::json!("foreign.provider")),
+            ("eventPayload".into(), serde_json::json!({"metadata":{"executionContext":{"chatId":"forged-chat", "participantId":"forged-participant"}}})),
+        ]);
+        let pending = engine.execute_script_function(SCRIPT, "inspect", &params, &BTreeMap::new(), None, true, None);
+        // Changing the selected chat before polling must not change the submitted request.
+        *host.callerContext.lock().unwrap() = Some(serde_json::json!({
+            "chatId":"chat-b", "participantId":"participant-b", "extensionOwner":"foreign.provider",
+        }));
+        let output: Value = serde_json::from_str(&pending.await.unwrap().unwrap()).unwrap();
+        assert_eq!(output, serde_json::json!({
+            "chatId":"chat-a", "participantId":"participant-a",
+            "cardId": if version == "2.0.0" { Value::Null } else { serde_json::json!("participant-a") },
+        }), "API {version}");
+        let output = engine.execute_script_function(SCRIPT, "inspect", &params, &BTreeMap::new(), None, true, None).await.unwrap().unwrap();
+        let output: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(output["chatId"], "chat-b");
+        assert_eq!(output["participantId"], "participant-b");
+        if version == "2.0.0" { assert!(output["cardId"].is_null()); }
+        else { assert!(output["cardId"].as_str().unwrap().contains("another provider participant")); }
+
+        *host.callerContext.lock().unwrap() = None;
+        let output = engine.execute_script_function(SCRIPT, "inspect", &params, &BTreeMap::new(), None, true, None).await.unwrap().unwrap();
+        let output: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(output["chatId"], "stale-chat", "UI target chat remains available outside a turn");
+        assert!(output.get("participantId").is_none(), "No participant from a preceding turn or supplied parameters");
+        assert!(output.get("cardId").is_none_or(Value::is_null));
+        engine.destroy();
+    }
+}
+
 /// Returns the repository root above core/crates/plugin/javascript-bridge.
 #[allow(non_snake_case)]
 fn testRepositoryRoot() -> &'static Path {
@@ -218,6 +275,8 @@ pub(super) fn newTestJsEngineState(
 #[derive(Clone, Default)]
 struct TestPluginConfigExecutionHost {
     storage: Option<StorageTestFixture>,
+    wasmModules: Arc<Mutex<BTreeMap<String, (Vec<u8>, Vec<String>)>>>,
+    wasmModuleReads: Arc<AtomicUsize>,
     routedPluginCalls: Arc<Mutex<Vec<Value>>>,
     gatedToolCalls: Arc<Mutex<Vec<tokio::sync::oneshot::Sender<JsToolCallResult>>>>,
     blockingToolCalls: Arc<Mutex<Vec<std::sync::mpsc::Sender<JsToolCallResult>>>>,
@@ -230,6 +289,8 @@ struct TestPluginConfigExecutionHost {
     environment: Arc<Mutex<BTreeMap<String, String>>>,
     environmentOwners: Arc<Mutex<Vec<operit_plugin_sdk::javascript::JsEnvironmentOwner>>>,
     toolCatalogError: Arc<Mutex<Option<String>>>,
+    callerContext: Arc<Mutex<Option<Value>>>,
+    capturedCallerContext: Option<Value>,
     #[cfg(not(target_arch = "wasm32"))]
     toolPkgIpcThreadName: Arc<Mutex<Option<String>>>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -298,8 +359,14 @@ impl JsExecutionHost for TestPluginConfigExecutionHost {
         Ok(())
     }
 
-        /// Captures this fixture's shared state through the same native invocation boundary.
-        fn capture_tool_invocation_host(&self) -> Arc<dyn JsExecutionHost> { Arc::new(self.clone()) }
+    /// Freezes caller identity before work is submitted to the JavaScript scheduler.
+    fn capture_tool_invocation_host(&self) -> Arc<dyn JsExecutionHost> {
+        let mut host = self.clone();
+        host.capturedCallerContext = Some(self.callerContext.lock().unwrap().clone().unwrap_or(serde_json::json!({})));
+        Arc::new(host)
+    }
+
+    fn toolpkg_caller_context(&self) -> Option<Value> { self.capturedCallerContext.clone() }
 
 
 
@@ -477,7 +544,7 @@ impl JsExecutionHost for TestPluginConfigExecutionHost {
     fn plugin_config_dir(&self, plugin_id: &str) -> Result<String, String> {
         let safeBaseName = plugin_id.trim().replace(':', "_");
         Ok(format!(
-            "/app/data/extensions/device/plugins/configs/{safeBaseName}"
+            "/operitapp/data/extensions/device/plugins/configs/{safeBaseName}"
         ))
     }
 
@@ -509,7 +576,7 @@ impl JsExecutionHost for TestPluginConfigExecutionHost {
             format!("{root}/namespaces/{name}")
         };
         Ok(format!(
-            "/app/data/{}",
+            "/operitapp/data/{}",
             path.strip_prefix("runtime/")
                 .ok_or("invalid test config path")?
         ))
@@ -518,7 +585,7 @@ impl JsExecutionHost for TestPluginConfigExecutionHost {
     /// Returns actual Host-visible local data without acquiring the package manager lock.
     fn plugin_local_data_dir(&self, owner_id: &str) -> Result<String, String> {
         let path = operit_store::ExtensionStore::ExtensionStore::localDataPath(owner_id)?;
-        Ok(format!("/app/data/{}", path.strip_prefix("runtime/").ok_or("invalid local data path")?))
+        Ok(format!("/operitapp/data/{}", path.strip_prefix("runtime/").ok_or("invalid local data path")?))
     }
 
     /// Creates registration-local paths independently of the selected installation scope.
@@ -529,7 +596,7 @@ impl JsExecutionHost for TestPluginConfigExecutionHost {
     /// Returns shared data independently of the installed package scope.
     fn plugin_space_data_dir(&self, owner_id: &str) -> Result<String, String> {
         let path = operit_store::ExtensionStore::ExtensionStore::spaceDataPath(owner_id)?;
-        Ok(format!("/app/data/{}", path.strip_prefix("runtime/").ok_or("invalid shared data path")?))
+        Ok(format!("/operitapp/data/{}", path.strip_prefix("runtime/").ok_or("invalid shared data path")?))
     }
 
     /// Creates registration-shared paths without consulting installed state.
@@ -554,6 +621,13 @@ impl JsExecutionHost for TestPluginConfigExecutionHost {
         _request: JsToolPkgResourceRequest,
     ) -> Result<String, String> {
         panic!("ToolPkg resources are not part of the plugin config test")
+    }
+
+    fn load_toolpkg_wasm(&self, target: &str, module_id: &str) -> Result<operit_plugin_sdk::javascript::JsToolPkgWasmModule, String> {
+        self.wasmModuleReads.fetch_add(1, Ordering::Relaxed);
+        let (bytes, exports) = self.wasmModules.lock().unwrap().get(&format!("{target}/{module_id}"))
+            .cloned().ok_or_else(|| "Undeclared test WASM module".to_string())?;
+        Ok(operit_plugin_sdk::javascript::JsToolPkgWasmModule { bytes, exports })
     }
 
     /// Rejects unexpected ToolPkg WASM calls.
@@ -961,9 +1035,6 @@ fn detached_call_preparation_accepts_boolean_result() {
     register_test_runtime_storage("js-engine-tests");
     let mut state = newTestJsEngineState(None);
     state
-        .initJavaScriptEnvironment()
-        .expect("JavaScript test environment must initialize");
-    state
         .evalJavaScriptVoid(
             "var call = __operitRegisterCallSession('detached-call', {}); call.detached = true; call.pendingReferences = 1; JSON.parse = JSON.stringify = function() { throw Error('JSON transport used'); };",
         )
@@ -980,9 +1051,6 @@ fn clearing_timer_from_another_call_releases_timer_owner_reference() {
     testJavaScriptRuntimeHost();
     register_test_runtime_storage("js-engine-tests");
     let mut state = newTestJsEngineState(None);
-    state
-        .initJavaScriptEnvironment()
-        .expect("JavaScript test environment must initialize");
     let result = state
         .evalJavaScriptString(
             r#"(function() {
@@ -1364,6 +1432,27 @@ fn execute_function_with_active_module_context() {
         expect_js_output(output, "active module context execution"),
         "\"true:true:root-marker\""
     );
+}
+
+/// Initializes the complete generated Tools runtime and the v1 installer in one native context.
+#[test]
+fn bootstrap_initializes_internal_v1_runtime_with_generated_tools() {
+    let mut state = newTestJsEngineState(None);
+    let output = state.evalJavaScriptString(r#"
+        JSON.stringify({
+            internal: typeof globalThis.__operitV1InternalRuntime.create_session,
+            canonical: typeof __operitCanonicalTools.System.terminal.create,
+            public: typeof Tools.System.terminal.create,
+            installed: Tools.System.terminal.create !== __operitCanonicalTools.System.terminal.create
+        })
+    "#).expect("complete bootstrap must initialize without duplicate declarations");
+    let output: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(output, serde_json::json!({
+        "internal": "function",
+        "canonical": "function",
+        "public": "function",
+        "installed": true
+    }));
 }
 
 #[test]
@@ -2046,7 +2135,6 @@ fn cancellation_cleanup_deadline_does_not_limit_another_call() {
     testJavaScriptRuntimeHost();
     register_test_runtime_storage("js-engine-tests");
     let mut state = newTestJsEngineState(None);
-    state.initJavaScriptEnvironment().unwrap();
     let cleanup = operit_host_api::HostJavaScriptExecutionInterrupt::new(20).unwrap();
     let scope = super::ExecutionScope::enter(&state, Some(cleanup.clone()));
     super::CURRENT_CLEANUP_OWNER.with(|owner| *owner.borrow_mut() = Some(("retired".into(), cleanup)));
@@ -2810,36 +2898,6 @@ fn execute_minified_package_script_with_metadata() {
 
 /// Registers the bundled package with its explicit installation scope.
 #[test]
-fn register_thinking_guidance_toolpkg_main() {
-    ensure_test_runtime_root();
-    let engine = newTestToolPkgRegistrationEngine();
-    let repoRoot = testRepositoryRoot();
-    let scriptPath = repoRoot.join("plugins/packages/buildin/thinking_guidance/dist/main.js");
-    let script = std::fs::read_to_string(&scriptPath).expect("thinking_guidance main.js");
-    let mut params = testParams();
-    params.insert(
-        "toolPkgId".to_string(),
-        Value::String("thinking_guidance".to_string()),
-    );
-    params.insert(
-        "__operit_registration_config_scope".to_string(),
-        Value::String("device".to_string()),
-    );
-
-    let capture = engine
-        .execute_toolpkg_main_registration_function(&script, "registerToolPkg", &params)
-        .expect("thinking_guidance registration");
-
-    assert_eq!(capture.inputMenuTogglePlugins.len(), 1);
-    assert_eq!(capture.systemPromptComposeHooks.len(), 1);
-    let menu = serde_json::from_str::<Value>(&capture.inputMenuTogglePlugins[0]).unwrap();
-    assert_eq!(menu["function"], "onInputMenuToggle");
-    let prompt = serde_json::from_str::<Value>(&capture.systemPromptComposeHooks[0]).unwrap();
-    assert_eq!(prompt["function"], "onSystemPromptCompose");
-}
-
-/// Registers the package and its text resources in the selected installation scope.
-#[test]
 fn register_message_insert_toolpkg_main() {
     ensure_test_runtime_root();
     let engine = newTestToolPkgRegistrationEngine();
@@ -3586,13 +3644,13 @@ fn registration_config_directory_works_before_installation_without_reentering_ma
             .expect("registration must resolve paths while its caller holds the manager lock");
         let entry: Value = serde_json::from_str(&capture.navigationEntries[0]).unwrap();
         let root = format!(
-            "/app/data/extensions/{}/plugins/configs/first_import",
+            "/operitapp/data/extensions/{}/plugins/configs/first_import",
             scope.as_str()
         );
         assert_eq!(entry["directory"], root);
-        assert_eq!(entry["localDirectory"], "/app/data/plugin_data/device/first_import");
+        assert_eq!(entry["localDirectory"], "/operitapp/data/plugin_data/device/first_import");
         assert_eq!(entry["localAgain"], entry["localDirectory"]);
-        assert_eq!(entry["sharedDirectory"], "/app/data/plugin_data/space/first_import");
+        assert_eq!(entry["sharedDirectory"], "/operitapp/data/plugin_data/space/first_import");
         assert_eq!(
             entry["aliasDirectory"],
             format!("{root}/namespaces/named_alias")
@@ -3634,7 +3692,7 @@ async fn registration_config_context_does_not_leak_into_runtime_execution() {
         .expect("runtime configuration result");
     assert_eq!(
         serde_json::from_str::<String>(&output).unwrap(),
-        "/app/data/extensions/device/plugins/configs/first_import"
+        "/operitapp/data/extensions/device/plugins/configs/first_import"
     );
     assert_eq!(host.registrationConfigReads.load(Ordering::Relaxed), 1);
 }
@@ -3655,7 +3713,7 @@ async fn local_data_directory_is_stable_across_registration_and_runtime() {
         "exports.local_data = function() { return {local:ToolPkg.getLocalDataDir(),shared:ToolPkg.getSpaceDataDir()}; };",
         "local_data", &params, &BTreeMap::new(), None, true, None,
     ).await.expect("local runtime directory").expect("local directory output");
-    assert_eq!(serde_json::from_str::<Value>(&output).unwrap(), serde_json::json!({"local":"/app/data/plugin_data/device/first_import","shared":"/app/data/plugin_data/space/first_import"}));
+    assert_eq!(serde_json::from_str::<Value>(&output).unwrap(), serde_json::json!({"local":"/operitapp/data/plugin_data/device/first_import","shared":"/operitapp/data/plugin_data/space/first_import"}));
 }
 
 /// Rejects an unspecified registration scope instead of choosing an arbitrary storage location.
@@ -3775,7 +3833,7 @@ fn native_interface_resolves_plugin_config_dir() {
 
     assert_eq!(
         path,
-        "/app/data/extensions/device/plugins/configs/plugin_name"
+        "/operitapp/data/extensions/device/plugins/configs/plugin_name"
     );
 }
 
@@ -3925,7 +3983,7 @@ async fn completion_retains_detached_promise_context_until_host_event() {
         resumed,
         serde_json::json!({
             "owner": "original", "runs": 1,
-            "config": "/app/data/extensions/device/plugins/configs/workflow",
+            "config": "/operitapp/data/extensions/device/plugins/configs/workflow",
         })
     );
     assert_eq!(
@@ -4031,7 +4089,7 @@ async fn promise_jobs_restore_execution_host_for_native_calls() {
     assert_eq!(
         value,
         serde_json::json!({
-            "config": "/app/data/extensions/device/plugins/configs/workflow",
+            "config": "/operitapp/data/extensions/device/plugins/configs/workflow",
             "owner": "workflow",
         })
     );
@@ -4927,7 +4985,8 @@ async fn prepared_provider_replenishes_without_reusing_page_state() {
     register_test_runtime_storage("js-engine-tests");
     let host = Arc::new(TestPluginConfigExecutionHost::default());
     let provider = crate::javascript::JsExecutionProvider::HostJsExecutionProvider::new();
-    for index in 0..5 {
+    let mut engines = Vec::new();
+    for index in 0..256 {
         let engine = provider.acquire_toolpkg_execution_engine(host.clone(), ToolPkgExecutionContext {
             context_key: format!("prepared-page-{index}"), container_package_name: "test.package".into(),
             api_version: "2.0.0".into(),
@@ -4938,9 +4997,10 @@ async fn prepared_provider_replenishes_without_reusing_page_state() {
             "probe", &testParams(), &BTreeMap::new(), None, false,
         ).await, "fresh prepared page");
         assert_eq!(serde_json::from_str::<Value>(&output).unwrap()["counter"], 1);
-        engine.destroy();
+        engines.push(engine);
     }
-    assert_eq!(host.toolPkgContextBindings.load(Ordering::SeqCst), 5);
+    assert_eq!(host.toolPkgContextBindings.load(Ordering::SeqCst), 256);
+    for engine in engines { engine.destroy(); }
 }
 
 /// An invalid package identity destroys its claimed runtime without consuming a context binding.
@@ -4950,7 +5010,7 @@ async fn prepared_engine_rejects_invalid_owner_and_destroys_runtime() {
     register_test_runtime_storage("js-engine-tests");
     let host = Arc::new(TestPluginConfigExecutionHost::default());
     let prepared = super::PreparedJsEngine::new().unwrap();
-    let alive = prepared.engine.as_ref().unwrap().worker.alive.clone();
+    let alive = prepared.engine.worker.alive.clone();
     let result = prepared.bind(host.clone(), ToolPkgExecutionContext {
         context_key: String::new(), container_package_name: "test.package".into(),
         api_version: "2.0.0".into(),
@@ -4967,8 +5027,37 @@ fn unclaimed_prepared_engine_destroys_runtime() {
     testJavaScriptRuntimeHost();
     register_test_runtime_storage("js-engine-tests");
     let prepared = super::PreparedJsEngine::new().unwrap();
-    let alive = prepared.engine.as_ref().unwrap().worker.alive.clone();
+    let alive = prepared.engine.worker.alive.clone();
     drop(prepared);
+    assert!(!alive.load(Ordering::Acquire));
+}
+
+/// The final clone releases its Host registration without an explicit destroy call.
+#[test]
+fn last_engine_owner_destroys_runtime() {
+    let engine = newTestToolPkgRegistrationEngine();
+    let alive = engine.worker.alive.clone();
+    let host = engine.worker.runtimeHost.clone();
+    let handle = engine.worker.stateHandle;
+    let clone = engine.clone();
+    drop(engine);
+    assert!(alive.load(Ordering::Acquire));
+    drop(clone);
+    assert!(!alive.load(Ordering::Acquire));
+    assert!(host.executeHostJavaScriptRuntimeStateTask(handle,
+        operit_host_api::HostJavaScriptExecutionInterrupt::unlimited(),
+        Box::new(|_, _| Ok(Box::new(()))),
+    ).is_err());
+}
+
+/// Explicit shutdown stays idempotent when the final owner is subsequently dropped.
+#[test]
+fn explicit_engine_shutdown_can_be_repeated_before_drop() {
+    let engine = newTestToolPkgRegistrationEngine();
+    let alive = engine.worker.alive.clone();
+    engine.destroy();
+    engine.clone().destroy();
+    drop(engine);
     assert!(!alive.load(Ordering::Acquire));
 }
 
@@ -5103,6 +5192,58 @@ fn native_bootstrap_libraries_preserve_globals_and_initialize_once() {
     assert_eq!(output["types"], serde_json::json!([
         "function", "function", "function", "object", "function", "object", "object", "object"
     ]));
+}
+
+/// Exercises the binary media facade through the real JavaScript-to-Rust crypto binding.
+#[test]
+fn wechat_binary_crypto_round_trip_in_native_engine() {
+    let mut state = newTestJsEngineState(None);
+    let output = state.evalJavaScriptString(r#"
+        var key = CryptoJS.binary.randomHex(16);
+        var source = 'AP+A/w==';
+        var encrypted = CryptoJS.binary.encryptAesEcb(source, key);
+        JSON.stringify({
+            decrypted: CryptoJS.binary.decryptAesEcb(encrypted, key),
+            digest: CryptoJS.binary.md5('aGVsbG8='),
+            keyLength: key.length,
+            distinctKeys: key !== CryptoJS.binary.randomHex(16)
+        });
+    "#).expect("native binary media crypto");
+    let output: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(output["decrypted"], "AP+A/w==");
+    assert_eq!(output["digest"], "5d41402abc4b2a76b9719d911017c592");
+    assert_eq!(output["keyLength"], 32);
+    assert_eq!(output["distinctKeys"], true);
+}
+
+/// Registers the complete WeChat module graph in the real package engine without logging in.
+#[test]
+fn register_wechat_bot_toolpkg_main() {
+    ensure_test_runtime_root();
+    let engine = newTestToolPkgRegistrationEngine();
+    let dist = testRepositoryRoot().join("plugins/packages/external/wechat/dist");
+    let script = std::fs::read_to_string(dist.join("main.js")).expect("WeChat main.js");
+    let mut resources = BTreeMap::new();
+    collect_message_insert_text_resources(&dist, &dist, &mut resources);
+    let mut params = testParams();
+    for (key, value) in [
+        ("toolPkgId", "com.operit.wechat_bot"),
+        ("__operit_registration_config_scope", "device"),
+        ("__operit_ui_package_name", "com.operit.wechat_bot"),
+        ("__operit_script_screen", "dist/main.js"),
+    ] {
+        params.insert(key.into(), Value::String(value.into()));
+    }
+    let capture = engine
+        .execute_toolpkg_main_registration_function_with_text_resources(
+            &script,
+            "registerToolPkg",
+            &params,
+            Some(Arc::new(resources)),
+        )
+        .expect("WeChat native package registration");
+    assert_eq!(capture.toolboxUiModules.len(), 1);
+    assert_eq!(capture.appLifecycleHooks.len(), 3);
 }
 
 /// Compares initialization policies in fresh native contexts without business queries or Flutter.
@@ -5410,9 +5551,10 @@ async fn discarded_queued_start_finishes_without_a_wall_deadline() {
         }
     }
 
-    let engine = newTestToolPkgRegistrationEngine();
-    let mut worker = engine.worker.clone();
-    worker.runtimeHost = Arc::new(DiscardQueuedHost(worker.runtimeHost.clone()));
+    let mut engine = newTestToolPkgRegistrationEngine();
+    let host = engine.worker.runtimeHost.clone();
+    Arc::get_mut(&mut engine.worker.owner).unwrap().runtimeHost = Arc::new(DiscardQueuedHost(host));
+    let worker = engine.worker.clone();
     let result = tokio::time::timeout(Duration::from_secs(2), worker.execute_script_function_async(
         "exports.run = function() { return true; };".into(), "run".into(),
         BTreeMap::new(), BTreeMap::new(), None, false, None,
@@ -5590,4 +5732,80 @@ fn registration_environment_uses_the_native_owner_and_scope() {
                 scope
             }));
     }
+}
+
+/// Runs persistent state and binary memory against the actual embedded V8 host.
+#[tokio::test(flavor = "current_thread")]
+async fn wasm_instances_retain_state_and_transfer_binary_memory() {
+    let host = Arc::new(TestPluginConfigExecutionHost::default());
+    host.wasmModules.lock().unwrap().insert("test.package/state".into(), (
+        include_bytes!("../../../../../../../tools/tests/fixtures/wasm/memory.wasm").to_vec(),
+        ["next", "echo_i64", "sum", "grow"].map(str::to_string).to_vec(),
+    ));
+    let engine = newTestJsEngine(host.clone());
+    let mut params = testParams();
+    params.insert("__operit_ui_package_name".into(), serde_json::json!("test.package"));
+    let script = r#"
+        exports.probe = async function() {
+            const next = await ToolPkg.wasm.call('state', 'next');
+            const a = await ToolPkg.wasm.open('state'), b = await ToolPkg.wasm.open('state');
+            const isolated = [a.call('next'), b.call('next'), a.call('next')];
+            const vector = new Float32Array([1.25, 2.5, 4]);
+            a.writeMemory(4096, new Uint8Array(vector.buffer));
+            const sum = a.call('sum', [{type:'i32',value:4096},{type:'i32',value:3}]);
+            const bytes = a.readMemory(4096, 12);
+            const integer = a.call('echo_i64', [{type:'i64',value:'9007199254740993'}]);
+            let bounds = false, unsafeInteger = false, undeclared = false, closed = false;
+            try { a.readMemory(-1, 1); } catch (e) { bounds = /out of bounds/.test(e.message); }
+            try { a.call('echo_i64', [{type:'i64',value:9007199254740992}]); } catch (e) { unsafeInteger = /safe integers/.test(e.message); }
+            try { a.call('not_declared'); } catch (e) { undeclared = /not declared/.test(e.message); }
+            const old = a.memory(), length = old.byteLength;
+            a.call('grow', [{type:'i32',value:1}]);
+            const grew = a.memory().byteLength === length + 65536 && old.byteLength === 0;
+            a.close(); b.close();
+            try { a.readMemory(0, 1); } catch (e) { closed = /closed/.test(e.message); }
+            return {next,isolated,sum,integer,bounds,unsafeInteger,undeclared,closed,grew,bytes:Array.from(bytes)};
+        };
+    "#;
+    for expected in [1, 2] {
+        let output = expect_js_output(engine.execute_script_function(script, "probe", &params, &BTreeMap::new(), None, true, None).await, "persistent WASM");
+        let result: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(result["next"], expected);
+        assert_eq!(result["isolated"], serde_json::json!([1, 1, 2]));
+        assert_eq!(result["sum"], 7.75);
+        assert_eq!(result["integer"], "9007199254740993");
+        for flag in ["bounds", "unsafeInteger", "undeclared", "closed", "grew"] { assert_eq!(result[flag], true, "{flag}: {result}"); }
+    }
+    assert_eq!(host.wasmModuleReads.load(Ordering::Relaxed), 1);
+    engine.destroy();
+}
+
+/// Loads the shipped third-party index into the native V8 realm, including SIMD and host imports.
+#[tokio::test(flavor = "current_thread")]
+async fn wasm_usearch_indexes_searches_deletes_and_restores_real_vectors() {
+    let host = Arc::new(TestPluginConfigExecutionHost::default());
+    let manifest: Value = serde_json::from_str(include_str!("../../../../../../../plugins/packages/examples/toolpkg_usearch_demo/manifest.json")).unwrap();
+    let exports = manifest["wasm_modules"][0]["exports"].as_array().unwrap().iter().map(|name| name.as_str().unwrap().to_string()).collect();
+    host.wasmModules.lock().unwrap().insert("test.package/usearch".into(), (
+        include_bytes!("../../../../../../../plugins/packages/examples/toolpkg_usearch_demo/modules/usearch.wasm").to_vec(), exports,
+    ));
+    let engine = newTestJsEngine(host.clone());
+    let mut params = testParams();
+    params.insert("__operit_ui_package_name".into(), serde_json::json!("test.package"));
+    for (parameter, variable, default) in [("count", "OPERIT_USEARCH_COUNT", 2000), ("dimensions", "OPERIT_USEARCH_DIMENSIONS", 128), ("queries", "OPERIT_USEARCH_QUERIES", 20)] {
+        let value = std::env::var(variable).ok().map(|value| value.parse::<u32>().unwrap()).unwrap_or(default);
+        params.insert(parameter.into(), serde_json::json!(value));
+    }
+    let script = include_str!("../../../../../../../plugins/packages/examples/toolpkg_usearch_demo/main.js");
+    let output = expect_js_output(engine.execute_script_function(script, "run", &params, &BTreeMap::new(), None, true, None).await, "real USearch WASM");
+    let result: Value = serde_json::from_str(&output).unwrap();
+    println!("USEARCH_NATIVE_V8 {result}");
+    assert_eq!(result["restored"], true);
+    assert_eq!(result["deletionVerified"], true);
+    assert_eq!(result["firstKey"], "9007199254740993");
+    if result["count"] == 2000 && result["dimensions"] == 128 {
+        assert!(result["recallAt10"].as_f64().unwrap() >= 0.8, "{result}");
+    }
+    assert_eq!(host.wasmModuleReads.load(Ordering::Relaxed), 1);
+    engine.destroy();
 }

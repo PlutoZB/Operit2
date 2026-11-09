@@ -17,6 +17,10 @@ struct RecordingStorageHost {
 }
 
 impl RuntimeStorageHost for RecordingStorageHost {
+    fn openTransactionDatabase(&self, path: &str) -> HostResult<Box<dyn operit_host_api::RuntimeSqliteConnection>> {
+        self.inner.openTransactionDatabase(path)
+    }
+
     /// Delegates durability to the real storage host without rewriting the file.
     fn flushFile(&self, path: &str) -> operit_host_api::HostResult<()> {
         self.inner.flushFile(path)
@@ -42,13 +46,21 @@ impl RuntimeStorageHost for RecordingStorageHost {
         self.inner.readBytesRange(path, offset, length)
     }
 
-    /// Records and atomically publishes one complete preference commit through the real host.
+    /// Counts business commits; removing a completed file/SQL intent preserves the same business data.
     fn writeBytesAtomically(&self, path: &str, content: &[u8]) -> HostResult<()> {
         if path == OperitPaths::USER_PREFERENCES_PATH {
             if self.failPreferenceWrite.load(Ordering::SeqCst) {
                 return Err(HostError::new("injected theme preference write failure"));
             }
-            self.preferenceWrites.fetch_add(1, Ordering::SeqCst);
+            let business = |bytes: &[u8]| {
+                let mut value: Value = serde_json::from_slice(bytes).unwrap();
+                value.as_object_mut().unwrap().remove("__operit_transaction_commit");
+                value
+            };
+            let previous = self.inner.exists(path)?.then(|| self.inner.readBytes(path)).transpose()?;
+            if previous.as_deref().map(business).as_ref() != Some(&business(content)) {
+                self.preferenceWrites.fetch_add(1, Ordering::SeqCst);
+            }
         }
         self.inner.writeBytesAtomically(path, content)
     }
@@ -141,7 +153,7 @@ fn complete_snapshot_round_trips_all_ordinary_keys() {
         "untouched".to_string(),
     );
     let value = snapshot();
-    assert_eq!(value.len(), 78);
+    assert_eq!(value.len(), 77);
     validateThemePreferenceSnapshot(&value).unwrap();
     writeThemePreferenceSnapshot(&mut preferences, &value).unwrap();
     assertThemePreferenceSnapshot(&preferences, &value).unwrap();
@@ -192,7 +204,8 @@ fn invalid_types_enums_and_ranges_are_rejected() {
         ("backgroundImageUri", json!({})),
         ("themeMode", json!("unknown")),
         ("backgroundMediaType", json!("audio")),
-        ("chatStyle", json!("unknown")),
+        ("userChatStyle", json!("unknown")),
+        ("aiChatStyle", json!("unknown")),
         ("inputStyle", json!("unknown")),
         ("bubbleAiImageRenderMode", json!("unknown")),
         ("avatarShape", json!("unknown")),
@@ -258,7 +271,7 @@ fn initial_catalog_initializes_only_schema_metadata() {
         values.get(&stringPreferencesKey(
             operit_store::PreferencesDataStore::PREFERENCES_SCHEMA_VERSION_KEY_NAME
         )),
-        Some(&json!(4))
+        Some(&json!(5))
     );
 }
 
@@ -845,7 +858,7 @@ fn user_schema_one_migration_preserves_declared_native_types() {
     })).unwrap()).unwrap();
     let preferences = fixture.preferences();
     let values = preferences.data().unwrap();
-    assert_eq!(preferences.schemaVersion().unwrap(), 4);
+    assert_eq!(preferences.schemaVersion().unwrap(), 5);
     assert_eq!(
         values.get(&stringPreferencesKey("font_scale")),
         Some(&json!(1.25))
@@ -890,7 +903,7 @@ fn api_schema_one_migration_preserves_declared_native_types() {
     })).unwrap()).unwrap();
     let store = super::super::ApiPreferences::ApiPreferences::store(fixture.host.clone());
     let values = store.data().unwrap();
-    assert_eq!(store.schemaVersion().unwrap(), 2);
+    assert_eq!(store.schemaVersion().unwrap(), 3);
     assert_eq!(
         values.get(&stringPreferencesKey("enable_tools")),
         Some(&json!(false))
@@ -1054,7 +1067,7 @@ fn user_schema_two_migration_preserves_records_and_active_appearance() {
     let writes = fixture.writes();
     let entries = fixture.preferences().data().unwrap();
     assert_eq!(fixture.writes(), writes + 1);
-    assert_eq!(entries.get(&stringPreferencesKey("__operit_preferences_schema_version")), Some(&json!(4)));
+    assert_eq!(entries.get(&stringPreferencesKey("__operit_preferences_schema_version")), Some(&json!(5)));
     let migratedBytes = fixture.bytes();
     let manager = fixture.manager();
     assert_eq!(manager.list().unwrap(), vec![first.clone(), second.clone()]);
@@ -1064,6 +1077,208 @@ fn user_schema_two_migration_preserves_records_and_active_appearance() {
     assert!(!entries.contains(&stringPreferencesKey("theme_configs")));
     assert_eq!(entries.get(&stringPreferencesKey(&format!("theme_config_{}", first.id))), Some(&json!(first)));
     assert_eq!(entries.get(&stringPreferencesKey(&format!("theme_config_{}", second.id))), Some(&json!(second)));
+}
+
+/// Splits released chat styles in both active preferences and saved themes without replacing explicit role values.
+#[test]
+fn user_schema_four_migration_preserves_chat_styles_and_saved_themes() {
+    for style in ["cursor", "bubble"] {
+        for (user, ai) in [
+            (None, None),
+            (Some("cursor"), None),
+            (None, Some("bubble")),
+            (Some("bubble"), Some("cursor")),
+        ] {
+            let fixture = StoreFixture::new();
+            let mut old_snapshot = changedSnapshot("chatStyle", json!(style));
+            if let Some(user) = user {
+                old_snapshot.insert("userChatStyle".into(), json!(user));
+            }
+            if let Some(ai) = ai {
+                old_snapshot.insert("aiChatStyle".into(), json!(ai));
+            }
+            let mut expected = ThemeConfig {
+                id: "released-chat-style".into(),
+                name: "Saved appearance".into(),
+                snapshot: old_snapshot,
+                createdAt: 10,
+                updatedAt: 20,
+            };
+            let record_key = stringPreferencesKey("theme_config_released-chat-style");
+            let mut saved = Preferences::default();
+            writeThemePreferenceSnapshot(&mut saved, &expected.snapshot).unwrap();
+            saved.set(
+                &stringPreferencesKey("__operit_preferences_schema_version"),
+                4,
+            );
+            saved.set(&record_key, json!(expected));
+            saved.set(
+                &stringPreferencesKey("active_theme_config_id"),
+                expected.id.clone(),
+            );
+            saved.set(&stringPreferencesKey("unrelated"), json!({"keep": true}));
+            fixture
+                .host
+                .writeBytes(
+                    OperitPaths::USER_PREFERENCES_PATH,
+                    &serde_json::to_vec(&saved).unwrap(),
+                )
+                .unwrap();
+            let writes = fixture.writes();
+
+            let values = fixture.preferences().data().unwrap();
+            assert_eq!(fixture.preferences().schemaVersion().unwrap(), 5);
+            assert_eq!(
+                values.get(&stringPreferencesKey("user_chat_style")),
+                Some(&json!(user.unwrap_or(style)))
+            );
+            assert_eq!(
+                values.get(&stringPreferencesKey("ai_chat_style")),
+                Some(&json!(ai.unwrap_or(style)))
+            );
+            assert_eq!(
+                values.get(&stringPreferencesKey("unrelated")),
+                Some(&json!({"keep": true}))
+            );
+            expected
+                .snapshot
+                .insert("userChatStyle".into(), json!(user.unwrap_or(style)));
+            expected
+                .snapshot
+                .insert("aiChatStyle".into(), json!(ai.unwrap_or(style)));
+            assert_eq!(values.get(&record_key), Some(&json!(expected)));
+            assert_eq!(
+                fixture.manager().getActive().unwrap(),
+                Some(expected.clone())
+            );
+            fixture.manager().apply(expected.id.clone()).unwrap();
+            assert_eq!(fixture.manager().getActive().unwrap(), Some(expected));
+            assert_eq!(fixture.writes(), writes + 1);
+            let committed = fixture.bytes();
+            fixture.preferences().data().unwrap();
+            assert_eq!(fixture.bytes(), committed);
+            assert_eq!(fixture.writes(), writes + 1);
+        }
+    }
+}
+
+/// Leaves unset role fields unset when no released style exists.
+#[test]
+fn user_schema_four_migration_does_not_invent_chat_style_preferences() {
+    let fixture = StoreFixture::new();
+    fixture
+        .host
+        .writeBytes(
+            OperitPaths::USER_PREFERENCES_PATH,
+            &serde_json::to_vec(&json!({
+                "__operit_preferences_schema_version": 4,
+                "user_chat_style": "bubble"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let values = fixture.preferences().data().unwrap();
+    assert_eq!(fixture.preferences().schemaVersion().unwrap(), 5);
+    assert_eq!(
+        values.get(&stringPreferencesKey("user_chat_style")),
+        Some(&json!("bubble"))
+    );
+    assert!(!values.contains(&stringPreferencesKey("ai_chat_style")));
+}
+
+/// Rejects an invalid saved style without committing any part of the version upgrade.
+#[test]
+fn user_schema_four_migration_is_atomic_when_saved_theme_is_invalid() {
+    let fixture = StoreFixture::new();
+    let invalid = ThemeConfig {
+        id: "invalid-chat-style".into(),
+        name: "Invalid".into(),
+        snapshot: changedSnapshot("chatStyle", json!("unknown")),
+        createdAt: 10,
+        updatedAt: 20,
+    };
+    fixture
+        .host
+        .writeBytes(
+            OperitPaths::USER_PREFERENCES_PATH,
+            &serde_json::to_vec(&json!({
+                "__operit_preferences_schema_version": 4,
+                "chat_style": "bubble",
+                "theme_config_invalid-chat-style": invalid
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let original = fixture.bytes();
+    let writes = fixture.writes();
+    assert!(fixture.preferences().data().is_err());
+    assert_eq!(fixture.bytes(), original);
+    assert_eq!(fixture.writes(), writes);
+}
+
+/// Migrates synchronized state without changing its business revision or coverage.
+#[test]
+fn user_schema_four_sync_snapshot_migrates_chat_styles_and_saved_themes() {
+    use operit_store::SyncOperationStore::{SyncClock, SyncOperationStore};
+    use operit_util::RuntimeStorageLayout::RUNTIME_SYNC_DIR_PATH;
+
+    let fixture = StoreFixture::new();
+    let old = ThemeConfig {
+        id: "synced-chat-style".into(),
+        name: "Synced appearance".into(),
+        snapshot: changedSnapshot("chatStyle", json!("bubble")),
+        createdAt: 10,
+        updatedAt: 20,
+    };
+    let legacy = PreferencesDataStore::newWithStorage(
+        fixture.host.clone(),
+        OperitPaths::USER_PREFERENCES_PATH,
+    )
+    .withSchema(4, |_, _| Ok(()));
+    legacy
+        .edit(|values| {
+            values.set(&stringPreferencesKey("chat_style"), "bubble".to_string());
+            values.set(
+                &stringPreferencesKey("user_chat_style"),
+                "cursor".to_string(),
+            );
+            values.set(
+                &stringPreferencesKey("theme_config_synced-chat-style"),
+                json!(old),
+            );
+        })
+        .unwrap();
+    let journal = SyncOperationStore::new(fixture.host.clone(), RUNTIME_SYNC_DIR_PATH);
+    let history = journal
+        .operationsSince(&SyncClock::empty(), &["preferences".into()], 512)
+        .unwrap();
+    let before = legacy.syncSnapshot().unwrap();
+    let preferences = fixture.preferences();
+    let migrated = preferences.syncSnapshot().unwrap();
+    assert_eq!(migrated.data.owner.format, 5);
+    assert_eq!(migrated.data.revision, before.data.revision);
+    assert_eq!(migrated.covered, before.covered);
+    let values = preferences.data().unwrap();
+    assert_eq!(
+        values.get(&stringPreferencesKey("user_chat_style")),
+        Some(&json!("cursor"))
+    );
+    assert_eq!(
+        values.get(&stringPreferencesKey("ai_chat_style")),
+        Some(&json!("bubble"))
+    );
+    let config: ThemeConfig = values
+        .getTyped(&stringPreferencesKey("theme_config_synced-chat-style"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(config.snapshot["userChatStyle"], json!("bubble"));
+    assert_eq!(config.snapshot["aiChatStyle"], json!("bubble"));
+    assert_eq!(
+        journal
+            .operationsSince(&SyncClock::empty(), &["preferences".into()], 512)
+            .unwrap(),
+        history
+    );
 }
 
 /// Keeps the schema-two file intact when catalog migration rejects conflicting or invalid records.
@@ -1138,7 +1353,7 @@ fn synchronized_themes_preserve_independent_identity_records() {
     let history = targetJournal.preferenceHistory().unwrap();
     operit_store::PreferenceMerge::applyOperations(
         target.host.clone(),
-        &operit_store::PreferenceMerge::PreferenceMergeSchema::default(),
+        &crate::data::preferences::PreferenceSpaceMerge::schema(),
         &history,
         &operations,
         |_, _| true,
@@ -1146,8 +1361,17 @@ fn synchronized_themes_preserve_independent_identity_records() {
     .unwrap();
     let manager = target.manager();
     assert_eq!(manager.list().unwrap().len(), 2);
-    assert_eq!(manager.get(first.id.clone()).unwrap(), first);
-    assert_eq!(manager.get(second.id.clone()).unwrap(), second);
+    let mut mergedFirst = manager.get(first.id.clone()).unwrap();
+    let mut mergedSecond = manager.get(second.id.clone()).unwrap();
+    // The shared catalog resolves duplicate display names while preserving
+    // both identities, snapshots, and timestamps.
+    let mut names = vec![mergedFirst.name.clone(), mergedSecond.name.clone()];
+    names.sort();
+    assert_eq!(names, vec!["Shared name", "Shared name（1）"]);
+    mergedFirst.name = first.name.clone();
+    mergedSecond.name = second.name.clone();
+    assert_eq!(mergedFirst, first);
+    assert_eq!(mergedSecond, second);
 }
 
 /// Repairs installed schema-one, schema-two and schema-three color representations before any active-theme validation.
@@ -1213,7 +1437,7 @@ fn legacy_color_migration_covers_existing_user_schema_versions() {
             )
             .unwrap();
         let entries = fixture.preferences().data().unwrap();
-        assert_eq!(fixture.preferences().schemaVersion().unwrap(), 4);
+        assert_eq!(fixture.preferences().schemaVersion().unwrap(), 5);
         let mut expected = old;
         expected.snapshot.remove("retiredHistoricalSetting");
         for field in snapshotFields().filter(|field| matches!(field.kind, FieldKind::OptionalColor))
@@ -1278,8 +1502,11 @@ fn legacy_color_conversion_checks_exact_bit_width() {
 fn october_eighth_preferences_migrate_all_released_field_types() {
     let released: Value =
         serde_json::from_str(include_str!("theme_preferences_oct08_fixture.json")).unwrap();
-    let expected: BTreeMap<String, Value> =
+    let mut expected: BTreeMap<String, Value> =
         serde_json::from_value(released["snapshot"].clone()).unwrap();
+    for name in ["userChatStyle", "aiChatStyle"] {
+        expected.insert(name.to_string(), expected["chatStyle"].clone());
+    }
     for version in [0, 1, 2, 3] {
         let fixture = StoreFixture::new();
         let mut saved = released["preferences"].clone();
@@ -1296,7 +1523,7 @@ fn october_eighth_preferences_migrate_all_released_field_types() {
         let initial_writes = fixture.writes();
         let preferences = fixture.preferences();
         let migrated = preferences.data().unwrap();
-        assert_eq!(preferences.schemaVersion().unwrap(), 4);
+        assert_eq!(preferences.schemaVersion().unwrap(), 5);
         assert_eq!(
             readThemePreferenceSnapshot(&migrated, &snapshot()).unwrap(),
             expected
@@ -1306,5 +1533,255 @@ fn october_eighth_preferences_migrate_all_released_field_types() {
         preferences.data().unwrap();
         assert_eq!(fixture.bytes(), committed);
         assert_eq!(fixture.writes(), initial_writes + 1);
+    }
+}
+
+/// The mode shortcut updates only the selected theme, and switching restores each theme's mode.
+#[test]
+fn mode_shortcut_edits_only_the_selected_theme() {
+    let fixture = StoreFixture::new();
+    let manager = fixture.manager();
+    let light = manager
+        .create("Light".into(), changedSnapshot("themeMode", json!("light")))
+        .unwrap();
+    let dark = manager
+        .create("Dark".into(), changedSnapshot("themeMode", json!("dark")))
+        .unwrap();
+    manager.apply(light.id.clone()).unwrap();
+    let edited = manager
+        .patchAppearance(
+            snapshot(),
+            BTreeMap::from([("theme_mode".into(), json!("system"))]),
+            vec![],
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(edited.id, light.id);
+    assert_eq!(edited.snapshot["themeMode"], json!("system"));
+    assert_eq!(manager.get(dark.id.clone()).unwrap(), dark);
+    manager.apply(dark.id.clone()).unwrap();
+    assert_eq!(
+        manager.getActive().unwrap().unwrap().snapshot["themeMode"],
+        json!("dark")
+    );
+    manager.apply(light.id).unwrap();
+    assert_eq!(
+        manager.getActive().unwrap().unwrap().snapshot["themeMode"],
+        json!("system")
+    );
+}
+
+/// Runs the versioned startup migration against the same real storage host as the owner.
+fn migrateAppearance(fixture: &StoreFixture) -> Result<(), PreferencesDataStoreError> {
+    super::super::ThemeAppearanceMigration::migrate(fixture.host.clone())
+}
+
+/// Startup saves the old appearance and its migration version together; reads never create themes.
+#[test]
+fn startup_appearance_migration_preserves_background_and_runs_once() {
+    let fixture = StoreFixture::new();
+    let preferences = fixture.preferences();
+    preferences
+        .edit(|values| {
+            values.set(&stringPreferencesKey("theme_mode"), "dark");
+            values.set(&stringPreferencesKey("use_background_image"), true);
+            values.set(
+                &stringPreferencesKey("background_image_uri"),
+                "theme-media/forest.png",
+            );
+            values.set(&stringPreferencesKey("background_image_opacity"), 0.8);
+            values.set(&stringPreferencesKey("app_language"), "zh-CN");
+            values.set(&stringPreferencesKey("unrelated_setting"), "keep");
+        })
+        .unwrap();
+    let writes = fixture.writes();
+    assert!(fixture.manager().list().unwrap().is_empty());
+    assert_eq!(fixture.writes(), writes);
+    migrateAppearance(&fixture).unwrap();
+    let manager = fixture.manager();
+    let active = manager.getActive().unwrap().unwrap();
+    assert_eq!(active.name, "默认主题");
+    assert_eq!(active.snapshot["themeMode"], json!("dark"));
+    assert_eq!(
+        active.snapshot["backgroundImageUri"],
+        json!("theme-media/forest.png")
+    );
+    assert_eq!(active.snapshot["backgroundImageOpacity"], json!(0.8));
+    assert_eq!(manager.list().unwrap(), vec![active.clone()]);
+    let values = preferences.data().unwrap();
+    assertThemePreferenceSnapshot(&values, &active.snapshot).unwrap();
+    assert_eq!(
+        values.get(&stringPreferencesKey("theme_appearance_migration_version")),
+        Some(&json!(1))
+    );
+    assert_eq!(
+        values.get(&stringPreferencesKey("unrelated_setting")),
+        Some(&json!("keep"))
+    );
+    assert_eq!(fixture.writes(), writes + 1);
+    let bytes = fixture.bytes();
+    for _ in 0..2 {
+        migrateAppearance(&fixture).unwrap();
+    }
+    assert_eq!(fixture.manager().getActive().unwrap(), Some(active));
+    assert_eq!(fixture.bytes(), bytes);
+    assert_eq!(fixture.writes(), writes + 1);
+}
+
+/// New installs get an ordinary theme during startup, and concurrent starts cannot duplicate it.
+#[test]
+fn startup_appearance_migration_initializes_fresh_store_once() {
+    let fixture = StoreFixture::new();
+    fixture.preferences().data().unwrap();
+    let writes = fixture.writes();
+    let mut threads = vec![];
+    for _ in 0..4 {
+        let host = fixture.host.clone();
+        threads.push(std::thread::spawn(move || {
+            super::super::ThemeAppearanceMigration::migrate(host).unwrap()
+        }));
+    }
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    let active = fixture.manager().getActive().unwrap().unwrap();
+    assert_eq!(active.snapshot["themeMode"], json!("system"));
+    assert_eq!(fixture.manager().list().unwrap(), vec![active]);
+    assert_eq!(fixture.writes(), writes + 1);
+}
+
+/// A selected theme's internal snapshot wins over an obsolete global mode override.
+#[test]
+fn startup_appearance_migration_preserves_selected_theme_and_restores_its_mode() {
+    let fixture = StoreFixture::new();
+    let manager = fixture.manager();
+    let saved = manager
+        .create("Night".into(), changedSnapshot("themeMode", json!("dark")))
+        .unwrap();
+    manager.apply(saved.id.clone()).unwrap();
+    fixture
+        .preferences()
+        .edit(|values| {
+            values.set(&stringPreferencesKey("theme_mode"), "light");
+            values.set(&stringPreferencesKey("use_system_theme"), true);
+        })
+        .unwrap();
+    migrateAppearance(&fixture).unwrap();
+    assert_eq!(manager.getActive().unwrap(), Some(saved.clone()));
+    assert_eq!(manager.list().unwrap(), vec![saved.clone()]);
+    let values = fixture.preferences().data().unwrap();
+    assertThemePreferenceSnapshot(&values, &saved.snapshot).unwrap();
+    assert!(!values.contains(&stringPreferencesKey("use_system_theme")));
+}
+
+/// Matching saved appearance is reused without creating a special or duplicate record.
+#[test]
+fn startup_appearance_migration_reuses_a_matching_saved_theme() {
+    let fixture = StoreFixture::new();
+    let manager = fixture.manager();
+    let named = manager
+        .create(
+            "My appearance".into(),
+            changedSnapshot("themeMode", json!("dark")),
+        )
+        .unwrap();
+    manager.useCustomAppearance(named.snapshot.clone()).unwrap();
+    migrateAppearance(&fixture).unwrap();
+    assert_eq!(manager.getActive().unwrap(), Some(named.clone()));
+    assert_eq!(manager.list().unwrap(), vec![named]);
+}
+
+/// Failed writes leave the old preferences and version intact; a later startup retries the migration.
+#[test]
+fn startup_appearance_migration_is_atomic_and_retryable() {
+    let fixture = StoreFixture::new();
+    fixture
+        .preferences()
+        .edit(|values| {
+            values.set(&stringPreferencesKey("theme_mode"), "light");
+        })
+        .unwrap();
+    let before = fixture.bytes();
+    fixture
+        .host
+        .failPreferenceWrite
+        .store(true, Ordering::SeqCst);
+    assert!(migrateAppearance(&fixture).is_err());
+    assert_eq!(fixture.bytes(), before);
+    fixture
+        .host
+        .failPreferenceWrite
+        .store(false, Ordering::SeqCst);
+    migrateAppearance(&fixture).unwrap();
+    assert_eq!(
+        fixture.manager().getActive().unwrap().unwrap().snapshot["themeMode"],
+        json!("light")
+    );
+}
+
+/// A completed migration is never repurposed as an ensure-on-read or startup repair.
+#[test]
+fn startup_appearance_migration_does_not_repair_after_its_version_is_committed() {
+    let fixture = StoreFixture::new();
+    migrateAppearance(&fixture).unwrap();
+    let manager = fixture.manager();
+    let active = manager.getActive().unwrap().unwrap();
+    manager.useCustomAppearance(snapshot()).unwrap();
+    manager.delete(active.id).unwrap();
+    let before = fixture.bytes();
+    let writes = fixture.writes();
+    migrateAppearance(&fixture).unwrap();
+    assert_eq!(fixture.bytes(), before);
+    assert_eq!(fixture.writes(), writes);
+    assert!(manager.list().unwrap().is_empty());
+    assert_eq!(manager.getActive().unwrap(), None);
+}
+
+/// The version, new record, selected identity and effective preferences travel in the same sync transaction.
+#[test]
+fn startup_appearance_migration_synchronizes_without_rewriting_old_history() {
+    use operit_store::SyncOperationStore::{SyncClock, SyncOperationStore};
+    use operit_util::RuntimeStorageLayout::RUNTIME_SYNC_DIR_PATH;
+    let source = StoreFixture::new();
+    source
+        .preferences()
+        .edit(|values| {
+            values.set(&stringPreferencesKey("theme_mode"), "dark");
+            values.set(&stringPreferencesKey("use_background_image"), true);
+            values.set(
+                &stringPreferencesKey("background_image_uri"),
+                "theme-media/forest.png",
+            );
+        })
+        .unwrap();
+    let journal = SyncOperationStore::new(source.host.clone(), RUNTIME_SYNC_DIR_PATH);
+    let old = journal
+        .operationsSince(&SyncClock::empty(), &["preferences".into()], 512)
+        .unwrap();
+    migrateAppearance(&source).unwrap();
+    let operations = journal
+        .operationsSince(&SyncClock::empty(), &["preferences".into()], 512)
+        .unwrap();
+    assert_eq!(operations.len(), old.len() + 1);
+    assert_eq!(&operations[..old.len()], old.as_slice());
+    let active = source.manager().getActive().unwrap().unwrap();
+    let target = StoreFixture::new();
+    target.preferences().data().unwrap();
+    for _ in 0..2 {
+        let history = SyncOperationStore::new(target.host.clone(), RUNTIME_SYNC_DIR_PATH)
+            .preferenceHistory()
+            .unwrap();
+        operit_store::PreferenceMerge::applyOperations(
+            target.host.clone(),
+            &super::super::PreferenceSpaceMerge::schema(),
+            &history,
+            &operations,
+            |_, _| true,
+        )
+        .unwrap();
+        assert_eq!(target.manager().getActive().unwrap(), Some(active.clone()));
+        let before = target.bytes();
+        migrateAppearance(&target).unwrap();
+        assert_eq!(target.bytes(), before);
     }
 }

@@ -10,6 +10,8 @@ list(APPEND FLUTTER_PLUGIN_LIST
   desktop_widgets_windows
   dynamic_color
   file_selector_windows
+  floating_windows
+  fvp
   geolocator_windows
   operit_keep_alive
   printing

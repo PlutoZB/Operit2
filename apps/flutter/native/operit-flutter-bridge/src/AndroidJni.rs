@@ -11,6 +11,32 @@ use std::sync::Arc;
 #[path = "AndroidJniTaskScheduler.rs"]
 mod task_scheduler;
 
+/// Runs process primitives in the privileged service without creating a Core runtime.
+#[no_mangle]
+pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_privilegedPtyOperation(
+    mut env: JNIEnv,
+    _class: JClass,
+    request: JString,
+) -> jstring {
+    let response = match env.get_string(&request) {
+        Ok(request) => {
+            operit_host_android_native::androidPrivilegedPtyOperation(&String::from(request))
+        }
+        Err(error) => Err(operit_host_api::HostError::new(error.to_string())),
+    };
+    let text = match response {
+        Ok(text) => text,
+        Err(error) => serde_json::json!({"error": error.to_string()}).to_string(),
+    };
+    match env.new_string(text) {
+        Ok(value) => value.into_raw(),
+        Err(error) => {
+            let _ = env.throw_new("java/lang/IllegalStateException", error.to_string());
+            std::ptr::null_mut()
+        }
+    }
+}
+
 /// Accepts the borrowed pipe descriptors delivered by the Android Binder endpoint.
 #[no_mangle]
 pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_acceptPluginSdkPipes(
@@ -235,6 +261,52 @@ pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_connectCoreFfi
     let result = new_java_string(env, CStr::from_ptr(descriptor).to_str().expect("FFI JSON"));
     operit_flutter_bridge_free_string(descriptor);
     result
+}
+
+/// Creates an App-local FFI client for the independently running module Core.
+#[no_mangle]
+pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_connectModuleCoreFfi(
+    mut env: JNIEnv,
+    _class: JClass,
+    endpoint: JString,
+) -> jstring {
+    let result = env
+        .get_string(&endpoint)
+        .map(String::from)
+        .map_err(|e| e.to_string())
+        .and_then(|endpoint| crate::LocalRuntimeTransport::connect_ffi(&endpoint));
+    match result {
+        Ok(descriptor) => {
+            let text = CStr::from_ptr(descriptor)
+                .to_str()
+                .expect("Module FFI JSON");
+            let result = env.new_string(text).expect("Module FFI string").into_raw();
+            operit_flutter_bridge_free_string(descriptor);
+            result
+        }
+        Err(error) => {
+            let _ = env.throw_new("java/lang/IllegalStateException", error);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Writes client bootstrap metadata through the authenticated module connection.
+#[no_mangle]
+pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_writeModuleBootstrap(
+    mut env: JNIEnv,
+    _class: JClass,
+    endpoint: JString,
+    content: JString,
+) {
+    let result = (|| -> Result<(), String> {
+        let endpoint: String = env.get_string(&endpoint).map_err(|e| e.to_string())?.into();
+        let content: String = env.get_string(&content).map_err(|e| e.to_string())?.into();
+        crate::LocalRuntimeTransport::write_bootstrap(&endpoint, &content)
+    })();
+    if let Err(error) = result {
+        let _ = env.throw_new("java/lang/IllegalStateException", error);
+    }
 }
 
 #[no_mangle]

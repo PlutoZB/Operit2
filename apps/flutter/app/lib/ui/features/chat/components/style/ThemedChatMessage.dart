@@ -31,7 +31,12 @@ Widget buildThemedChatMessage({
   final presentation = readChatResponsePresentation(message);
   if (presentation != null) {
     final structural = message.parts
-        .where((part) => part.kind != core_proxy.MessagePartKind.markdown)
+        .where(
+          (part) =>
+              part.kind != core_proxy.MessagePartKind.markdown &&
+              (part.kind != core_proxy.MessagePartKind.thinking ||
+                  snapshot.showThinkingProcess),
+        )
         .toList(growable: false);
     final groups = <({String key, List<core_proxy.MessagePart> parts})>[
       if (structural.isNotEmpty) (key: 'response-structure', parts: structural),
@@ -66,7 +71,12 @@ Widget buildThemedChatMessage({
     );
   }
   final identityAvatarUri = readChatMessageIdentity(message)?.avatarUri;
-  if (snapshot.chatStyle != UserPreferencesManager.CHAT_STYLE_BUBBLE) {
+  // User messages pick their own style; AI, summary and system messages share
+  // the AI style.
+  final chatStyle = message.sender == 'user'
+      ? snapshot.userChatStyle
+      : snapshot.aiChatStyle;
+  if (chatStyle != UserPreferencesManager.CHAT_STYLE_BUBBLE) {
     return CursorStyleChatMessage(
       key: key,
       message: message,

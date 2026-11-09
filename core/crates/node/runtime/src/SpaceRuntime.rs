@@ -31,7 +31,7 @@ impl SpaceStreamPool {
         let mut sources = self
             .sources
             .lock()
-            .expect("Space stream pool mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !sources.contains_key(&attachment.streamId) {
             sources.insert(attachment.streamId, attachment.source);
         }
@@ -173,7 +173,7 @@ impl SpaceRuntime {
             .streamPool
             .sources
             .lock()
-            .expect("Space stream pool mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&streamId)
             .cloned()
             .ok_or_else(|| CoreLinkError::watchNotFound(&request.registryKey()))?;
@@ -214,7 +214,7 @@ impl operit_link::CoreLinkSharedClient for SpaceRuntime {
         let route = crate::generated_space_push_route(&request)
             .ok_or_else(|| CoreLinkError::methodNotFound(&format!("{}::{}", request.target, request.methodName)))?;
         if route.methodName != "pushToolPkgRoute" {
-            return Err(CoreLinkError::new("SPACE_PUSH_NOT_REGISTERED", "Space Push route is not registered"));
+            return crate::generated_space_push_on_chat_core(self.chatRuntimeHolder.clone(), request);
         }
         let args = operit_tools::tools::packTool::ToolPkgRouteRuntime::decode(request.args)?;
         operit_tools::tools::packTool::ToolPkgRouteRuntime::requireSpacePackage(&args.package_name).map_err(CoreLinkError::internal)?;

@@ -9,8 +9,11 @@ use std::sync::Mutex;
 struct MemoryStorage {
     files: Mutex<BTreeMap<String, Vec<u8>>>,
     fail_write: Mutex<Option<String>>,
+    modified: Mutex<BTreeMap<String, i64>>,
+    journal: crate::transaction_test_host::TransactionJournalHost,
 }
 impl RuntimeStorageHost for MemoryStorage {
+    fn openTransactionDatabase(&self,path: &str) -> HostResult<Box<dyn operit_host_api::RuntimeSqliteConnection>> { self.journal.open(path) }
     /// Confirms synchronous in-memory publication without copying or rewriting bytes.
     fn flushFile(&self, path: &str) -> operit_host_api::HostResult<()> {
         if !self.exists(path)? {
@@ -43,6 +46,10 @@ impl RuntimeStorageHost for MemoryStorage {
         self.writeBytes(path, content)
     }
 
+    /// Reads the mock file's tracked modification time.
+    fn modifiedAt(&self, path: &str) -> HostResult<i64> { Ok(self.modified.lock().unwrap()[path]) }
+    /// Restores the mock file's modification time.
+    fn setModifiedAt(&self, path: &str, time: i64) -> HostResult<()> { self.modified.lock().unwrap().insert(path.into(), time); Ok(()) }
     fn writeBytes(&self, path: &str, bytes: &[u8]) -> HostResult<()> {
         let mut failure = self.fail_write.lock().unwrap();
         if failure.as_deref() == Some(path) {
@@ -50,6 +57,7 @@ impl RuntimeStorageHost for MemoryStorage {
             return Err(HostError::new("injected write failure"));
         }
         self.files.lock().unwrap().insert(path.into(), bytes.into());
+        *self.modified.lock().unwrap().entry(path.into()).or_default() += 1;
         Ok(())
     }
     fn appendBytes(&self, path: &str, bytes: &[u8]) -> HostResult<()> {
@@ -59,6 +67,7 @@ impl RuntimeStorageHost for MemoryStorage {
             .entry(path.into())
             .or_default()
             .extend_from_slice(bytes);
+        *self.modified.lock().unwrap().entry(path.into()).or_default() += 1;
         Ok(())
     }
     fn delete(&self, path: &str, recursive: bool) -> HostResult<()> {

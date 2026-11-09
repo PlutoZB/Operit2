@@ -399,7 +399,8 @@ impl CharacterPluginWriter {
                 source,
                 json!({"complete":true,"cleanupPaths":data.cleanup_paths,"cleanupComplete":false,"themeTargets":theme_targets}),
             )?,
-        ])
+        ])?;
+        super::CharacterPluginLayout::prepareMetadata(self.storage.clone(),&format!("{}/meta.preferences.json",self.directory))
     }
 }
 
@@ -419,7 +420,9 @@ impl Drop for CharacterPluginWriter {
 fn legacyResourceStoragePath(source: &str) -> Result<String, String> {
     for (public, storage) in [
         ("/app/data/", "runtime/"),
+        ("/operitapp/data/", "runtime/"),
         ("/app/workspaces/", "workspaces/"),
+        ("/operitapp/workspaces/", "workspaces/"),
     ] {
         if let Some(relative) = source.strip_prefix(public) {
             return Ok(format!("{storage}{relative}"));
@@ -450,8 +453,8 @@ fn legacyResourceStoragePath(source: &str) -> Result<String, String> {
 /// Converts a verified storage identity into the public Files API path used by plugin records.
 pub(crate) fn publicResourcePath(path: &str) -> Result<String, String> {
     for (storage, public) in [
-        ("runtime/", "/app/data"),
-        ("workspaces/", "/app/workspaces"),
+        ("runtime/", "/operitapp/data"),
+        ("workspaces/", "/operitapp/workspaces"),
     ] {
         if let Some(relative) = path.strip_prefix(storage) {
             return operit_tools::files::PathMapper::PathMapper::joinVfsPath(public, relative);
@@ -1475,6 +1478,7 @@ fn cleanupLegacyCharacters(writer: &CharacterPluginWriter) -> Result<(), String>
     }
     let api_preferences =
         crate::data::preferences::ApiPreferences::ApiPreferences::store(writer.storage.clone());
+    api_preferences.data().map_err(|error| error.to_string())?;
     api_preferences
         .try_edit_result(
             |saved| -> Result<(), operit_store::PreferencesDataStore::PreferencesDataStoreError> {
@@ -1564,7 +1568,7 @@ fn cleanupLegacyCharacters(writer: &CharacterPluginWriter) -> Result<(), String>
             .delete(CHARACTER_CARDS_PREFERENCES_PATH, false)
             .map_err(|error| error.to_string())?;
     }
-    Ok(())
+    super::CharacterPluginLayout::prepare(writer.storage.clone())
 }
 
 /// Retains the exact source target and a complete independent theme for restartable adoption.

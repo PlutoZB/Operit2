@@ -1,11 +1,14 @@
 {
   "@@locale": "zh",
+  "chatPromoteToRoot": "提升为主对话",
   "workspaceUnsavedChangesTitle": "有未保存的修改",
   "workspaceUnsavedChangesMessage": "关闭此文件前，要保存你的修改吗？",
   "workspaceDiscardChanges": "放弃修改",
   "askOperitHint": "向 Operit 提问",
   "aiChat": "AI聊天",
   "fullscreenInput": "全屏输入",
+  "noticeExpand": "展开全文",
+  "noticeCollapse": "收起",
   "expandInput": "展开输入框",
   "collapseInput": "收起输入框",
   "settings": "设置",
@@ -38,6 +41,15 @@
   },
   "chatQueueAddMessage": "加入队列",
   "chatQueueAdded": "已加入发送队列",
+  "chatSendOptions": "选择发送方式",
+  "chatQueueAddMessageDescription": "当前回复结束后自动发送（默认）",
+  "chatGuideCurrentTurn": "引导当前对话",
+  "chatGuideCurrentTurnDescription": "不打断当前任务，在后续模型请求中生效",
+  "chatInterruptAndSend": "打断并发送",
+  "chatInterruptAndSendDescription": "停止当前回复，立即发送这条消息",
+  "chatGuidanceAccepted": "已添加引导，将在后续模型请求中生效",
+  "chatGuidanceTextOnly": "引导仅支持文本，请先移除附件和回复目标。",
+  "chatQueueWithdrawToEditor": "撤回到编辑框",
   "chatPleaseCreateNewChat": "请新建对话",
   "cancel": "取消",
   "send": "发送",
@@ -49,6 +61,13 @@
   "receivingToolResultAiResponse": "正在接收工具执行后的 AI 响应...",
   "summarizingMemories": "正在总结记忆...",
   "summaryGenerating": "正在生成总结...",
+  "summaryStageCore": "正在整理核心任务...",
+  "summaryStageConstraints": "正在整理用户需求与约束...",
+  "summaryStageFiles": "正在整理关键文件与代码...",
+  "summaryStageErrors": "正在整理错误与修复...",
+  "summaryStageInteraction": "正在整理互动与设定...",
+  "summaryStageNext": "正在整理下一步...",
+  "summaryStageFormatting": "正在调整总结格式...",
   "chatCompressingHistory": "正在压缩历史记录...",
   "executingPlan": "正在执行计划...",
   "executingTool": "正在执行工具: {toolName}",
@@ -90,6 +109,9 @@
     }
   },
   "close": "关闭",
+  "workspaceCloseOtherTabs": "关闭其他",
+  "workspaceCloseTabsToRight": "关闭右侧",
+  "workspaceCloseAllTabs": "关闭全部",
   "commonExpand": "展开",
   "commonCollapse": "收起",
   "create": "创建",
@@ -145,6 +167,15 @@
       }
     }
   },
+  "messageLocatorSearchMessages": "搜索消息",
+  "messageLocatorViewFavorites": "查看收藏",
+  "messageLocatorAll": "全部",
+  "messageLocatorFavorites": "收藏",
+  "messageLocatorNoFavorites": "还没有收藏的消息",
+  "messageLocatorLoadFailed": "暂时无法加载消息，请重试",
+  "messageLocatorFavoriteFailed": "收藏更新失败，请重试",
+  "messageLocatorAddFavorite": "收藏消息",
+  "messageLocatorRemoveFavorite": "取消收藏",
   "messageLocatorNoMatches": "没有匹配的消息",
   "messageSenderUser": "用户",
   "messageSenderSummary": "总结",
@@ -196,7 +227,7 @@
   "workspaceAddFolderDescription": "把另一个文件夹挂进当前工作区",
   "workspaceProjectTypeDialogTitle": "选择语言类型",
   "workspaceProjectTypeDialogDescription": "请选择要创建的默认工作区类型",
-  "workspaceUnbindTitle": "解除绑定",
+  "workspaceUnbindTitle": "从当前对话移除项目",
   "workspaceUnbindDescription": "解除当前会话的关联，保留工作区文件",
   "workspaceUnbindConfirmation": "确定解除当前会话与工作区的绑定吗？工作区和文件都会保留，不影响其他会话，之后可以重新绑定工作区。",
   "workspaceUnbindFailed": "解除绑定失败，请重试。",
@@ -262,7 +293,7 @@
       }
     }
   },
-  "desktopWidgetsCount": "桌面组件 {count}",
+  "desktopWidgetsCount": "桌面小部件 {count}",
   "@desktopWidgetsCount": {
     "placeholders": {
       "count": {
@@ -489,8 +520,6 @@
   "settingsModelNoModels": "暂无模型",
   "settingsModelProviderModelCount": "{count} 个模型",
   "settingsModelSetCurrentActive": "设为当前",
-  "settingsChatThinkingMode": "思考模式",
-  "settingsChatThinkingModeDescription": "让支持的模型输出更稳的推理过程。",
   "settingsChatStreamOutput": "流式输出",
   "settingsChatStreamOutputDescription": "回复生成时逐步显示内容。",
   "settingsModelProfilesSection": "模型档案",
@@ -714,6 +743,23 @@
       "error": {}
     }
   },
+  "localModelsAddModel": "添加模型",
+  "localModelsFilterDownloads": "下载任务",
+  "localModelsAllTypes": "全部类型",
+  "localModelsNoMatches": "没有符合条件的模型",
+  "localModelsResetFilters": "重置筛选",
+  "localModelsDetails": "模型详情",
+  "localModelsMoreActions": "更多操作",
+  "localModelsResultCount": "显示 {count} / {total} 个模型",
+  "@localModelsResultCount": {
+    "placeholders": {
+      "count": {"type": "int"},
+      "total": {"type": "int"}
+    }
+  },
+  "localModelsHubRepositoryTab": "仓库地址",
+  "localModelsDownloadFailed": "下载失败",
+  "localModelsDownloadPausedLabel": "已暂停",
   "localModelsCatalog": "模型目录",
   "localModelsCategorySpeechToText": "语音识别（STT）模型",
   "localModelsCategoryTextToSpeech": "语音合成（TTS）模型",
@@ -811,6 +857,36 @@
   "settingsModelAvailableSourceFetched": "已拉取",
   "settingsModelAvailableSourceHistory": "历史",
   "settingsModelAvailableEmptyFetched": "没有拉取到的模型。可选择「包含历史」查看目录中的模型 ID。",
+  "settingsModelUnrecognized": "未识别",
+  "settingsModelCatalogUpdatedAt": "能力和上下文信息来自 models.dev，{time} 更新",
+  "@settingsModelCatalogUpdatedAt": {
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsModelCatalogUpdateFailed": "模型信息下载失败：{error}",
+  "@settingsModelCatalogUpdateFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsModelCatalogUpdateFailedUsing": "模型信息更新失败，暂用 {time} 的信息：{error}",
+  "@settingsModelCatalogUpdateFailedUsing": {
+    "placeholders": {
+      "time": {
+        "type": "String"
+      },
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsModelCatalogNotDownloaded": "模型信息还没有下载",
+  "settingsModelCatalogRetry": "重试",
   "settingsModelCustomModel": "自定义模型",
   "settingsModelModelId": "模型 ID",
   "settingsModelDuplicateModelId": "该模型已添加到当前供应商。",
@@ -834,9 +910,7 @@
   "settingsModelContextLength": "上下文长度",
   "settingsModelMaxContextLength": "最大上下文长度",
   "settingsModelMaxContextLengthInvalid": "请输入大于 0 的最大上下文长度",
-  "settingsModelSummaryThreshold": "总结 Token 阈值",
-  "settingsModelSummaryByMessageCount": "按消息数总结",
-  "settingsModelSummaryMessageCount": "总结消息数阈值",
+  "settingsModelSummaryThreshold": "总结阈值",
   "settingsModelCustomHeaders": "自定义 Headers",
   "settingsModelCustomParameters": "自定义参数 JSON",
   "settingsModelToolCall": "工具调用",
@@ -849,18 +923,62 @@
   "settingsModelDirectVideoDescription": "支持视频能力的模型可直接接收视频。",
   "settingsModelGoogleSearch": "Google 搜索",
   "settingsModelGoogleSearchDescription": "启用供应商侧搜索能力。",
-  "settingsModelContext": "上下文窗口",
+  "settingsModelContext": "上下文",
   "settingsModelSummary": "自动总结",
   "settingsModelThinking": "思考",
-  "settingsModelThinkingOption": "思考档位",
-  "settingsModelThinkingRules": "思考规则 JSON",
+  "thinkingLevelLabel": "思考程度",
+  "thinkingAlwaysOn": "始终思考",
+  "thinkingChip": "思考",
+  "settingsModelThinkingSourceDeclared": "档位按你的描述",
+  "settingsModelThinkingSourceLocalRuntime": "本地运行：可以开关思考，模型本身不会思考时开关不起作用",
+  "settingsModelThinkingUnknown": "目录里没有这个模型的思考信息",
+  "settingsModelThinkingNotAdjustable": "当前接口不能调节这个模型的思考",
+  "settingsModelThinkingNotSupported": "这个模型不会思考",
+  "settingsModelThinkingCarried": "沿用你最近一次设置的档位",
+  "settingsModelThinkingDescribe": "手动描述",
+  "settingsModelThinkingUseCatalog": "改回目录描述",
+  "settingsModelThinkingDescribeTitle": "这个模型怎么思考",
+  "settingsModelThinkingKindNone": "不会思考",
+  "settingsModelThinkingKindAlways": "总是思考，不能调节",
+  "settingsModelThinkingKindSwitch": "只能开关",
+  "settingsModelThinkingKindLevels": "分档位",
+  "settingsModelThinkingKindBudget": "按 token 预算",
+  "settingsModelThinkingCanTurnOff": "可以关闭思考",
+  "settingsModelThinkingBudgetMin": "最少 token",
+  "settingsModelThinkingBudgetMax": "最多 token",
+  "settingsModelThinkingLevelsRequired": "至少选一个档位",
   "settingsModelMediaHistory": "媒体历史",
   "settingsModelCapabilities": "能力",
   "settingsModelBuiltinTools": "内置工具",
   "settingsModelBuiltinToolExclusive": "开启后会关闭外部工具调用",
-  "settingsModelConnectionTestSection": "连接测试",
   "settingsModelRunConnectionTest": "测试当前模型",
-  "settingsModelTestModel": "测试模型",
+  "settingsModelTestModel": "测试",
+  "settingsModelCapabilityToolCall": "工具调用",
+  "settingsModelCapabilityImage": "图片",
+  "settingsModelCapabilityAudio": "音频",
+  "settingsModelCapabilityVideo": "视频",
+  "settingsModelClaudeCache": "Claude 1 小时缓存",
+  "settingsModelClaudeCacheDescription": "为显式缓存断点设置 1 小时 TTL；关闭时使用默认 TTL。",
+  "settingsModelSummaryThresholdDescription": "上下文占用达到这个比例时自动总结，填 0 关闭。",
+  "settingsModelMoreActions": "更多操作",
+  "settingsModelRestoreDefaults": "恢复默认值",
+  "settingsModelDescribeThinking": "手动描述思考档位",
+  "settingsModelDeleteModel": "删除模型",
+  "settingsModelSaveFailed": "保存失败：{error}",
+  "settingsModelTestAll": "测试全部",
+  "settingsModelTestProgress": "测试中 {done}/{total}",
+  "settingsModelTestSummary": "{passed} 个通过，{failed} 个失败",
+  "settingsModelTestAllPassed": "{count} 个全部通过",
+  "settingsModelTestCouldNotRun": "测试没能运行",
+  "settingsModelCopyError": "复制错误信息",
+  "settingsModelSelect": "多选",
+  "settingsModelCheckAll": "全选",
+  "settingsModelCheckedCount": "已选 {count} 个",
+  "settingsModelDeleteModelsTitle": "删除 {count} 个模型？",
+  "settingsModelDeleteModelsMessage": "这些模型的设置会一起删除。",
+  "settingsModelDeleteModelsKept": "{count} 个正在被功能使用，会保留：{names}",
+  "settingsModelDeleteModelsBlocked": "所选模型正在被这些功能使用，请先更改功能模型分配：{functions}",
+  "settingsModelDeletedCount": "已删除 {count} 个模型",
   "settingsModelTestingConnection": "正在测试当前模型连接…",
   "settingsModelTestedModel": "测试模型",
   "settingsModelConnectionTestPassed": "全部通过",
@@ -1055,6 +1173,8 @@
   "settingsRuntimeCurrentSpace": "当前设备空间",
   "settingsRuntimeOverviewDescription": "在同一设备空间内，设备可以建立连接，共享数据和路由。",
   "settingsRuntimeRenameSpace": "重命名设备空间",
+  "settingsRuntimeResetTransactions": "重置事务",
+  "settingsRuntimeResetTransactionsDone": "已按本机当前内容重建同步事务",
   "settingsRuntimeLeaveSpace": "退出设备空间",
   "settingsRuntimeLeaveSpaceTitle": "退出当前设备空间？",
   "settingsRuntimeLeaveSpaceDescription": "这台设备会创建一个新的单设备空间。业务数据保留，已配对设备也不会被删除。",
@@ -1317,7 +1437,8 @@
   "settingsAppearanceClearUserAvatar": "清除用户头像",
   "settingsAppearanceClearAiAvatar": "清除 AI 头像",
   "settingsAppearanceChatDisplaySection": "聊天显示",
-  "settingsAppearanceMessageStyle": "消息样式",
+  "settingsAppearanceUserMessageStyle": "用户消息样式",
+  "settingsAppearanceAiMessageStyle": "AI 消息样式",
   "settingsAppearanceMessageStyleClean": "命令式",
   "settingsAppearanceMessageStyleCard": "气泡式",
   "settingsAppearanceMessageColors": "消息配色",
@@ -1467,7 +1588,7 @@
   "settingsDataInputTokens": "输入",
   "settingsDataOutputTokens": "输出",
   "settingsDataOpenDetailedStats": "查看详细统计",
-  "settingsDataOpenDetailedStatsDescription": "打开每日趋势、输入输出 Token 变化、使用热力图，以及按供应商、模型、功能模型分类的使用明细。",
+  "settingsDataOpenDetailedStatsDescription": "查看使用热力图，以及可按分钟缩放的各模型用量时间线。",
   "settingsDataRefreshTokenStats": "刷新统计",
   "settingsDataResetTokenStats": "重置统计",
   "settingsDataDetailedStatsTitle": "详细统计",
@@ -2031,14 +2152,13 @@
       }
     }
   },
-  "settingsPeerTransportHelp": "暴露方式（可多选）。HTTP 和 WebSocket 可共用端口；TCP 暂不能与它们共用端口。蓝牙需要平台支持。关闭发现并取消全部选择可停止监听。修改设置会中断现有连接；仅关闭发现不会关闭直接连接。",
+  "settingsPeerTransportHelp": "暴露方式（可多选）。HTTP、WebSocket 和 TCP 共用同一个监听端口，可自由组合。蓝牙需要平台支持。关闭发现并取消全部选择可停止监听。修改设置会中断现有连接；仅关闭发现不会关闭直接连接。",
   "settingsPeerBindAddress": "监听 IP 地址",
   "settingsPeerBindAddressHelp": "例如 0.0.0.0，允许局域网访问；也支持 IPv6 地址。",
   "settingsPeerBindPort": "监听端口",
   "settingsPeerBindPortHelp": "固定模式使用此端口监听。",
   "settingsPeerBindPortAutomaticHelp": "由系统分配可用端口；启动后显示实际端口。",
   "settingsPeerDiscoveryNeedsTransport": "开启允许被搜索前，请至少选择一种暴露方式。",
-  "settingsPeerPortConflict": "当前 TCP 不能与 HTTP/WebSocket 共用监听端口，请选择 TCP 或 HTTP/WebSocket。",
   "settingsPeerAddressRequired": "请输入监听 IP 地址。",
   "settingsPeerPortRequired": "请输入 1 到 65535 之间的端口。",
   "settingsPeerApplied": "监听设置已生效。",
@@ -2115,7 +2235,7 @@
   "deviceSpaceConnectDirectHint": "该设备已是本空间成员。与它配对成功即建立直连，无需重新加入空间；配对需要对方显示、由你输入六位确认码。",
   "deviceSpaceUpdateEndpoint": "更新直连地址",
   "deviceSpaceUpdateEndpointLabel": "直连地址",
-  "deviceSpaceUpdateEndpointHint": "例如 ws://192.168.1.20:37195/link",
+  "deviceSpaceUpdateEndpointHint": "例如 ws://主机:端口/link 或 主机:端口 —— 填对方当前的监听端口",
   "deviceSpaceUpdateEndpointSaved": "直连地址已更新",
   "deviceSpaceDirectLinkEstablished": "已建立直连：{device}",
   "@deviceSpaceDirectLinkEstablished": {
@@ -2130,6 +2250,8 @@
   "deviceSpaceConnectionSettings": "连接设置",
   "deviceSpaceViewRequest": "查看申请",
   "devicePickerNearby": "附近设备",
+  "devicePickerDiscoveryFailed": "附近设备发现失败：{error}",
+  "@devicePickerDiscoveryFailed": {"placeholders": {"error": {"type": "String"}}},
   "devicePickerEmpty": "暂未发现附近设备",
   "devicePickerHint": "请让两台设备连接同一网络，并在对方设备开启允许被搜索。",
   "devicePickerManual": "通过地址连接",
@@ -2153,8 +2275,8 @@
   "settingsAppearanceThemeConfigDelete": "删除当前未启用的主题配置",
   "settingsAppearanceThemeConfigName": "主题名称",
   "settingsAppearanceThemeConfigNameRequired": "请输入主题名称",
-  "settingsAppearanceThemeConfigCustomHint": "点击 + 创建和管理独立的主题配置。",
-  "settingsAppearanceThemeConfigEditingHint": "修改外观会自动保存到当前主题配置。",
+  "settingsAppearanceThemeConfigCustomHint": "创建主题保存你的外观。点击卡片切换，点击编辑调整细节。",
+  "settingsAppearanceThemeConfigEditingHint": "点击卡片切换主题；上方明暗切换仅修改当前主题。编辑后自动保存。",
   "settingsAppearanceThemeConfigFailed": "主题操作失败：{detail}",
   "@settingsAppearanceThemeConfigFailed": {
     "placeholders": {
@@ -2235,8 +2357,8 @@
   "localModelsLlmDescription": "下载 GGUF 模型使用 llama.cpp，或下载 MNN 模型包。安装后可在这里试运行，或设为聊天模型。",
   "localModelsInvalidSettings": "请检查线程数、上下文长度和批次大小。",
   "localModelsFilterAll": "全部模型",
-  "localModelsFilterInstalled": "仅已安装",
-  "localModelsSearchCatalog": "搜索名称或推理引擎",
+  "localModelsFilterInstalled": "已安装",
+  "localModelsSearchCatalog": "搜索模型名称、标签或推理引擎",
   "deviceSpaceSyncPeer": "空间设备",
   "deviceSpaceSyncActive": "正在与 {device} 同步",
   "@deviceSpaceSyncActive": {
@@ -2256,6 +2378,12 @@
   },
   "deviceSpaceSyncChecking": "正在检查数据差异",
   "deviceSpaceSyncRecords": "正在交换数据记录",
+  "deviceSpaceSyncRecordProgress": "{completed} / {total} 条 · {percent}%",
+  "@deviceSpaceSyncRecordProgress": {"placeholders": {"completed": {"type": "int"}, "total": {"type": "int"}, "percent": {"type": "int"}}},
+  "deviceSpaceSyncPendingCount": "待应用 {count} 条",
+  "@deviceSpaceSyncPendingCount": {"placeholders": {"count": {"type": "int"}}},
+  "deviceSpaceSyncCounting": "正在统计总量 · 已处理 {count} 条",
+  "@deviceSpaceSyncCounting": {"placeholders": {"count": {"type": "int"}}},
   "deviceSpaceSyncFiles": "正在传输并校验文件",
   "deviceSpaceSyncRetrying": "同步暂时中断，稍后自动重试",
   "deviceSpaceSyncPending": "部分数据尚未处理完成，稍后自动重试",
@@ -2287,5 +2415,123 @@
   "runtimeActivitySyncCompleted": "同步完成",
   "runtimeActivityWaiting": "等待重试",
   "runtimeActivityExpand": "查看后台任务",
-  "runtimeActivityLoadingPackages": "加载扩展"
+  "runtimeActivityLoadingPackages": "加载扩展",
+  "peerQrTitle": "二维码连接",
+  "peerQrScan": "扫码连接",
+  "peerQrShow": "出示连接码",
+  "peerQrShowHint": "让另一台设备扫描此码，连接到这台设备。",
+  "peerQrScanHint": "扫描另一台设备的 Operit 连接码。",
+  "peerQrTrustHint": "二维码有效期为 5 分钟，请仅分享给可信设备。对方确认加入后即可连接；本机有管理员审批权限时会自动批准加入。",
+  "peerQrConfirmJoin": "确认加入",
+  "peerQrConfirmJoinHint": "是否确认加入此设备的空间？确认后将直接连接并提交加入，无需输入配对码。",
+  "peerQrListenerRequired": "请先在连接设置中开启接收连接，并连接到可用的网络。",
+  "peerQrCopy": "复制连接信息",
+  "peerQrCopied": "已复制",
+  "peerQrImport": "从图片识别",
+  "peerQrPaste": "或粘贴连接信息",
+  "peerQrRead": "识别连接信息",
+  "peerQrWrongDevice": "此连接码属于其他设备，请扫描当前所选设备的连接码。",
+  "peerQrImageInvalid": "未能从图片中识别二维码。请选择清晰的二维码图片（不超过 16 MB）。",
+  "peerQrCameraUnavailable": "此设备暂时无法使用相机扫码，你可以导入二维码图片或粘贴连接信息。",
+  "peerQrCameraPermission": "需要相机权限才能扫码。请在系统设置中允许相机访问，也可导入图片。",
+  "peerQrDevice": "连接设备",
+  "peerQrScanAgain": "重新扫码",
+  "peerQrMethodsHint": "发现不到设备？也可以使用连接码。",
+  "toolParametersLabel": "参数",
+  "toolResultLabel": "执行结果",
+  "toolGroupThinkingCount": "{count} 次思考",
+  "toolGroupCallCount": "{count} 次调用",
+  "toolGroupSearchCount": "{count} 次搜索",
+  "toolEditedFileCount": "已编辑 {count} 个文件",
+  "toolViewChanges": "查看变更",
+  "toolViewFileDiff": "查看 {fileName} 的变更",
+  "@toolEditedFileCount": {"placeholders": {"count": {"type": "int"}}},
+  "@toolViewFileDiff": {"placeholders": {"fileName": {"type": "String"}}},
+  "toolGroupCompleted": "已完成",
+  "toolGroupExecuting": "正在执行",
+  "@toolGroupThinkingCount": {"placeholders": {"count": {"type": "int"}}},
+  "@toolGroupCallCount": {"placeholders": {"count": {"type": "int"}}},
+  "@toolGroupSearchCount": {"placeholders": {"count": {"type": "int"}}},
+  "settingsDataTimelineTitle": "模型使用时间线",
+  "settingsDataTimelineHint": "每个模型一条线。双指或滚轮缩放，拖动查看其他时段，点击查看具体用量。",
+  "settingsDataTimelineHours": "{hours} 小时",
+  "@settingsDataTimelineHours": {
+    "placeholders": {
+      "hours": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsDataTimelineBucket": "每 {minutes} 分钟汇总",
+  "@settingsDataTimelineBucket": {
+    "placeholders": {
+      "minutes": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsDataTimelineSecondsBucket": "每 {seconds} 秒汇总",
+  "@settingsDataTimelineSecondsBucket": {
+    "placeholders": {
+      "seconds": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsDataTimelineEarlier": "更早时段",
+  "settingsDataTimelineLater": "更晚时段",
+  "settingsDataTimelineRecent": "最近 3 小时",
+  "settingsDataTimelineRange": "可见时间范围",
+  "settingsDataTimelineSelectModel": "点选下方模型以查看用量",
+  "settingsDataTimelineSpend": "消费金额（估算）",
+  "settingsDataTimelineCacheRate": "缓存命中率",
+  "settingsDataTimelineSpendHint": "按当前模型价格估算，与上方共用时间范围。",
+  "settingsDataTimelineCacheRateHint": "每个时间段的缓存输入 ÷ 总输入；空闲时段不计命中率。",
+  "settingsDataTimelineNoPrices": "未找到对应的模型价格",
+  "settingsDataTimelinePricesFailed": "读取模型价格失败，请刷新重试。",
+  "settingsDataTimelineUnpriced": "{count} 次请求的费用未知",
+  "@settingsDataTimelineUnpriced": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsDataTimelineKnownSpend": "已知消费（估算）",
+  "settingsDataDetailedStatsRangeLastDay": "最近 24 小时",
+  "settingsDataTimelineAverageInput": "单次请求平均输入",
+  "settingsDataTimelineAverageInputHint": "每段总输入 ÷ 请求数，用来观察上下文是否越来越长；空闲时段留空。",
+  "settingsDataTimelineCacheSavings": "缓存节省金额（估算）",
+  "settingsDataTimelineCacheSavingsHint": "按当前价格，比较缓存输入与普通输入的费用差；按次计费节省为 0，负数表示缓存更贵。",
+  "settingsDataTimelineTokensPerRequest": "{tokens} tokens / 次",
+  "@settingsDataTimelineTokensPerRequest": {
+    "placeholders": {
+      "tokens": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsDataTimelineUnknownSavings": "{count} 次请求无法估算节省金额",
+  "@settingsDataTimelineUnknownSavings": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "contextStatsSummaryLoadFailed": "无法加载上下文信息",
+  "contextStatsDevicesLoadFailed": "无法加载设备信息",
+  "settingsAppearanceThemeLibrary": "我的主题",
+  "settingsAppearanceThemeLibraryHint": "选一个喜欢的外观，再把它调成你的样子。",
+  "settingsAppearanceThemeActive": "使用中",
+  "settingsAppearanceThemeApply": "使用此主题",
+  "settingsAppearanceThemeMore": "更多主题操作",
+  "settingsAppearanceThemeDuplicate": "创建副本",
+  "settingsAppearanceThemeUnboundHint": "保留当前外观，自由调整，不绑定已保存的主题。",
+  "settingsAppearanceThemeDeleteTitle": "删除主题",
+  "settingsAppearanceThemeDeleteConfirm": "确定删除「{name}」？删除后无法恢复。",
+  "settingsAppearancePreviewCollapse": "收起",
+  "settingsAppearancePreviewExpand": "展开",
+  "@settingsAppearanceThemeDeleteConfirm": {"placeholders": {"name": {"type": "String"}}},
+  "settingsAppearanceThemeNew": "新建主题"
 }

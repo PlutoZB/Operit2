@@ -30,6 +30,8 @@ conversation orchestration, store access, and tool integration.
 
 - `src/chat/llmprovider/AIService.rs`: provider request, result, stream, and
   service contracts.
+- `src/chat/llmprovider/ThinkingDialect.rs`: writes a model's thinking level into
+  the request fields each provider API reads.
 - `src/runtime_support.rs`: provider-side contract implemented by
   `operit-runtime`.
 - `src/chat`: built-in chat providers and conversation orchestration.
@@ -58,6 +60,37 @@ HTTP clients or introduce platform-specific branches.
 
 Private functions use Rust `snake_case`; the existing public `ModelListFetcher`
 entry point remains unchanged.
+
+Discovery returns only what the provider's own list says. A field the catalog row
+declares no JSON path for stays `None`. The runtime then recognizes each model
+against the models.dev catalog for its pricing, context and capabilities, and
+keeps the listed metadata for models the catalog does not know; see
+`docs/model-catalog.md`.
+
+## HTTP and Streaming Ownership
+
+Built-in model requests, connection probes, OpenCode discovery and Codex OAuth
+use `llmprovider/ProviderHttp.rs` to encode requests and consume asynchronous
+`HttpHost::openHttpResponseStream` callbacks. Providers do not own network
+clients. The Host owns sockets, TLS, proxy handling and connection pools;
+the native Host shares pools across streaming and buffered requests with the
+same request policy. Model requests use a shared 60-second connection timeout
+and 1000-second read-idle timeout, without a total generation deadline.
+
+Dropping a pending request or response body cancels its Host stream. Claude,
+Gemini and OpenAI readers also race idle reads against explicit cancellation.
+The SSE decoder frames complete events, including multiline data and split
+UTF-8, before provider JSON parsing. Empty events and comments carry no model
+payload. OpenAI logs invalid JSON events while still requiring a confirmed
+completion; structured upstream error payloads remain request failures.
+
+Claude and Gemini emit text, thinking and tool deltas while the upstream is
+still producing. Missing terminal events are interruptions rather than successful
+EOFs. Accepted retries roll back through the ordered revision channel; exhausted
+attempts retain their partial text and terminal failure. Explicit cancellation
+remains a separate lifecycle. A completed Claude message or Gemini finish reason
+ends consumption without waiting for the server to close HTTP.
+
 
 ## OpenAI-Compatible Model Discovery Paths
 

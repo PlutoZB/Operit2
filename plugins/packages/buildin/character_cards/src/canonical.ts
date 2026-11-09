@@ -101,16 +101,20 @@ export interface CharacterRepository {
   writeUser(ownerKey: string, content: string): Promise<void>;
   /** Returns the real owner USER.md path accepted by the generic Files capability. */
   readUserPath(ownerKey: string): Promise<string>;
-  /** Lists genuinely initialized owner namespaces for the private job scheduler. */
+  /** Lists initialized owners with available backing configuration for the private job scheduler. */
   listMemoryOwnerKeys(): Promise<string[]>;
-  /** Removes memory owners whose backing entity no longer exists and returns their pruned keys. */
-  pruneOrphanMemoryOwners(): Promise<string[]>;
+  /** Tests persisted existence without initializing a missing library. */
+  hasMemoryOwner(ownerKey: string): Promise<boolean>;
+  /** Explicitly initializes the selected owner library while preserving existing source records. */
+  createMemoryLibrary(ownerKey: string): Promise<void>;
   /** Allocates one lossless private candidate or job identity in this snapshot. */
   allocateRecordId(): Promise<string>;
   /** Reads only owner job metadata and candidates. */
   readMemoryJobState(ownerKey: string): Promise<import("./model").MemoryJobState>;
   /** Writes job changes under their original exact record versions. */
   writeMemoryJobState(ownerKey: string, state: import("./model").MemoryJobState): Promise<void>;
+  /** Retries failures on the selected producer, or clears them when explicitly passed null. */
+  recoverFailedCandidates(ownerKey: string, producerNodeId: string | null): Promise<number>;
   /** Rebuilds source vectors through bounded durable database pages. */
   rebuildMemoryEmbeddings(ownerKey: string): Promise<number>;
   /** Ranks original document chunks without constructing source vectors during queries. */

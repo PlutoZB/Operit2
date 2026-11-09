@@ -9,3 +9,12 @@ pub mod OperitApplication;
 
 #[path = "MarketInstallSupport.rs"]
 mod MarketInstallSupport;
+
+#[path = "ExtensionCatalogSupport.rs"]
+pub mod ExtensionCatalogSupport;
+
+#[path = "SyncConsistency.rs"]
+mod SyncConsistency;
+
+#[path = "ApplicationUpdate.rs"]
+pub mod ApplicationUpdate;

@@ -61,6 +61,12 @@ const COMMAND_SPECS: &[TuiCommandSpec] = &[
         options: &[],
     },
     TuiCommandSpec {
+        name: "diff",
+        usage: "/diff [file]",
+        description_key: TuiTextKey::CommandDiffDescription,
+        options: &[],
+    },
+    TuiCommandSpec {
         name: "new",
         usage: "/new [source <chat-id>] [input <json-object>]",
         description_key: TuiTextKey::CommandNewDescription,
@@ -300,6 +306,24 @@ const COMMAND_SPECS: &[TuiCommandSpec] = &[
         name: "network join-cancel",
         usage: "/network join-cancel <request-id|node-id>",
         description_key: TuiTextKey::CommandNetworkJoinCancelDescription,
+        options: &[],
+    },
+    TuiCommandSpec {
+        name: "network listen",
+        usage: "/network listen",
+        description_key: TuiTextKey::CommandNetworkListenDescription,
+        options: &[],
+    },
+    TuiCommandSpec {
+        name: "network listen show",
+        usage: "/network listen show",
+        description_key: TuiTextKey::CommandNetworkListenShowDescription,
+        options: &[],
+    },
+    TuiCommandSpec {
+        name: "network endpoint",
+        usage: "/network endpoint <node-id|name> [address]",
+        description_key: TuiTextKey::CommandNetworkEndpointDescription,
         options: &[],
     },
     TuiCommandSpec {
@@ -823,6 +847,21 @@ mod tests {
         assert_eq!(
             builtin_names("/language ZH"),
             vec!["language zh-cn".to_string()]
+        );
+    }
+
+    #[test]
+    fn network_listener_settings_commands_are_suggested() {
+        assert_eq!(
+            builtin_names("/network listen"),
+            vec![
+                "network listen".to_string(),
+                "network listen show".to_string()
+            ]
+        );
+        assert_eq!(
+            builtin_names("/network endpoint"),
+            vec!["network endpoint".to_string()]
         );
     }
 

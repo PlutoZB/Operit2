@@ -4,7 +4,7 @@ use crate::ServiceDiscovery::ServiceDiscoveryHost;
 use crate::{
     ArchiveStagingHost, AudioPlaybackHost, BluetoothHost, BrowserAutomationHost,
     BrowserAutomationHostFactory,
-    BrowserSessionHost, ComposeDslWebViewHost, DeviceIoHost, FileSystemHost,
+    BrowserSessionHost, ClipboardHost, ComposeDslWebViewHost, DeviceIoHost, FileSystemHost,
     HostEnvironmentDescriptor, HostJavaScriptRuntimeHost, HostRuntimeEventHost,
     HostRuntimeEventSchedulerHost, HostRuntimeTaskSchedulerHost, HostSecretStore, HttpHost,
     LocalInferenceHost, ManagedRuntimeHost, PluginSdkIpc::PluginSdkIpcHost, RobotFaceHost,
@@ -145,11 +145,13 @@ pub struct HostManager {
     pub webVisitHost: Option<Arc<dyn WebVisitHost>>,
     pub browserAutomationHost: Option<Arc<dyn BrowserAutomationHost>>,
     pub browserSessionHost: Option<Arc<dyn BrowserSessionHost>>,
+    pub floatingWindowHost: Option<Arc<dyn crate::FloatingWindowHost>>,
     pub composeDslWebViewHost: Option<Arc<dyn ComposeDslWebViewHost>>,
     pub httpHost: Option<Arc<dyn HttpHost>>,
     pub webSocketHost: Option<Arc<dyn WebSocketHost>>,
     pub systemOperationHost: Option<Arc<dyn SystemOperationHost>>,
     pub toastHost: Option<Arc<dyn ToastHost>>,
+    pub clipboardHost: Option<Arc<dyn ClipboardHost>>,
     pub audioPlaybackHost: Option<Arc<dyn AudioPlaybackHost>>,
     pub bluetoothHost: Option<Arc<dyn BluetoothHost>>,
     pub deviceIoHost: Option<Arc<dyn DeviceIoHost>>,
@@ -187,6 +189,7 @@ impl HostManager {
             webVisitHost: None,
             browserAutomationHost: None,
             browserSessionHost: None,
+            floatingWindowHost: None,
             composeDslWebViewHost: None,
             httpHost: None,
             webSocketHost: None,
@@ -196,6 +199,7 @@ impl HostManager {
             serviceDiscoveryHost: None,
             systemOperationHost: None,
             toastHost: None,
+            clipboardHost: None,
             audioPlaybackHost: None,
             bluetoothHost: None,
             deviceIoHost: None,
@@ -229,6 +233,7 @@ impl HostManager {
             webVisitHost: None,
             browserAutomationHost: None,
             browserSessionHost: None,
+            floatingWindowHost: None,
             composeDslWebViewHost: None,
             httpHost: None,
             webSocketHost: None,
@@ -238,6 +243,7 @@ impl HostManager {
             serviceDiscoveryHost: None,
             systemOperationHost: None,
             toastHost: None,
+            clipboardHost: None,
             audioPlaybackHost: None,
             bluetoothHost: None,
             deviceIoHost: None,
@@ -274,6 +280,7 @@ impl HostManager {
             webVisitHost: Some(webVisitHost),
             browserAutomationHost: None,
             browserSessionHost: None,
+            floatingWindowHost: None,
             composeDslWebViewHost: None,
             httpHost: None,
             webSocketHost: None,
@@ -283,6 +290,7 @@ impl HostManager {
             serviceDiscoveryHost: None,
             systemOperationHost: None,
             toastHost: None,
+            clipboardHost: None,
             audioPlaybackHost: None,
             bluetoothHost: None,
             deviceIoHost: None,
@@ -320,6 +328,7 @@ impl HostManager {
             webVisitHost: Some(webVisitHost),
             browserAutomationHost: None,
             browserSessionHost: None,
+            floatingWindowHost: None,
             composeDslWebViewHost: None,
             httpHost: None,
             webSocketHost: None,
@@ -329,6 +338,7 @@ impl HostManager {
             serviceDiscoveryHost: None,
             systemOperationHost: Some(systemOperationHost),
             toastHost: None,
+            clipboardHost: None,
             audioPlaybackHost: None,
             bluetoothHost: None,
             deviceIoHost: None,
@@ -377,6 +387,7 @@ impl HostManager {
             webVisitHost: Some(webVisitHost),
             browserAutomationHost: None,
             browserSessionHost: None,
+            floatingWindowHost: None,
             composeDslWebViewHost: None,
             httpHost: Some(httpHost),
             webSocketHost: None,
@@ -386,6 +397,7 @@ impl HostManager {
             serviceDiscoveryHost: None,
             systemOperationHost: Some(systemOperationHost),
             toastHost: None,
+            clipboardHost: None,
             audioPlaybackHost: None,
             bluetoothHost: None,
             deviceIoHost: None,
@@ -421,6 +433,13 @@ impl HostManager {
     #[allow(non_snake_case)]
     pub fn withToastHost(mut self, toastHost: Arc<dyn ToastHost>) -> Self {
         self.toastHost = Some(toastHost);
+        self
+    }
+
+    /// Adds frontend-owned system clipboard writing.
+    #[allow(non_snake_case)]
+    pub fn withClipboardHost(mut self, clipboardHost: Arc<dyn ClipboardHost>) -> Self {
+        self.clipboardHost = Some(clipboardHost);
         self
     }
 
@@ -630,6 +649,14 @@ impl HostManager {
     #[allow(non_snake_case)]
     pub fn withPluginSdkIpcHost(mut self, pluginSdkIpcHost: Arc<dyn PluginSdkIpcHost>) -> Self {
         self.pluginSdkIpcHost = Some(pluginSdkIpcHost);
+        self
+    }
+}
+
+impl HostManager {
+    /// Registers the owner responsible for creating and controlling floating surfaces.
+    pub fn withFloatingWindowHost(mut self, host: Arc<dyn crate::FloatingWindowHost>) -> Self {
+        self.floatingWindowHost = Some(host);
         self
     }
 }

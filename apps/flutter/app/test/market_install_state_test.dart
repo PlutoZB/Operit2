@@ -9,14 +9,14 @@ import 'package:operit2/core/link/CoreLinkProtocol.dart';
 import 'package:operit2/core/proxy/generated/CoreProxyClients.g.dart';
 import 'package:operit2/core/proxy/generated/CoreProxyModels.g.dart';
 import 'package:operit2/data/preferences/UserPreferencesManager.dart';
-import 'package:operit2/ui/features/packages/market/MarketBrowseList.dart';
 import 'package:operit2/ui/features/packages/market/MarketInstallStateStore.dart';
+import 'package:operit2/ui/features/packages/model/ExtensionCatalogController.dart';
 import 'package:operit2/ui/features/packages/screens/MarketEntryDetailScreen.dart';
-import 'package:operit2/ui/features/packages/screens/UnifiedMarketScreen.dart';
+import 'package:operit2/ui/features/packages/screens/MarketPane.dart';
 import 'package:operit2/ui/theme/OperitTheme.dart';
 import 'package:operit2/ui/main/TopBarController.dart';
 
-/// Verifies market installation state and bottom navigation layout.
+/// Verifies market installation state, market search and the entry detail.
 void main() {
   final entry = _entry();
 
@@ -160,176 +160,57 @@ void main() {
     expect(store.stateFor(entry), MarketLocalInstallState.installed);
   });
 
-  testWidgets(
-    'installed market cards expose their status without reinstalling',
-    (tester) async {
-      var actions = 0;
-      var details = 0;
-      await tester.pumpWidget(
-        _testApp(
-          Scaffold(
-            body: MarketGridCard(
-              title: 'Plugin',
-              description: 'A plugin',
-              author: 'Author',
-              downloads: 0,
-              likes: 0,
-              hearts: 0,
-              actionLabel: '已安装',
-              actionIcon: Icons.check,
-              actionBusy: false,
-              actionEnabled: false,
-              statusLabel: '已安装',
-              onAction: () => actions++,
-              onTap: () => details++,
-            ),
-          ),
-        ),
-      );
-      expect(find.text('已安装'), findsOneWidget);
-      await tester.tap(find.byIcon(Icons.check));
-      expect(actions, 0);
-      details = 0;
-      await tester.tap(find.text('Plugin'));
-      expect(details, 1);
-      expect(tester.takeException(), isNull);
-    },
-  );
-
-  for (final (topInset, bottomInset) in <(double, double)>[
-    (0, 0),
-    (24, 0),
-    (24, 48),
-    (48, 24),
-  ]) {
-    testWidgets('market bottom navigation excludes the top system inset '
-        '(top: $topInset, bottom: $bottomInset)', (tester) async {
-      tester.view.devicePixelRatio = 1;
-      tester.view.physicalSize = const Size(400, 800);
-      tester.view.padding = FakeViewPadding(top: topInset, bottom: bottomInset);
-      tester.view.viewPadding = FakeViewPadding(
-        top: topInset,
-        bottom: bottomInset,
-      );
-      addTearDown(tester.view.resetDevicePixelRatio);
-      addTearDown(tester.view.resetPhysicalSize);
-      addTearDown(tester.view.resetPadding);
-      addTearDown(tester.view.resetViewPadding);
-
-      await tester.pumpWidget(
-        _testApp(
-          Scaffold(
-            body: SafeArea(
-              top: false,
-              child: UnifiedMarketScreen(
-                clients: GeneratedCoreProxyClients(_MarketBridge()),
-              ),
-            ),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      final navigation = find.byType(NavigationBar);
-      final bounds = tester.getRect(navigation);
-      expect(bounds.height, 56);
-      expect(bounds.bottom, 800 - bottomInset);
-      expect(
-        tester.getCenter(find.byIcon(Icons.storefront)).dy,
-        bounds.center.dy,
-      );
-      expect(
-        MediaQuery.paddingOf(
-          tester.element(find.byType(UnifiedMarketScreen)),
-        ).top,
-        topInset,
-      );
-      expect(tester.takeException(), isNull);
-    });
-  }
-
-  testWidgets('list installation succeeds inline without any bottom popup', (
+  testWidgets('market search matches entries across every listing page', (
     tester,
   ) async {
+    final bridge = _MarketBridge()
+      ..listPageLoader = (page) async => switch (page) {
+        1 => _marketPage(1, 2, <MarketEntrySummary>[_entry()]),
+        _ => _marketPage(2, 2, <MarketEntrySummary>[
+          MarketEntrySummary.fromJson(<String, Object?>{
+            ..._entry().toJson(),
+            'id': 'later',
+            'title': 'Later plugin',
+          }),
+        ]),
+      };
+    await tester.pumpWidget(_market(bridge, query: 'plugin'));
+    await tester.pumpAndSettle();
+    expect(find.text('Plugin'), findsOneWidget);
+    expect(find.text('Later plugin'), findsOneWidget);
+
+    await tester.pumpWidget(_market(bridge, query: 'later'));
+    await tester.pumpAndSettle();
+    expect(find.text('Plugin'), findsNothing);
+    expect(find.text('Later plugin'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('market rows install inline without any popup', (tester) async {
     final bridge = _MarketBridge();
-    await tester.pumpWidget(
-      _testApp(
-        Scaffold(
-          body: UnifiedMarketScreen(clients: GeneratedCoreProxyClients(bridge)),
-        ),
-      ),
-    );
+    await tester.pumpWidget(_market(bridge, query: 'plugin'));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('安装'));
+    await tester.tap(find.text('获取'));
     await tester.pumpAndSettle();
-    expect(find.text('已安装'), findsOneWidget);
-    expect(find.byIcon(Icons.check), findsOneWidget);
-    expect(find.byType(SnackBar), findsNothing);
     expect(bridge.installCalls, 1);
+    expect(find.text('已安装'), findsOneWidget);
+    expect(find.byType(SnackBar), findsNothing);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets(
-    'list shows available updates and clears the badge after updating',
-    (tester) async {
-      final bridge = _MarketBridge()..versions['entry'] = 'v1';
-      await tester.pumpWidget(
-        _testApp(
-          Scaffold(
-            body: UnifiedMarketScreen(
-              clients: GeneratedCoreProxyClients(bridge),
-            ),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(find.text('可更新'), findsOneWidget);
-      await tester.tap(find.byTooltip('更新'));
-      await tester.pumpAndSettle();
-      expect(find.text('可更新'), findsNothing);
-      expect(find.text('已安装'), findsOneWidget);
-      expect(find.byType(SnackBar), findsNothing);
-    },
-  );
-
-  testWidgets('installing in detail immediately updates the underlying list', (
-    tester,
-  ) async {
-    final bridge = _MarketBridge();
-    await tester.pumpWidget(
-      _testApp(
-        Scaffold(
-          body: UnifiedMarketScreen(clients: GeneratedCoreProxyClients(bridge)),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Plugin'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(FilledButton, '安装'));
-    await tester.pumpAndSettle();
-    await tester.pageBack();
-    await tester.pumpAndSettle();
-    expect(find.text('已安装'), findsOneWidget);
-    expect(find.byType(SnackBar), findsNothing);
-    expect(bridge.installCalls, 1);
-  });
-
-  testWidgets(
-    'successful installation updates detail inline with no bottom popup',
+    'successful installation updates detail inline with no popup',
     (tester) async {
       final bridge = _MarketBridge();
       await tester.pumpWidget(_detail(bridge));
       await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(FilledButton, '安装'));
+      await tester.tap(find.text('安装'));
       await tester.pumpAndSettle();
       expect(bridge.installCalls, 1);
+      // The action shows its done state and the header badge agrees.
       expect(find.text('已安装'), findsNWidgets(2));
+      expect(find.byIcon(Icons.check_rounded), findsOneWidget);
       expect(find.byType(SnackBar), findsNothing);
-      expect(find.byIcon(Icons.check), findsOneWidget);
-      final button = tester.widget<FilledButton>(
-        find.widgetWithText(FilledButton, '已安装'),
-      );
-      expect(button.onPressed, isNull);
       expect(tester.takeException(), isNull);
     },
   );
@@ -340,12 +221,12 @@ void main() {
       final bridge = _MarketBridge()..installError = 'Download failed';
       await tester.pumpWidget(_detail(bridge));
       await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(FilledButton, '安装'));
+      await tester.tap(find.text('安装'));
       await tester.pumpAndSettle();
       expect(find.byType(SnackBar), findsOneWidget);
       expect(find.textContaining('Download failed'), findsOneWidget);
       expect(find.text('已安装'), findsNothing);
-      expect(find.widgetWithText(FilledButton, '安装'), findsOneWidget);
+      expect(find.text('安装'), findsOneWidget);
     },
   );
 
@@ -356,7 +237,7 @@ void main() {
       await tester.pumpWidget(_detail(bridge));
       await tester.pumpAndSettle();
       expect(find.text('可更新'), findsOneWidget);
-      await tester.tap(find.widgetWithText(FilledButton, '更新'));
+      await tester.tap(find.text('更新'));
       await tester.pumpAndSettle();
       expect(find.text('可更新'), findsNothing);
       expect(find.text('已安装'), findsNWidgets(2));
@@ -370,7 +251,7 @@ MarketEntrySummary _entry({String type = 'skill', String? latest = 'v2'}) =>
       'id': 'entry',
       'type': type,
       'title': 'Plugin',
-      'featured': true,
+      'featured': false,
       'description': 'A plugin',
       'latestVersion': latest == null
           ? null
@@ -394,11 +275,25 @@ PublishablePackageSource _package(String? version) => PublishablePackageSource(
 );
 
 Widget _detail(_MarketBridge bridge) => _testApp(
-  MarketEntryDetailScreen(
-    clients: GeneratedCoreProxyClients(bridge),
-    entry: _entry(),
+  Scaffold(
+    body: MarketEntryDetailScreen(
+      entryId: 'entry',
+      clients: GeneratedCoreProxyClients(bridge),
+    ),
   ),
 );
+
+Widget _market(_MarketBridge bridge, {required String query}) {
+  final clients = GeneratedCoreProxyClients(bridge);
+  return _testApp(
+    Scaffold(
+      body: MarketPane(
+        controller: ExtensionCatalogController.of(clients),
+        query: query,
+      ),
+    ),
+  );
+}
 
 Widget _testApp(Widget child) {
   final controller = TopBarController();
@@ -409,9 +304,23 @@ Widget _testApp(Widget child) {
     initialThemeIsReady: false,
     unconfiguredChildEnabled: true,
     hostInteractionHostsEnabled: false,
-    child: TopBarScope(controller: controller, child: child),
+    child: TopBarScope(
+      controller: controller,
+      child: ScaffoldMessenger(child: child),
+    ),
   );
 }
+
+Map<String, Object?> _marketPage(
+  int page,
+  int total,
+  List<MarketEntrySummary> entries,
+) => {
+  'page': page,
+  'pageSize': 1,
+  'total': total,
+  'items': entries.map((entry) => entry.toJson()).toList(),
+};
 
 class _MarketBridge extends OperitRuntimeBridge {
   final Map<String, String> versions = <String, String>{};
@@ -420,6 +329,8 @@ class _MarketBridge extends OperitRuntimeBridge {
   String? installError;
   Completer<String>? pendingInstall;
   Completer<Map<String, String>>? pendingVersions;
+  final List<int> listPages = [];
+  Future<Map<String, Object?>> Function(int page)? listPageLoader;
 
   @override
   Future<Uint8List> callBytes(CoreCallRequest request) async {
@@ -441,12 +352,28 @@ class _MarketBridge extends OperitRuntimeBridge {
         versions[(request.args as Map)['entryId'] as String] = version;
         result = version;
       case 'get_list_page':
-        result = {
-          'page': 1,
-          'pageSize': 50,
-          'total': 1,
-          'items': [_entry().toJson()],
+        final page = (request.args as Map)['page'] as int;
+        listPages.add(page);
+        result = listPageLoader != null
+            ? await listPageLoader!(page)
+            : {
+                'page': 1,
+                'pageSize': 50,
+                'total': 1,
+                'items': [_entry().toJson()],
+              };
+      case 'get_manifest':
+        result = <String, Object?>{
+          'ok': true,
+          'marketVersion': 2,
+          'generatedAt': null,
+          'types': <Object?>[],
+          'formatVersions': <Object?>[],
+          'categories': <Object?>[],
+          'states': <Object?>[],
         };
+      case 'get_entry_by_id':
+        result = _entry().toJson();
       case 'get_comments_page':
         result = {
           'entryId': 'entry',
@@ -457,6 +384,8 @@ class _MarketBridge extends OperitRuntimeBridge {
         };
       case 'get_current_github_user':
         result = {'id': 1, 'login': 'tester'};
+      case 'isLoggedIn':
+        result = false;
       default:
         throw UnsupportedError('Unexpected Core call: ${request.methodName}');
     }

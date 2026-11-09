@@ -71,6 +71,38 @@ void main() {
     );
   }
 
+  testWidgets('dismissing a notice during child disposal waits for the frame', (
+    tester,
+  ) async {
+    final controller = AppToastController.instance;
+    final notice = controller.show('Chat notice');
+    final showChild = ValueNotifier<bool>(true);
+    addTearDown(showChild.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: AppToastHost(
+          child: ValueListenableBuilder<bool>(
+            valueListenable: showChild,
+            builder: (context, visible, child) => visible
+                ? _DismissNoticeOnDispose(noticeId: notice)
+                : const SizedBox.shrink(),
+          ),
+        ),
+      ),
+    );
+    await _pumpNotice(tester);
+    expect(find.text('Chat notice'), findsOneWidget);
+
+    showChild.value = false;
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+    expect(controller.notices.value, isEmpty);
+    await _pumpNotice(tester);
+    expect(find.text('Chat notice'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('shows a host notice at the top-right of the window', (
     tester,
   ) async {
@@ -142,6 +174,62 @@ void main() {
     },
   );
 
+  testWidgets(
+    'long notices expand, stay alive, and allow copying the full text',
+    (tester) async {
+      final controller = AppToastController.instance;
+      final message = List.generate(
+        40,
+        (index) => 'Failure detail $index',
+      ).join('\n');
+      await tester.pumpWidget(
+        MaterialApp(
+          builder: (context, child) => AppToastHost(child: child!),
+          home: const Scaffold(body: Text('Application')),
+        ),
+      );
+      controller.show(message, duration: const Duration(seconds: 2));
+      await _pumpNotice(tester);
+      expect(find.text('Expand'), findsOneWidget);
+      expect(find.byType(SelectableText), findsNothing);
+      final collapsedHeight = tester.getSize(find.text(message)).height;
+
+      await tester.tap(find.text('Expand'));
+      await tester.pump();
+      expect(find.text('Collapse'), findsOneWidget);
+      expect(
+        tester.widget<SelectableText>(find.byType(SelectableText)).data,
+        message,
+      );
+      expect(
+        tester.getSize(find.byType(SingleChildScrollView)).height,
+        greaterThan(collapsedHeight),
+      );
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(location: Offset.zero);
+      addTearDown(mouse.removePointer);
+      await mouse.moveTo(tester.getCenter(find.text('Collapse')));
+      await tester.pump();
+      await mouse.moveTo(Offset.zero);
+      await tester.pump(const Duration(seconds: 3));
+      expect(controller.notices.value, hasLength(1));
+
+      await tester.drag(
+        find.byType(SingleChildScrollView),
+        const Offset(0, -2000),
+      );
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.text('Collapse'));
+      await tester.pump();
+      expect(find.text('Expand'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 3));
+      await _pumpNotice(tester);
+      expect(controller.notices.value, isEmpty);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets('close tooltip works when the host sits above the navigator', (
     tester,
   ) async {
@@ -197,4 +285,26 @@ void _expectTopRightNotice(WidgetTester tester, String text) {
   expect(rect.right, lessThanOrEqualTo(window.width));
   expect(rect.right, greaterThan(window.width - 360));
   expect(rect.top, lessThan(120));
+}
+
+/// Matches the chat bridge dismissing its active notice when it is unmounted.
+class _DismissNoticeOnDispose extends StatefulWidget {
+  const _DismissNoticeOnDispose({required this.noticeId});
+
+  final int noticeId;
+
+  @override
+  State<_DismissNoticeOnDispose> createState() =>
+      _DismissNoticeOnDisposeState();
+}
+
+class _DismissNoticeOnDisposeState extends State<_DismissNoticeOnDispose> {
+  @override
+  void dispose() {
+    AppToastController.instance.dismiss(widget.noticeId);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => const SizedBox.shrink();
 }

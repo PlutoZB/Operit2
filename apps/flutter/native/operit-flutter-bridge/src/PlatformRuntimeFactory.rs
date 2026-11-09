@@ -25,8 +25,18 @@ pub(crate) use execution::PlatformBridgeState;
 /// Carries the startup information required by one selected platform module.
 pub(crate) enum StartupMetadata {
     HostProvided,
-    AndroidDevice { model: String },
-    OpenHarmonyDevice { model: String, systemLanguageCode: String },
+    AndroidDevice {
+        model: String,
+    },
+    AndroidPrivileged {
+        model: String,
+        language: String,
+        secretRoot: PathBuf,
+    },
+    OpenHarmonyDevice {
+        model: String,
+        systemLanguageCode: String,
+    },
 }
 
 /// Carries immutable storage roots and owner-provided startup information.
@@ -44,14 +54,23 @@ pub(crate) fn startBridge(startup: BridgeStartup) -> Result<OperitFlutterBridge,
     let mut context = platform::create_host_context(&startup)?;
     let composeDslHost =
         FlutterComposeDslWebViewBridge::new(&context).map_err(|error| error.to_string())?;
+    let browserAutomationHost =
+        FlutterBrowserAutomationBridge::new(&context).map_err(|error| error.to_string())?;
     context = context
-        .withBrowserAutomationHostFactory(Arc::new(|files| {
-            Arc::new(FlutterBrowserAutomationBridge::new(files))
-        }))
+        .withBrowserAutomationHost(Arc::new(browserAutomationHost))
         .withBrowserSessionHost(Arc::new(FlutterBrowserSessionBridge::new()))
         .withComposeDslWebViewHost(Arc::new(composeDslHost))
+        .withFloatingWindowHost(Arc::new(|request: serde_json::Value| {
+            crate::FlutterOwnerCapabilities::ownerSystemOperation::<serde_json::Value>(
+                "floating_window",
+                request,
+            )
+        }))
         .withToastHost(Arc::new(
             crate::FlutterOwnerCapabilities::presentFlutterToast,
+        ))
+        .withClipboardHost(Arc::new(
+            crate::FlutterOwnerCapabilities::setFlutterClipboardText,
         ));
     let terminal = context
         .terminalHost
@@ -140,6 +159,8 @@ mod event_tests {
 }
 
 /// Builds the selected platform secret adapter for the independent maintenance boundary.
-pub(crate) fn rescue_secret_store(root: &std::path::Path) -> Result<Option<std::sync::Arc<dyn operit_host_api::HostSecretStore>>, String> {
+pub(crate) fn rescue_secret_store(
+    root: &std::path::Path,
+) -> Result<Option<std::sync::Arc<dyn operit_host_api::HostSecretStore>>, String> {
     platform::rescue_secret_store(root)
 }

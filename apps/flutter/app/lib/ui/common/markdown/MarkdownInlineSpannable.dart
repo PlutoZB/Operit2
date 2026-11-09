@@ -1,6 +1,8 @@
 // ignore_for_file: file_names
 
 import 'package:flutter/material.dart';
+
+import 'MarkdownFileScope.dart';
 import 'package:flutter/gestures.dart';
 
 import 'MarkdownCodeTypeface.dart';
@@ -9,7 +11,7 @@ import 'MarkdownLatexBlock.dart';
 import 'MarkdownLink.dart';
 import 'MarkdownNodeGrouper.dart';
 
-const double markdownLineHeight = 1.4;
+const double markdownLineHeight = 1.6;
 const double markdownLetterSpacing = 0.35;
 
 /// Paints Core's semantic inline tree. This layer never reads Markdown syntax.
@@ -77,7 +79,10 @@ InlineSpan _inlineSpan(
       style = _decorate(style, TextDecoration.underline);
       break;
     case MarkdownNodeType.link:
-      linkUrl = node.linkUrl;
+      linkUrl = node.linkUrl == null
+          ? null
+          : (MarkdownFileScope.maybeOf(context)?.resolve(node.linkUrl!) ??
+                node.linkUrl);
       final color = Theme.of(context).colorScheme.primary;
       style = _decorate(
         style,
@@ -85,10 +90,13 @@ InlineSpan _inlineSpan(
       ).copyWith(color: color, decorationColor: color);
       break;
     case MarkdownNodeType.inlineCode:
+      const fontSizeFactor = .9;
       final color = style.color ?? Colors.black;
       style = style
-          .apply(fontSizeFactor: .9)
+          .apply(fontSizeFactor: fontSizeFactor)
           .copyWith(
+            // Keep the surrounding line height when reducing the glyph size.
+            height: (style.height ?? markdownLineHeight) / fontSizeFactor,
             fontFamily: markdownCodeFontFamily,
             fontFamilyFallback: markdownCodeFontFamilyFallback,
             backgroundColor: color.withValues(
@@ -113,7 +121,14 @@ InlineSpan _inlineSpan(
     style: style,
     recognizer: linkUrl == null
         ? null
-        : gestures.recognizerFor(linkUrl, onLinkClick),
+        : gestures.recognizerFor(
+            linkUrl,
+            onLinkClick ??
+                (url) => openMarkdownFileLink(
+                  url,
+                  MarkdownFileScope.maybeOf(context)?.clients,
+                ),
+          ),
   );
 }
 

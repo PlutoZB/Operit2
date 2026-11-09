@@ -47,6 +47,10 @@ impl WindowsRuntimeStorageHost {
 }
 
 impl RuntimeStorageHost for WindowsRuntimeStorageHost {
+    fn openTransactionDatabase(&self, path: &str) -> operit_host_api::HostResult<Box<dyn operit_host_api::RuntimeSqliteConnection>> {
+        RuntimeSqliteHost::openSqliteDatabase(self, path)
+    }
+
     /// Returns the shared runtime storage root.
     fn runtimeRootDir(&self) -> Option<PathBuf> {
         self.storage.runtimeRootDir()
@@ -73,6 +77,11 @@ impl RuntimeStorageHost for WindowsRuntimeStorageHost {
     }
 
     /// Flushes and publishes a private catalog through the shared atomic writer.
+    /// Reads the source file modification time through the shared storage host.
+    fn modifiedAt(&self, path: &str) -> HostResult<i64> { self.storage.modifiedAt(path) }
+    /// Preserves source metadata through the shared storage host.
+    fn setModifiedAt(&self, path: &str, modifiedAt: i64) -> HostResult<()> { self.storage.setModifiedAt(path, modifiedAt) }
+
     fn writeBytesAtomically(&self, path: &str, content: &[u8]) -> HostResult<()> {
         self.storage.writeBytesAtomically(path, content)
     }

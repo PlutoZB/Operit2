@@ -13,7 +13,7 @@ export interface ToolResultMap {
   read_file_part: FilePartContentData;
   read_file_full: FileContentData;
   read_file_binary: BinaryFileContentData;
-  write_file: FileOperationData;
+  write_file: FileApplyResultData;
   write_file_binary: FileOperationData;
   delete_file: FileOperationData;
   file_exists: FileExistsData;
@@ -64,6 +64,7 @@ export interface ToolResultMap {
   get_system_setting: SystemSettingData;
   modify_system_setting: SystemSettingData;
   toast: string;
+  set_clipboard_text: string;
   send_notification: string;
   install_app: AppOperationData;
   uninstall_app: AppOperationData;
@@ -140,6 +141,7 @@ export interface ToolResultMap {
   update_chat_group: string;
   update_chat_pinned: string;
   update_chat_locked: string;
+  promote_chat_to_root: string;
   reorder_chats: string;
   delete_chat: ChatDeleteResultData;
   send_message_to_ai: MessageSendResultData;

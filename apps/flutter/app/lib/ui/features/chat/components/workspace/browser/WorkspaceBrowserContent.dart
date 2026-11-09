@@ -24,6 +24,7 @@ import 'userscripts/WorkspaceUserscriptSheet.dart';
 class WorkspaceBrowserContent extends StatefulWidget {
   const WorkspaceBrowserContent({
     super.key,
+    this.sessionId,
     this.initialUrl,
     this.initialUserAgent,
     this.initialHeaders,
@@ -35,10 +36,10 @@ class WorkspaceBrowserContent extends StatefulWidget {
     required this.onWriteWorkspaceFileBytes,
     required this.onOpenWorkspaceFile,
     required this.onOpenBrowserTab,
-    required this.onActivateRequested,
     required this.onCloseRequested,
   });
 
+  final String? sessionId;
   final String? initialUrl;
   final String? initialUserAgent;
   final Map<String, String>? initialHeaders;
@@ -56,7 +57,6 @@ class WorkspaceBrowserContent extends StatefulWidget {
     String? workspaceHtmlPath,
   })
   onOpenBrowserTab;
-  final VoidCallback onActivateRequested;
   final VoidCallback onCloseRequested;
 
   @override
@@ -75,43 +75,48 @@ class _WorkspaceBrowserContentState extends State<WorkspaceBrowserContent> {
   OverlayEntry? _panelPopupEntry;
   bool _initialized = false;
 
+  WorkspaceBrowserTabState? get _activeTab {
+    final explicitId = widget.sessionId;
+    if (explicitId != null && explicitId.isNotEmpty) {
+      final tab = _sessionStore.tabById(explicitId);
+      if (tab != null) {
+        return tab;
+      }
+    }
+    return _sessionStore.currentTab;
+  }
+
+  void _syncActiveSession() {
+    final explicitId = widget.sessionId;
+    if (explicitId != null && explicitId.isNotEmpty) {
+      if (_sessionStore.currentTab?.id != explicitId) {
+        try {
+          _sessionStore.selectSession(explicitId);
+        } catch (_) {}
+      }
+    }
+  }
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     _attachBrowserUi();
+    _syncActiveSession();
     if (_initialized) {
       return;
     }
     _initialized = true;
-    unawaited(_initialize());
+    if (widget.sessionId == null || widget.sessionId!.isEmpty) {
+      unawaited(_initialize());
+    }
   }
 
   @override
   void didUpdateWidget(covariant WorkspaceBrowserContent oldWidget) {
     super.didUpdateWidget(oldWidget);
     _attachBrowserUi();
-    if (oldWidget.initialUrl != widget.initialUrl &&
-        widget.initialUrl?.trim().isNotEmpty == true) {
-      unawaited(
-        _sessionStore.openTab(
-          url: widget.initialUrl!,
-          userAgent: widget.initialUserAgent,
-          headers: widget.initialHeaders,
-        ),
-      );
-    }
-    if (oldWidget.initialFilePath != widget.initialFilePath &&
-        widget.initialFilePath?.trim().isNotEmpty == true) {
-      unawaited(_sessionStore.openLocalFileTab(widget.initialFilePath!));
-    }
-    if (oldWidget.initialWorkspaceHtmlPath != widget.initialWorkspaceHtmlPath &&
-        widget.initialWorkspaceHtmlPath?.trim().isNotEmpty == true) {
-      unawaited(
-        _sessionStore.openWorkspaceHtmlTab(
-          widget.initialWorkspaceHtmlPath!,
-          initialUrl: widget.initialUrl,
-        ),
-      );
+    if (oldWidget.sessionId != widget.sessionId) {
+      _syncActiveSession();
     }
   }
 
@@ -130,7 +135,7 @@ class _WorkspaceBrowserContentState extends State<WorkspaceBrowserContent> {
     return AnimatedBuilder(
       animation: _sessionStore,
       builder: (context, child) {
-        final tab = _sessionStore.currentTab;
+        final tab = _activeTab;
         if (tab == null) {
           return const Center(child: CircularProgressIndicator());
         }
@@ -184,12 +189,28 @@ class _WorkspaceBrowserContentState extends State<WorkspaceBrowserContent> {
                       WorkspaceBrowserUrlBar(
                         tab: tab,
                         isBookmarked: isBookmarked,
-                        onSubmitted: _sessionStore.navigateCurrent,
-                        onToggleBookmark: _sessionStore.toggleBookmark,
-                        onBack: _sessionStore.goBack,
-                        onForward: _sessionStore.goForward,
-                        onRefreshOrStop: _sessionStore.refreshOrStop,
+                        onSubmitted: (url) {
+                          _syncActiveSession();
+                          _sessionStore.navigateCurrent(url);
+                        },
+                        onToggleBookmark: () {
+                          _syncActiveSession();
+                          _sessionStore.toggleBookmark();
+                        },
+                        onBack: () {
+                          _syncActiveSession();
+                          _sessionStore.goBack();
+                        },
+                        onForward: () {
+                          _syncActiveSession();
+                          _sessionStore.goForward();
+                        },
+                        onRefreshOrStop: () {
+                          _syncActiveSession();
+                          _sessionStore.refreshOrStop();
+                        },
                         onOpenMenu: _toggleMenuPopup,
+                        onNewTab: () => widget.onOpenBrowserTab(),
                         menuButtonKey: _menuButtonKey,
                       ),
                       Expanded(child: _buildBrowserSurface(tab)),
@@ -216,7 +237,6 @@ class _WorkspaceBrowserContentState extends State<WorkspaceBrowserContent> {
   void _attachBrowserUi() {
     _sessionStore.attachUi(
       delegate: WorkspaceBrowserViewDelegate(
-        onActivateRequested: widget.onActivateRequested,
         onCloseRequested: widget.onCloseRequested,
       ),
       onWriteWorkspaceFileBytes: widget.onWriteWorkspaceFileBytes,

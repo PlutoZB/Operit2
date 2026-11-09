@@ -13,11 +13,13 @@ use operit_providers::chat::enhance::FileBindingService::{
     FileBindingService, StructuredEditAction, StructuredEditOperation,
 };
 use operit_providers::chat::llmprovider::AIService::SendMessageRequest;
+use operit_providers::chat::llmprovider::ThinkingDialect::RequestThinking;
 use operit_providers::chat::EnhancedAIService::EnhancedAIService;
 use operit_providers::runtime_support::ProviderRuntimeContext;
 use operit_tools::runtime_support::{
     CachedMcpToolInfo, CoreNodeToolRuntime, CoreRouteChangeHandler, CoreRouteResumeContext,
-    RuntimeBundledExternalSkillAsset, RuntimeChatCallRequest, RuntimeChatSendRequest,
+    RuntimeBundledExternalSkillAsset, RuntimeBundledExternalSkillPackageAsset,
+    RuntimeChatCallRequest, RuntimeChatSendRequest,
     RuntimeChatSlot, RuntimeCoreNodeRouteState, RuntimePluginAsset, RuntimeSkillCatalogEntry,
     RuntimeStructuredEditAction, RuntimeStructuredEditOperation, ToolRuntimeSupport,
     ToolRuntimeSupportFuture,
@@ -38,7 +40,9 @@ use crate::core::chat::ChatRuntimeSlot::ChatRuntimeSlot;
 use crate::data::preferences::EnvPreferences::EnvPreferences;
 use crate::data::preferences::SkillVisibilityPreferences::SkillVisibilityPreferences;
 use crate::plugins::BuiltinPluginAssets::{BUILTIN_PLUGIN_ASSETS, BUNDLED_EXTERNAL_PLUGIN_ASSETS};
-use crate::plugins::BundledExternalSkillAssets::BUNDLED_EXTERNAL_SKILL_ASSETS;
+use crate::plugins::BundledExternalSkillAssets::{
+    BundledSkillPackage, BUNDLED_EXTERNAL_SKILL_ASSETS, BUNDLED_EXTERNAL_SKILL_PACKAGE_ASSETS,
+};
 use crate::services::TtsPlaybackService::TtsPlaybackService;
 
 /// Creates runtime-backed services required by the tools crate.
@@ -558,6 +562,11 @@ impl ToolRuntimeSupport for RuntimeToolSupport {
         runtimeBundledExternalSkillAssets()
     }
 
+    /// Exposes shared package members used when materializing bundled skill examples.
+    fn bundledExternalSkillPackageAssets(&self) -> &'static [RuntimeBundledExternalSkillPackageAsset] {
+        runtimeBundledExternalSkillPackageAssets()
+    }
+
     /// Returns whether a skill is visible to AI package activation.
     #[allow(non_snake_case)]
     fn isSkillVisibleToAi(&self, skillName: &str) -> bool {
@@ -689,12 +698,21 @@ impl ToolRuntimeSupport for RuntimeToolSupport {
                         .ok_or_else(|| "Chat creation requires an initialized AI runtime".to_string())?;
                     (core.chatHistoryDelegate.clone_for_core(), service)
                 };
-                return history.createNewChat(&service, false, sourceChatId, parentChatId, input).await;
+                return history
+                    .createNewChat(
+                        &service,
+                        false,
+                        sourceChatId,
+                        parentChatId,
+                        None,
+                        input,
+                    )
+                    .await;
             }
             let mut holder = self.chatRuntimeHolder.lock().await;
             let chatId = holder
                 .getCore(ChatRuntimeSlot::MAIN)
-                .createNewChat(setAsCurrentChat, sourceChatId, parentChatId, input)
+                .createNewChat(setAsCurrentChat, sourceChatId, parentChatId, None, input)
                 .await?;
             holder.observeStats();
             Ok(chatId)
@@ -870,6 +888,7 @@ impl ToolRuntimeSupport for RuntimeToolSupport {
             }
             // Only this native, successfully awaited dispatch may mark the submit as handled.
             request.turnOptions.chatInputSubmitRequestedHandled = true;
+            request.turnOptions.chatInputSubmittedHandled = true;
             let submission = {
                 let mut holder = self.chatRuntimeHolder.lock().await;
                 let core = holder.getCore(slot.clone());
@@ -899,11 +918,6 @@ impl ToolRuntimeSupport for RuntimeToolSupport {
                 .multi_service_manager
                 .getServiceBundleForFunction(request.functionType.clone())
                 .map_err(|error| error.to_string())?;
-            let thinkingQualityLevel = service
-                .provider_runtime_context
-                .support()
-                .thinkingQualityLevel()
-                .map_err(|error| error.to_string())?;
             let providerModel = {
                 let provider = aiService.lock().await;
                 provider.provider_model()
@@ -914,10 +928,11 @@ impl ToolRuntimeSupport for RuntimeToolSupport {
                     .send_message(SendMessageRequest {
                         chat_history: request.turns,
                         model_parameters: modelParameters,
-                        enable_thinking: request.enableThinking,
-                        thinking_quality_level: thinkingQualityLevel,
-                        thinking_configurations: modelConfig.thinkingConfigurations,
-                        thinking_option_id: modelConfig.thinkingOptionId,
+                        thinking: RequestThinking::for_model(
+                            &modelConfig.thinking,
+                            modelConfig.thinkingLevel,
+                            request.enableThinking,
+                        ),
                         stream: false,
                         available_tools: Vec::new(),
                         preserve_think_in_history: true,
@@ -1055,6 +1070,7 @@ async fn runAdmittedChatTurn(
     let (participantId, message, attachments, replyTimestamp, continuation) = match &admitted.work {
         AdmittedChatTurnWork::Submit { input, turn } => {
             let attachments = input.attachments.iter().map(|attachment| operit_model::AttachmentInfo::AttachmentInfo {
+                vfsPath: attachment.vfsPath.as_value().cloned(),
                 filePath: attachment.filePath.clone(), nodeId: attachment.nodeId.as_value().cloned(), fileName: attachment.fileName.clone(),
                 mimeType: attachment.mimeType.clone(), fileSize: attachment.fileSize, content: attachment.content.clone(),
             }).collect::<Vec<_>>();
@@ -1113,7 +1129,8 @@ async fn runAdmittedChatTurn(
         let options = ChatTurnOptions {
             continuation, nativeExecutionId: Some(admitted.handle.executionId.clone()), outputObserver: admitted.outputObserver.clone(), deferSequenceCompletion: true,
             deferSummary: matches!(admitted.work, AdmittedChatTurnWork::Continue { .. }),
-            chatInputSubmitRequestedHandled: true, notifyReply: Some(false), ..ChatTurnOptions::default()
+            chatInputSubmitRequestedHandled: true, chatInputSubmittedHandled: true,
+            notifyReply: Some(false), ..ChatTurnOptions::default()
         };
         let submission = core.startUserMessage(PromptFunctionType::CHAT, participantId, Some(chatId.clone()),
             message, None, None, None, attachments, reply, options, Some(admitted.lease.clone())).await?;
@@ -1232,6 +1249,27 @@ fn runtimeBundledExternalSkillAssets() -> &'static [RuntimeBundledExternalSkillA
                     bytes: asset.bytes,
                 })
                 .collect()
+        })
+        .as_slice()
+}
+
+/// Returns archive references without decoding or retaining example media in memory.
+#[allow(non_snake_case)]
+fn runtimeBundledExternalSkillPackageAssets() -> &'static [RuntimeBundledExternalSkillPackageAsset] {
+    static ASSETS: OnceLock<Vec<RuntimeBundledExternalSkillPackageAsset>> = OnceLock::new();
+    ASSETS
+        .get_or_init(|| {
+            BUNDLED_EXTERNAL_SKILL_PACKAGE_ASSETS.iter().map(|asset| {
+                RuntimeBundledExternalSkillPackageAsset {
+                    skillName: asset.skill_name,
+                    path: asset.path,
+                    archive: match asset.package {
+                        BundledSkillPackage::Builtin(index) => runtimeBuiltinPluginAssets()[index].bytes,
+                        BundledSkillPackage::External(index) => runtimeBundledExternalPluginAssets()[index].bytes,
+                    },
+                    member: asset.member,
+                }
+            }).collect()
         })
         .as_slice()
 }

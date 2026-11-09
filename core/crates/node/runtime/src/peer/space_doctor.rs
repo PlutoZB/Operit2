@@ -6,6 +6,7 @@
 //! own locked entry point, after a timestamped backup, verified by a shadow
 //! reconstruction of the control command set.
 
+use operit_util::RuntimeStorageLayout::{RUNTIME_SPACE_CONTROL_PROJECTION_PATH, RUNTIME_SPACE_DOCTOR_COUNTERS_PATH};
 use super::*;
 use crate::PeerStateStore::PeerStateStore;
 use operit_store::NetworkControlStore::{NetworkControlCommandRecord, NETWORK_CONTROL_SYNC_DOMAIN};
@@ -17,8 +18,8 @@ use operit_util::RuntimeStorageLayout::RUNTIME_SYNC_DIR_PATH;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
-pub(crate) const CONTROL_PROJECTION_PATH: &str = "runtime/link_access/space_policy.preferences.json";
-const COUNTERS_PATH: &str = "runtime/diagnostics/space_doctor_counters.preferences.json";
+pub(crate) const CONTROL_PROJECTION_PATH: &str = RUNTIME_SPACE_CONTROL_PROJECTION_PATH;
+const COUNTERS_PATH: &str = RUNTIME_SPACE_DOCTOR_COUNTERS_PATH;
 const COUNTERS_KEY: &str = "counters";
 static COUNTERS_MUTATION: Mutex<()> = Mutex::new(());
 
@@ -458,6 +459,7 @@ fn runRepair(
     spaceId: &str,
 ) -> Result<RepairReport, String> {
     let storage = service.storage();
+    let authorityBefore = service.networkControlStore().currentSpaceOperations()?;
     let timestamp = currentTimeMillis();
     let mut backupPaths = Vec::new();
     let mut quarantineByDevice: BTreeMap<String, Vec<u64>> = BTreeMap::new();
@@ -491,7 +493,7 @@ fn runRepair(
 
     // Selfcheck: the store's control view must equal the shadow set rebuilt
     // from the surviving raw journal lines plus the projection copy.
-    let mut shadowOperations = Vec::new();
+    let mut shadowOperations = authorityBefore;
     for deviceId in sync.devices().map_err(|error| error.to_string())? {
         let scan = sync.scanOperationLog(&deviceId).map_err(|error| error.to_string())?;
         shadowOperations.extend(scan.operations.iter().cloned());

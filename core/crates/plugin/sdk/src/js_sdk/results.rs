@@ -379,6 +379,8 @@ pub enum TerminalType {
     Powershell,
     #[serde(rename = "bash")]
     Bash,
+    #[serde(rename = "zsh")]
+    Zsh,
     #[serde(rename = "shell")]
     Shell,
 }
@@ -388,6 +390,7 @@ impl TerminalType {
         match self {
             Self::Powershell => "powershell",
             Self::Bash => "bash",
+            Self::Zsh => "zsh",
             Self::Shell => "shell",
         }
     }
@@ -405,6 +408,7 @@ impl TryFrom<&str> for TerminalType {
         match value {
             "powershell" => Ok(Self::Powershell),
             "bash" => Ok(Self::Bash),
+            "zsh" => Ok(Self::Zsh),
             "shell" => Ok(Self::Shell),
             _ => Err(format!("invalid terminal type: {value}")),
         }
@@ -423,8 +427,8 @@ pub enum TerminalImplementation {
     Adb,
     #[serde(rename = "shell")]
     Shell,
-    #[serde(rename = "ish")]
-    Ish,
+    #[serde(rename = "arm64")]
+    Arm64,
     #[serde(rename = "qemu-vroot")]
     QemuVroot,
     #[serde(rename = "v86")]
@@ -439,7 +443,7 @@ impl TerminalImplementation {
             Self::AndroidSystem => "android-system",
             Self::Adb => "adb",
             Self::Shell => "shell",
-            Self::Ish => "ish",
+            Self::Arm64 => "arm64",
             Self::QemuVroot => "qemu-vroot",
             Self::V86 => "v86",
         }
@@ -461,7 +465,7 @@ impl TryFrom<&str> for TerminalImplementation {
             "android-system" => Ok(Self::AndroidSystem),
             "adb" => Ok(Self::Adb),
             "shell" => Ok(Self::Shell),
-            "ish" => Ok(Self::Ish),
+            "arm64" => Ok(Self::Arm64),
             "qemu-vroot" => Ok(Self::QemuVroot),
             "v86" => Ok(Self::V86),
             _ => Err(format!("invalid terminal implementation: {value}")),
@@ -567,6 +571,7 @@ impl ModelsListSummariesResultData {
 #[allow(non_snake_case)]
 #[serde(deny_unknown_fields)]
 pub struct TtsAudioSegment {
+    #[serde(with = "serde_bytes")]
     pub audio: Vec<u8>,
     pub contentType: String,
 }
@@ -877,6 +882,8 @@ pub enum StorageRequestResultData {
     List {
         entries: Vec<StorageKeyValueEntry>,
     },
+    #[serde(rename = "changes")]
+    Changes { page: operit_host_api::PluginStorage::StorageChangePage },
     #[serde(rename = "commit")]
     Commit {
         version: String,
@@ -908,6 +915,7 @@ impl From<StorageResponse> for StorageRequestResultData {
                 entries: entries.into_iter().map(JsNullable::from_option).collect(),
             },
             StorageResponse::List(entries) => Self::List { entries },
+            StorageResponse::Changes(page) => Self::Changes { page },
             StorageResponse::Commit(result) => Self::Commit {
                 version: result.version,
             },
@@ -968,6 +976,9 @@ pub struct SystemSettingData {
 #[derive(Clone, Serialize, Deserialize)]
 /// Reports the outcome of installing, uninstalling, starting, or stopping an application package.
 pub struct AppOperationData {
+    /// permission_required, installer_opened, restart_required, or completed.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "installState")]
+    pub installState: Option<String>,
     #[serde(rename = "operationType")]
     pub operationType: String,
     #[serde(rename = "packageName")]
@@ -1565,7 +1576,7 @@ pub struct TerminalCommandResultData {
     ///Actual terminal type used for execution
     #[serde(rename = "terminalType")]
     pub terminalType: TerminalType,
-    ///Whether this execution ended due to timeout. On timeout, the current command is cancelled and the terminal session is kept.
+    ///Whether foreground waiting expired while the original command continues in its session.
     #[serde(rename = "timedOut")]
     pub timedOut: bool,
 }
@@ -2125,6 +2136,8 @@ impl FileApplyResultData {
             .map(String::as_str)
             .chain(std::iter::once(self.aiDiffInstructions.as_str()))
         {
+            let mut additions = 0;
+            let mut deletions = 0;
             for line in candidate.lines() {
                 let trimmed = line.trim();
                 if trimmed.starts_with("Changes: +")
@@ -2132,6 +2145,14 @@ impl FileApplyResultData {
                 {
                     return Some(trimmed.to_string());
                 }
+                if line.starts_with('+') && !line.starts_with("+++") {
+                    additions += 1;
+                } else if line.starts_with('-') && !line.starts_with("---") {
+                    deletions += 1;
+                }
+            }
+            if additions > 0 || deletions > 0 {
+                return Some(format!("Changes: +{additions} -{deletions} lines"));
             }
         }
         None
@@ -2213,25 +2234,25 @@ impl AppOperationData {
         match self.operationType.as_str() {
             "install" => {
                 format!(
-                    "Successfully installed app: {} {}",
+                    "App installation request: {} {}",
                     self.packageName, self.details
                 )
             }
             "uninstall" => {
                 format!(
-                    "Successfully uninstalled app: {} {}",
+                    "App uninstall request: {} {}",
                     self.packageName, self.details
                 )
             }
             "start" => {
                 format!(
-                    "Successfully started app: {} {}",
+                    "App launch request: {} {}",
                     self.packageName, self.details
                 )
             }
             "stop" => {
                 format!(
-                    "Successfully stopped app: {} {}",
+                    "App stop request: {} {}",
                     self.packageName, self.details
                 )
             }
@@ -2497,7 +2518,7 @@ impl TerminalCommandResultData {
         sb.push_str(&format!("Terminal Type: {}\n", self.terminalType));
         sb.push_str(&format!("Exit Code: {}\n", self.exitCode));
         if self.timedOut {
-            sb.push_str("Timed Out: true\n");
+            sb.push_str("Background: true\nCommand is still running and was not canceled. The next command uses a new available session. Use Tools.System.terminal.wait(sessionId, 20000), Tools.System.terminal.screen(sessionId), Tools.System.terminal.input(sessionId, options), or Tools.System.terminal.close(sessionId) to manage this session.\n");
         }
         sb.push_str("\nOutput:\n");
         sb.push_str(&self.output);
@@ -3037,6 +3058,7 @@ pub struct EdgePortResultData {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum TerminalObservationResultData {
+    Run { result: TerminalCommandResultData },
     Open { handle: String },
     Next { event: JsNullable<super::system::TerminalExecEvent> },
     Close {},
@@ -3066,5 +3088,29 @@ impl WebSocketResultData {
             Self::Send => "WebSocket message sent".into(),
             Self::Close => "WebSocket closed".into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod terminal_type_tests {
+    use super::TerminalType;
+
+    #[test]
+    fn terminal_type_literals_round_trip() {
+        for literal in ["powershell", "bash", "zsh", "shell"] {
+            let terminal_type = TerminalType::try_from(literal).unwrap();
+            assert_eq!(terminal_type.as_str(), literal);
+            assert_eq!(terminal_type.to_string(), literal);
+            let json = serde_json::to_string(&terminal_type).unwrap();
+            assert_eq!(json, format!("\"{literal}\""));
+            let decoded: TerminalType = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded.as_str(), literal);
+        }
+    }
+
+    #[test]
+    fn unknown_terminal_type_is_rejected() {
+        assert!(TerminalType::try_from("unknown-shell").is_err());
+        assert!(serde_json::from_str::<TerminalType>("\"unknown-shell\"").is_err());
     }
 }

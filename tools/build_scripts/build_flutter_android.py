@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import os
 import sys
 import zipfile
 from pathlib import Path
@@ -69,6 +70,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--enforce-lockfile", action="store_true")
     parser.add_argument("--skip-proxy-generation", action="store_true")
     parser.add_argument("--skip-signing", action="store_true")
+    parser.add_argument(
+        "--impeller-backend",
+        choices=["vulkan", "opengles"],
+        help="Force an Impeller rendering backend in the packaged APK; default keeps engine autoselection",
+    )
     parser.add_argument("--dist-dir", type=Path, default=DIST_DIR)
     return parser.parse_args()
 
@@ -77,6 +83,8 @@ def parse_args() -> argparse.Namespace:
 def verify_android_runtime_assets(apk_path: Path, abi: str) -> None:
     prefix = "assets/android-runtime/"
     with zipfile.ZipFile(apk_path) as archive:
+        if "assets/operit-android-module.json" in archive.namelist():
+            raise RuntimeError("Ordinary Android App release must not contain the module runtime")
         asset_names = {
             entry.filename for entry in archive.infolist()
             if not entry.is_dir() and entry.filename.startswith(prefix)
@@ -129,12 +137,18 @@ def main() -> int:
         "--split-per-abi",
         "--target-platform",
         "android-arm64",
+        "--android-project-arg=operitRuntime=app",
     ]
     if args.build_name:
         command.extend(["--build-name", args.build_name])
     if args.build_number:
         command.extend(["--build-number", args.build_number])
-    run(command, cwd=FLUTTER_APP_DIR)
+    build_env = None
+    if args.impeller_backend:
+        # Gradle project properties also arrive through ORG_GRADLE_PROJECT_*
+        # environment variables, so the flutter CLI needs no extra flag.
+        build_env = {"ORG_GRADLE_PROJECT_operitImpellerBackend": args.impeller_backend}
+    run(command, cwd=FLUTTER_APP_DIR, env=build_env)
 
     apk_dir = FLUTTER_APP_DIR / "build" / "app" / "outputs" / "flutter-apk"
     apk_path = apk_dir / "app-arm64-v8a-release.apk"

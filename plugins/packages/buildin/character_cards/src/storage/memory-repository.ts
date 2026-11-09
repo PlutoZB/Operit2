@@ -3,12 +3,13 @@ import type { Storage } from "../../../../../types/storage";
 import type { DocumentChunk, Memory, MemoryAutoSaveStatus, MemoryGraph, MemoryImportResult, MemoryJobState, MemoryLink, MemoryLinkUpdate, MemoryLinkValues, MemoryRebuildProgress, MemorySearchConfig, MemorySearchDebug, MemorySearchOptions, MemorySettings, MemorySpace, MemoryValues } from "../model";
 import { uuid } from "../identity";
 import { assertMemory, assertMemoryValues, assertMemorySettings, assertNumber, assertSearchConfig, assertSearchOptions, assertString, normalizeNames, requireId, requireName } from "../validation";
-import { assertMemorySpace } from "./state";
+import { assertMemorySpace, createMemorySpace } from "./state";
 import { clone, equal, storedValue } from "./records";
 import { CharacterMemoryDatabase } from "./memory";
 import type { ObjectMutation } from "./memory";
 import { embedTexts, embeddingSpace } from "../memory-jobs/embeddings";
 import type { SourceEmbedding } from "../memory-jobs/embeddings";
+import { searchDocumentChunks } from "../search/chunks";
 import { prepareMemoryQuery, searchMemoryDatabase } from "../memory-search";
 
 type Owner = Omit<MemorySpace, "memories" | "links" | "chunks" | "candidates" | "embeddings">;
@@ -32,18 +33,30 @@ function put(collection: string, recordKey: string, value: object, version: stri
 }
 
 /** Builds one guarded deletion from its original database snapshot. */
-function remove(row: Row): ObjectMutation { return { op: "delete", collection: row.collection, key: row.key, expectedVersion: row.version }; }
+function remove(row: Pick<Row, "collection" | "key" | "version">): ObjectMutation { return { op: "delete", collection: row.collection, key: row.key, expectedVersion: row.version }; }
 
-/** Implements memory operations on synchronized database records without a retained corpus. */
+/** Implements memory operations on synchronized database records using synchronized source records and derived owner-local search indexes. */
 export class DatabaseMemoryRepository {
   private readonly snapshots = new WeakMap<object, Row[]>();
 
   /** Retains only the storage capability; network work never owns a database transaction. */
   constructor(protected readonly memoryDatabase: CharacterMemoryDatabase) {}
 
-  /** Requires the persisted metadata for one exact owner. */
+  /** Keeps nullable reads separate from versioned writes to an existing library. */
+  private findOwner(ownerKey: string): Promise<Storage.Entry<Owner> | null> {
+    return this.memoryDatabase.get<Owner>("owners", requireId(ownerKey, "memory owner"));
+  }
+
+  async hasMemoryOwner(ownerKey: string): Promise<boolean> { return (await this.findOwner(ownerKey)) !== null; }
+
+  /** Missing libraries have default values in memory; reads never publish new records. */
+  private async readOwnerValue(ownerKey: string): Promise<Owner> {
+    return (await this.findOwner(ownerKey))?.value ?? createMemorySpace(ownerKey);
+  }
+
+  /** Requires persisted metadata and its exact version for a write. */
   protected async owner(ownerKey: string): Promise<Storage.Entry<Owner>> {
-    const entry = await this.memoryDatabase.get<Owner>("owners", requireId(ownerKey, "memory owner"));
+    const entry = await this.findOwner(ownerKey);
     if (entry === null) throw new Error("Missing memory owner: " + ownerKey);
     return entry;
   }
@@ -77,7 +90,7 @@ export class DatabaseMemoryRepository {
   }
 
   /** Reads settings from one owner record. */
-  async readMemorySettings(ownerKey: string): Promise<MemorySettings> { return (await this.owner(ownerKey)).value.settings; }
+  async readMemorySettings(ownerKey: string): Promise<MemorySettings> { return (await this.readOwnerValue(ownerKey)).settings; }
 
   /** Updates complete settings with the owner's exact version precondition. */
   async writeMemorySettings(ownerKey: string, settings: MemorySettings): Promise<void> {
@@ -97,7 +110,7 @@ export class DatabaseMemoryRepository {
   }
 
   /** Reads persisted search weights without reading memory bodies. */
-  async readMemorySearchConfig(ownerKey: string): Promise<MemorySearchConfig> { return (await this.owner(ownerKey)).value.searchConfig; }
+  async readMemorySearchConfig(ownerKey: string): Promise<MemorySearchConfig> { return (await this.readOwnerValue(ownerKey)).searchConfig; }
 
   /** Writes complete search configuration through optimistic concurrency. */
   async writeMemorySearchConfig(ownerKey: string, searchConfig: MemorySearchConfig): Promise<void> {
@@ -107,14 +120,18 @@ export class DatabaseMemoryRepository {
 
   /** Returns bounded ranked results produced by the database. */
   async searchMemories(options: MemorySearchOptions): Promise<Memory[]> {
-    assertSearchOptions(options); const owner = await this.owner(options.ownerKey);
+    assertSearchOptions(options);
+    const owner = await this.findOwner(options.ownerKey);
+    if (owner === null) return [];
     return (await searchMemoryDatabase(this.memoryDatabase, owner.value.settings, options, owner.value.searchConfig)).result.candidates.map(
       /** Returns the complete source records selected in the database. */ hit => hit.memory);
   }
 
   /** Returns one filtered page and its database-counted snapshot exclusions. */
   async searchMemoryPage(options: MemorySearchOptions): Promise<import("../api").DomainOutput<"memory.searchWithOptions">> {
-    assertSearchOptions(options); const owner = await this.owner(options.ownerKey);
+    assertSearchOptions(options);
+    const owner = await this.findOwner(options.ownerKey);
+    if (owner === null) return { ownerKey: options.ownerKey, items: [], documents: [], excludedBySnapshotCount: 0 };
     const { result, queryEmbedding } = await searchMemoryDatabase(this.memoryDatabase, owner.value.settings, options, owner.value.searchConfig);
     const items = result.candidates.map(/** Projects only selected source records. */ hit => hit.memory);
     const documents = await Promise.all(items.filter(/** Selects only returned document sources. */ memory => memory.isDocumentNode).map(
@@ -125,20 +142,22 @@ export class DatabaseMemoryRepository {
 
   /** Returns bounded score explanations from the same database query used by recall. */
   async searchMemoryDebug(options: MemorySearchOptions, config: MemorySearchConfig): Promise<MemorySearchDebug> {
-    assertSearchOptions(options); assertSearchConfig(config); const owner = await this.owner(options.ownerKey);
+    assertSearchOptions(options); assertSearchConfig(config);
+    const owner = await this.findOwner(options.ownerKey);
+    if (owner === null) return { query: options.query, config, relevanceThreshold: options.relevanceThreshold ?? 0, memoriesInScopeCount: 0, candidates: [], excludedBySnapshotCount: 0 };
     return (await searchMemoryDatabase(this.memoryDatabase, owner.value.settings, options, config, true)).result;
   }
 
   /** Lists an explicitly requested owner library without loading other owners. */
   async listMemories(ownerKey: string): Promise<Memory[]> {
-    await this.owner(ownerKey);
+    if (!(await this.hasMemoryOwner(ownerKey))) return [];
     const rows = await this.memoryDatabase.all<Envelope<Memory>>("memories", ownerKey);
     return rows.map(/** Projects original records for the library view or export. */ row => row.value.record);
   }
 
   /** Reads only the explicitly selected exact titles, including genuine duplicate clusters. */
   async readMemoriesByTitles(ownerKey: string, titles: string[]): Promise<Memory[]> {
-    await this.owner(ownerKey);
+    if (!(await this.hasMemoryOwner(ownerKey))) return [];
     const rows = await this.memoryDatabase.all<Envelope<Memory>>("memories", ownerKey, "json_extract(value,'$.record.title') IN (SELECT value FROM json_each(?))", [JSON.stringify(titles)]);
     return rows.map(/** Projects only selected source records. */ row => row.value.record);
   }
@@ -154,7 +173,7 @@ export class DatabaseMemoryRepository {
 
   /** Reads distinct folder paths in the database and expands their parent directories. */
   async listMemoryFolders(ownerKey: string): Promise<string[]> {
-    await this.owner(ownerKey);
+    if (!(await this.hasMemoryOwner(ownerKey))) return [];
     const rows = await this.memoryDatabase.query("SELECT DISTINCT json_extract(value,'$.record.folderPath') AS folder FROM plugin_objects WHERE collection='memories' AND key>=? AND key<?", [ownerKey + "/", ownerKey + "0"]);
     const folders = new Set<string>();
     for (const row of rows) {
@@ -257,7 +276,7 @@ export class DatabaseMemoryRepository {
 
   /** Lists explicit graph relationships for one owner. */
   async listMemoryLinks(ownerKey: string): Promise<MemoryLink[]> {
-    await this.owner(ownerKey);
+    if (!(await this.hasMemoryOwner(ownerKey))) return [];
     return (await this.memoryDatabase.all<Envelope<MemoryLink>>("links", ownerKey)).map(/** Projects complete graph relationships. */ row => row.value.record);
   }
 
@@ -289,7 +308,9 @@ export class DatabaseMemoryRepository {
 
   /** Reads job metadata and candidates independently of memory bodies and vectors. */
   async readMemoryJobState(ownerKey: string): Promise<MemoryJobState> {
-    const owner = await this.owner(ownerKey), candidates = await this.rows("candidates", ownerKey);
+    const owner = await this.findOwner(ownerKey);
+    if (owner === null) return createMemorySpace(ownerKey);
+    const candidates = await this.rows("candidates", ownerKey);
     const state: MemoryJobState = { ...owner.value, candidates: candidates.map(/** Projects job candidates without memory data. */ row => (row.value as unknown as Envelope<MemoryJobState["candidates"][number]>).record) };
     this.snapshots.set(state, clone([{ collection: "owners", key: ownerKey, value: storedValue(owner.value), version: owner.version }, ...candidates]));
     return state;
@@ -306,6 +327,22 @@ export class DatabaseMemoryRepository {
     await this.commit(this.diff(before, after)); this.snapshots.delete(state);
   }
 
+  /** Changes only failed candidates in bounded pages under their exact source and owner versions. */
+  async recoverFailedCandidates(ownerKey: string, producerNodeId: string | null): Promise<number> {
+    const owner = await this.owner(ownerKey), now = Date.now();
+    let count = 0, after = "";
+    for (;;) {
+      const rows = await this.memoryDatabase.select<Envelope<MemoryJobState["candidates"][number]>>("candidates", ownerKey, "json_extract(value,'$.record.status')='failed'", [], 100, after);
+      if (rows.length === 0) return count;
+      await this.commit(rows.map(
+        /** Preserves concurrent status changes through the exact candidate version. */
+        row => producerNodeId === null ? remove({ collection: "candidates", ...row }) : put("candidates", row.key,
+          { ...row.value, record: { ...row.value.record, producerNodeId, status: "pending", lastError: "", updatedAt: now } }, row.version)),
+        [{ collection: "owners", key: ownerKey, expectedVersion: owner.version }]);
+      count += rows.length; after = rows[rows.length - 1].key;
+    }
+  }
+
   /** Computes record-level mutations only for explicitly selected records. */
   private diff(before: Row[], after: { collection: string; key: string; value: Storage.Value }[]): ObjectMutation[] {
     const previous = new Map(before.map(/** Indexes the operation's original exact versions. */ row => [row.collection + "\0" + row.key, row]));
@@ -320,7 +357,8 @@ export class DatabaseMemoryRepository {
 
   /** Counts candidate states in SQLite without loading their payloads. */
   async readMemoryAutoSaveStatus(ownerKey: string): Promise<MemoryAutoSaveStatus> {
-    const owner = await this.owner(ownerKey);
+    const owner = await this.findOwner(ownerKey);
+    if (owner === null) return { ownerKey, pendingCandidates: 0, pendingChats: 0, processingCandidates: 0, failedCandidates: 0, nextRunAtMs: 0, minutesUntilNextRun: 0, lastError: "" };
     const rows = await this.memoryDatabase.query(`SELECT json_extract(value,'$.record.status') AS status,count(*) AS count,count(DISTINCT json_extract(value,'$.record.chatId')) AS chats
       FROM plugin_objects WHERE collection='candidates' AND key>=? AND key<? GROUP BY json_extract(value,'$.record.status')`, [ownerKey + "/", ownerKey + "0"]);
     let pendingCandidates = 0, pendingChats = 0, processingCandidates = 0, failedCandidates = 0;
@@ -336,7 +374,7 @@ export class DatabaseMemoryRepository {
   }
 
   /** Reads persisted rebuild progress without waiting for model requests. */
-  async readMemoryRebuildProgress(ownerKey: string): Promise<MemoryRebuildProgress> { return (await this.owner(ownerKey)).value.rebuildProgress; }
+  async readMemoryRebuildProgress(ownerKey: string): Promise<MemoryRebuildProgress> { return (await this.readOwnerValue(ownerKey)).rebuildProgress; }
 
   /** Cancels a running task through an exact owner-version update. */
   async cancelMemoryRebuild(ownerKey: string): Promise<void> {
@@ -367,7 +405,9 @@ export class DatabaseMemoryRepository {
 
   /** Reads full owner records only for explicit backups and bulk imports. */
   async readMemorySpace(ownerKey: string): Promise<MemorySpace> {
-    const owner = await this.owner(ownerKey), state: MemorySpace = { ...owner.value, memories: [], links: [], chunks: [], candidates: [], embeddings: [] };
+    const owner = await this.findOwner(ownerKey);
+    if (owner === null) return createMemorySpace(ownerKey);
+    const state: MemorySpace = { ...owner.value, memories: [], links: [], chunks: [], candidates: [], embeddings: [] };
     const before: Row[] = [{ collection: "owners", key: ownerKey, value: storedValue(owner.value), version: owner.version }];
     for (const collection of ["memories", "links", "chunks", "candidates"] as const) {
       const rows = await this.rows(collection, ownerKey); before.push(...rows);
@@ -437,23 +477,9 @@ export class DatabaseMemoryRepository {
 
   /** Ranks document chunks with the query vector already prepared for this operation. */
   private async queryChunks(ownerKey: string, owner: Owner, memory: Memory, query: string, count: number, queryEmbedding: SourceEmbedding | null): Promise<{ total: number; chunks: DocumentChunk[] }> {
-    const semantic = queryEmbedding !== null;
-    const space = queryEmbedding === null ? "" : queryEmbedding.space, vector = queryEmbedding === null ? [] : queryEmbedding.vector;
-    const rows = await this.memoryDatabase.query(`WITH query_vector AS (SELECT CAST(key AS INTEGER) AS dimension,value FROM json_each(?6)), chunks AS (
-      SELECT value,json_extract(value,'$.record.chunkIndex') AS position FROM plugin_objects
-      WHERE collection='chunks' AND key>=?1 AND key<?2 AND json_extract(value,'$.record.memoryUuid')=?3
-    ), scored AS (
-      SELECT *,CASE WHEN ?4='*' THEN 1 ELSE
-        CASE WHEN lower(json_extract(value,'$.record.content')) GLOB '*'||lower(?4)||'*' THEN ?7 ELSE 0 END +
-        CASE WHEN ?8>0 THEN ?8*(SELECT sum(q.value*v.value) FROM json_each(chunks.value,'$.embedding.vector') v JOIN query_vector q ON q.dimension=v.key) ELSE 0 END END AS score
-      FROM chunks
-    ), page AS (SELECT * FROM scored WHERE score>0 ORDER BY score DESC,position LIMIT ?9), stats AS (
-      SELECT count(*) AS total,sum(CASE WHEN ?8>0 AND (json_extract(value,'$.embedding.text') IS NOT json_extract(value,'$.record.content') OR json_extract(value,'$.embedding.space') IS NOT ?5 OR json_array_length(value,'$.embedding.vector') IS NOT json_array_length(?6)) THEN 1 ELSE 0 END) AS invalid FROM chunks
-    ) SELECT json_extract(page.value,'$.record') AS record,stats.total,stats.invalid FROM stats LEFT JOIN page ON 1 ORDER BY page.score DESC,page.position`,
-      [ownerKey + "/", ownerKey + "0", memory.uuid, query.trim() === "*" ? "*" : query, space, JSON.stringify(vector), owner.searchConfig.keywordWeight, semantic ? owner.searchConfig.vectorWeight : 0, count]);
-    if (rows[0].invalid !== null && Number(rows[0].invalid) !== 0) throw new Error("Document vector index requires an explicit rebuild");
-    return { total: Number(rows[0].total), chunks: rows.filter(/** Omits the aggregate-only empty page row. */ row => row.record !== null).map(/** Decodes only the selected source chunks. */ row => JSON.parse(String(row.record)) as DocumentChunk) };
+    return searchDocumentChunks(this.memoryDatabase, ownerKey, memory, query, count, owner.searchConfig, queryEmbedding);
   }
+
   /** Imports complete document-aware records, relationships, settings and USER text in this operation. */
   async importMemorySpace(ownerKey: string, imported: MemorySpace, strategy: "SKIP" | "UPDATE" | "CREATE_NEW"): Promise<MemoryImportResult> {
     assertMemorySpace(imported);

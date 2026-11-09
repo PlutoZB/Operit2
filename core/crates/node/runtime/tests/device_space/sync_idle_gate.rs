@@ -1,5 +1,6 @@
 use super::*;
 
+/// Counts delivered calls for one synchronization method.
 fn synchronizedMethodCount(peer: &ApprovalMeshPeer, method: &str) -> usize {
     peer.calls
         .lock()
@@ -14,9 +15,11 @@ fn synchronizedMethodCount(peer: &ApprovalMeshPeer, method: &str) -> usize {
 fn fullPassMarkers(peer: &ApprovalMeshPeer) -> usize {
     [
         "snapshot",
+        "snapshotHeader",
+        "snapshotControlPage",
         "observeSpaceSnapshot",
         "exchange",
-        "coreVersion",
+        "protocol",
         "deviceSpace",
         "syncOperationsSince",
         "syncApplyOperations",
@@ -26,6 +29,7 @@ fn fullPassMarkers(peer: &ApprovalMeshPeer) -> usize {
     .sum()
 }
 
+/// Creates an observer over the fixture's authoritative stores.
 fn idleObserver(
     router: &CoreNodeRouter,
 ) -> crate::SpacePersistenceSyncService::SpacePersistenceSyncService {
@@ -41,7 +45,9 @@ fn idleObserver(
 /// against genuine state, while everything else stays unsupported.
 struct GateTestApplicationClient {
     control: operit_store::NetworkControlStore::NetworkControlStore,
+    storage: Arc<dyn operit_host_api::RuntimeStorageHost>,
     pendingFailure: Arc<std::sync::atomic::AtomicBool>,
+    consistencyVersion: Option<u64>,
 }
 
 impl GateTestApplicationClient {
@@ -55,6 +61,12 @@ impl GateTestApplicationClient {
         } else {
             Vec::new()
         }
+    }
+
+    /// Uses the production boundary for both probe and final receipt acknowledgements.
+    fn gateSummary(&self) -> Result<String,String> {
+        operit_store::SyncOperationStore::SyncOperationStore::new(self.storage.clone(),operit_util::RuntimeStorageLayout::RUNTIME_SYNC_DIR_PATH)
+            .synchronizationSummary().map_err(|e|e.to_string())
     }
 
     /// Returns exact receipt intervals for the gate fixture.
@@ -77,20 +89,15 @@ impl operit_link::CoreLinkSharedClient for GateTestApplicationClient {
                 )
                 .map_err(|error| error.to_string()),
                 "syncClock" => operit_link::toCoreValue(
-                    serde_json::json!({"ranges":self.gateClock()?.ranges, "protocolVersion":1, "pending":0, "pendingBlobs":[], "errors":self.gateErrors()}),
+                    serde_json::json!({"ranges":self.gateClock()?.ranges, "protocolVersion":1, "consistencyVersion":self.consistencyVersion, "stateSummary":format!("digest:{}",self.gateSummary()?), "pending":0, "pendingBlobs":[], "errors":self.gateErrors()}),
                 )
                 .map_err(|error| error.to_string()),
+                "syncConsistency" => operit_link::toCoreValue(
+                    serde_json::json!({"manifests":[], "errors":self.gateErrors(), "pendingOwners":[], "boundary":operit_store::Transaction::digest(&self.gateClock()?)?}),
+                ).map_err(|error| error.to_string()),
                 "syncClockDigest" => operit_link::toCoreValue(serde_json::json!({
                     "protocolVersion": 1,
-                    // The fixture models one remote process per router, so the
-                    // digest follows the remote's own receipt. Production adds
-                    // the peer-local mutation revision, which cannot be shared
-                    // across two routers living in one test process.
-                    "digest": format!(
-                        "ranges={}#errors={:?}",
-                        serde_json::to_string(&self.gateClock()?.ranges).unwrap_or_default(),
-                        self.gateErrors(),
-                    ),
+                    "digest": self.gateSummary()?,
                 }))
                 .map_err(|error| error.to_string()),
                 "syncOperationsSince" => {
@@ -126,22 +133,9 @@ impl operit_link::CoreLinkSharedClient for GateTestApplicationClient {
                     // parameter, exactly like the real application receives it.
                     let args: serde_json::Value = operit_link::fromCoreValue(request.args)
                         .map_err(|error| error.to_string())?;
-                    let parameter = args.get("operations").cloned().unwrap_or_default();
-                    let forceApply = parameter
-                        .get("forceApply")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false);
-                    let operationsValue = if forceApply {
-                        parameter
-                            .get("operations")
-                            .cloned()
-                            .ok_or_else(|| "bootstrap sync request is missing operations".to_string())?
-                    } else {
-                        parameter
-                    };
                     let operations: Vec<
                         operit_store::SyncOperationStore::SyncOperation,
-                    > = serde_json::from_value(operationsValue).map_err(|error| {
+                    > = serde_json::from_value(args["operations"].clone()).map_err(|error| {
                         format!(
                             "operations shape {}: {error}",
                             serde_json::to_string(&args).unwrap_or_default()
@@ -194,7 +188,9 @@ impl operit_link::CoreLinkSharedClient for GateTestApplicationClient {
         &self,
         request: operit_link::CorePushRequest,
     ) -> Result<Box<dyn operit_link::CoreLinkPushSession>, operit_link::CoreLinkError> {
-        Err(operit_link::CoreLinkError::methodNotFound(&request.methodName))
+        Err(operit_link::CoreLinkError::methodNotFound(
+            &request.methodName,
+        ))
     }
 }
 
@@ -203,7 +199,9 @@ pub(super) fn installControlSyncTestApplication(router: &mut CoreNodeRouter) {
     let control = router.networkControlStore.clone();
     router.installTestApplicationClient(Arc::new(GateTestApplicationClient {
         control,
+        storage: router.localCore.runtimeStorageHost(),
         pendingFailure: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        consistencyVersion: Some(7),
     }));
 }
 
@@ -218,7 +216,7 @@ fn gateMesh(
     Arc<std::sync::atomic::AtomicBool>,
 ) {
     let services = (0..2)
-        .map(|index| approvalService(&format!("{prefix}-{index}")))
+        .map(|index| approvalService(&format!("{prefix}-{}",1-index)))
         .collect::<Vec<_>>();
     let mut routers = services
         .iter()
@@ -230,7 +228,9 @@ fn gateMesh(
             let control = router.networkControlStore.clone();
             router.installTestApplicationClient(Arc::new(GateTestApplicationClient {
                 control,
+                storage: router.localCore.runtimeStorageHost(),
                 pendingFailure: pendingFailure.clone(),
+                consistencyVersion: Some(7),
             }));
         } else {
             installControlSyncTestApplication(router);
@@ -269,10 +269,6 @@ async fn idle_cycles_probe_clocks_without_repeating_full_exchanges() {
     let observer = idleObserver(&routers[1]);
 
     // The first pass converges with the remote and seeds the clock baseline.
-    // A bootstrap pass may still leave one detectable ripple on the remote
-    // (replayed operations land through dedup), so one settling cycle absorbs
-    // it before the idling baseline is taken.
-    observer.synchronizeOnce().await.unwrap();
     observer.synchronizeOnce().await.unwrap();
     let markersAfterFirstPass = fullPassMarkers(&peers[1]);
     let probesAfterFirstPass = synchronizedMethodCount(&peers[1], "syncClockDigest");
@@ -341,22 +337,67 @@ async fn idle_cycles_probe_clocks_without_repeating_full_exchanges() {
     observer.synchronizeOnce().await.unwrap();
     assert_eq!(fullPassMarkers(&peers[1]), markersAfterChangePass);
 
-    // Delaying a small incremental exchange does not make it substantial.
-    // Both the delay and a real backlog are required for visible progress.
+    // A delayed small exchange remains silent through completion.
     let reopenedFacade = RuntimeRemoteLinkService::newWithRouter(
-        (*routers[1].localCore).clone(), routers[1].clone());
+        (*routers[1].localCore).clone(),
+        routers[1].clone(),
+    );
     let progress = reopenedFacade.spaceSyncProgressFlow();
-    access[0].updateDeviceSpacePolicy("sync.large.incremental".into(), "v1".into()).unwrap();
+    access[0]
+        .updateDeviceSpacePolicy("sync.small.incremental".into(), "v1".into())
+        .unwrap();
     let (arrived, resume) = peers[1].pauseResponse("syncApplyOperations");
     let (result, ()) = tokio::join!(observer.synchronizeOnce(), async {
         arrived.await.unwrap();
-        assert!(progress.value().is_empty(), "a new incremental exchange starts silently");
+        assert!(
+            progress.value().is_empty(),
+            "a new incremental exchange starts silently"
+        );
         tokio::time::sleep(Duration::from_millis(3_100)).await;
-        assert!(progress.value().is_empty(), "a slow small exchange stays silent");
+        assert!(
+            progress.value().is_empty(),
+            "a small exchange remains silent even when delayed"
+        );
         resume.send(()).unwrap();
     });
     result.unwrap();
-    assert!(progress.value().is_empty(), "small completion stays silent too");
+    assert!(
+        progress.value().is_empty(),
+        "small completed exchanges remain silent"
+    );
+}
+
+/// Unsupported peers must upgrade before receiving initialization transactions.
+#[tokio::test]
+async fn a_peer_without_consistency_support_cannot_complete_until_upgraded() {
+    let _guard = routeTestGlobalLock().lock().await;
+    installTestRuntimeScheduler();
+    let (mut routers, _access, peers, _) = gateMesh("sync-old-consistency");
+    let control = routers[0].networkControlStore.clone();
+    let storage = routers[0].localCore.runtimeStorageHost();
+    routers[0].installTestApplicationClient(Arc::new(GateTestApplicationClient {
+        control, storage,
+        pendingFailure: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        consistencyVersion: None,
+    }));
+    peers[1].link(&routers[0]);
+    let observer = idleObserver(&routers[1]);
+    let error = observer.synchronizeOnce().await.unwrap_err();
+    assert!(error.contains("compatible version is required"), "{error}");
+    assert_eq!(synchronizedMethodCount(&peers[1], "syncApplyOperations"), 0);
+    assert_eq!(synchronizedMethodCount(&peers[1], "syncConsistency"), 0);
+    assert!(!observer.progressFlow().value().is_empty());
+    peers[1].disconnectPeer(&routers[0].localNodeId()).await.unwrap();
+    observer.synchronizeOnce().await.unwrap();
+    assert!(observer.progressFlow().value().is_empty(), "offline peers must not leave stale errors visible");
+    installControlSyncTestApplication(&mut routers[0]);
+    peers[1].link(&routers[0]);
+    observer.testExpirePeerSyncBackoff(&routers[0].localNodeId());
+    observer.synchronizeOnce().await.unwrap();
+    assert!(
+        synchronizedMethodCount(&peers[1], "syncConsistency") > 0,
+        "upgraded peers must verify contents before the round completes"
+    );
 }
 
 /// Verifies a failed pass arms the exponential backoff: the immediate retry is
@@ -369,19 +410,23 @@ async fn a_failed_pass_backs_off_before_retrying_the_full_exchange() {
     let (routers, _access, peers, _pendingFailure) = gateMesh("sync-backoff");
     let observer = idleObserver(&routers[1]);
 
-    // One-shot fault: the control exchange with the remote is lost. The
-    // projection snapshot still succeeds, so the failure comes from the
-    // member synchronization leg, which is what arms the backoff.
+    // One-shot fault: the authority page is lost during the member pass.
+    // The cycle must fail and arm backoff without switching protocols.
     peers[1]
         .faults
         .lock()
         .unwrap()
-        .insert("exchange".into(), CallFault::BeforeDelivery);
+        .insert("snapshotControlPage".into(), CallFault::BeforeDelivery);
     assert!(
         observer.synchronizeOnce().await.is_err(),
-        "the failed control exchange must fail the cycle"
+        "the failed authority page must fail the cycle"
     );
     let markersAfterFailure = fullPassMarkers(&peers[1]);
+    assert_eq!(
+        synchronizedMethodCount(&peers[1], "syncApplyOperations"),
+        0,
+        "failed authority validation must stop business replication in the same cycle"
+    );
 
     // The immediate retry is suppressed by the failure backoff.
     observer.synchronizeOnce().await.unwrap();
@@ -391,10 +436,8 @@ async fn a_failed_pass_backs_off_before_retrying_the_full_exchange() {
         "the backoff must suppress the next full pass"
     );
 
-    // Once the backoff elapses the pass retries and converges; one settling
-    // cycle absorbs the bootstrap ripple before the idling baseline.
+    // Once the backoff elapses the pass retries and converges.
     observer.testExpirePeerSyncBackoff(&routers[0].localNodeId());
-    observer.synchronizeOnce().await.unwrap();
     observer.synchronizeOnce().await.unwrap();
     assert!(
         fullPassMarkers(&peers[1]) > markersAfterFailure,
@@ -461,64 +504,53 @@ async fn a_lost_clock_probe_backs_off_instead_of_forcing_a_full_exchange() {
         .insert("syncClockDigest".into(), CallFault::BeforeDelivery);
     observer.synchronizeOnce().await.unwrap();
     assert_eq!(
-        fullPassMarkers(&peers[1]), settled,
+        fullPassMarkers(&peers[1]),
+        settled,
         "the settled gate must stay settled"
     );
 }
 
-/// A peer that predates the digest method must still answer the full clock
-/// probe. The first fallback switches the observed summary format and costs one
-/// pass; later fallback cycles settle exactly like digest probes.
+/// A capability rejection does not arm network backoff or repeatedly start full exchanges.
 #[tokio::test]
-async fn legacy_peers_answer_full_clock_probes_and_settle() {
+async fn rejected_digest_probes_do_not_retry_full_exchanges() {
     let _guard = routeTestGlobalLock().lock().await;
     installTestRuntimeScheduler();
-    let (routers, _access, peers, _pendingFailure) = gateMesh("sync-legacy-probe");
+    let (routers, _access, peers, _pendingFailure) = gateMesh("sync-rejected-probe");
     let observer = idleObserver(&routers[1]);
     observer.synchronizeOnce().await.unwrap();
     observer.synchronizeOnce().await.unwrap();
     let markersBefore = fullPassMarkers(&peers[1]);
     let fullClockCallsBefore = synchronizedMethodCount(&peers[1], "syncClock");
 
-    // The old peer denies the digest method but still serves the full clock.
-    let fallbackFault = |peers: &[Arc<ApprovalMeshPeer>]| {
-        peers[1]
-            .faults
-            .lock()
-            .unwrap()
-            .insert("syncClockDigest".into(), CallFault::MethodDenied);
-    };
-    fallbackFault(&peers);
+    peers[1]
+        .faults
+        .lock()
+        .unwrap()
+        .insert("syncClockDigest".into(), CallFault::MethodDenied);
     observer.synchronizeOnce().await.unwrap();
+    assert_eq!(fullPassMarkers(&peers[1]), markersBefore);
+    assert_eq!(
+        synchronizedMethodCount(&peers[1], "syncClock"),
+        fullClockCallsBefore
+    );
+
+    let probesAfterFailure = synchronizedMethodCount(&peers[1], "syncClockDigest");
+    observer.synchronizeOnce().await.unwrap();
+    assert_eq!(
+        synchronizedMethodCount(&peers[1], "syncClockDigest"),
+        probesAfterFailure + 1,
+        "capability rejection must not arm a connection retry timer"
+    );
+    assert_eq!(fullPassMarkers(&peers[1]), markersBefore);
+
+    observer.testExpirePeerSyncBackoff(&routers[0].localNodeId());
+    observer.synchronizeOnce().await.unwrap();
+    assert_eq!(fullPassMarkers(&peers[1]), markersBefore);
+    observer.synchronizeReachablePeer(routers[0].localNodeId(), 512).await.unwrap();
     assert!(
         fullPassMarkers(&peers[1]) > markersBefore,
-        "switching from the digest to the full-clock summary may cost one pass"
+        "an explicit request can resume after the capability is repaired"
     );
-    assert!(
-        synchronizedMethodCount(&peers[1], "syncClock") > fullClockCallsBefore,
-        "the fallback must read the full clock"
-    );
-    let settled = fullPassMarkers(&peers[1]);
-
-    for _ in 0..2 {
-        fallbackFault(&peers);
-        observer.synchronizeOnce().await.unwrap();
-        assert_eq!(
-            fullPassMarkers(&peers[1]),
-            settled,
-            "a stable legacy full-clock probe must keep idling"
-        );
-    }
-
-    // The peer upgrades: the digest format returns and settles after one pass.
-    observer.synchronizeOnce().await.unwrap();
-    assert!(
-        fullPassMarkers(&peers[1]) > settled,
-        "the first digest after a legacy baseline may cost one pass"
-    );
-    let settled = fullPassMarkers(&peers[1]);
-    observer.synchronizeOnce().await.unwrap();
-    assert_eq!(fullPassMarkers(&peers[1]), settled);
 }
 
 /// A preference-only edit must reopen a settled storage-provider gate without
@@ -548,7 +580,9 @@ async fn preference_edits_reopen_a_settled_storage_provider_gate() {
         .map(|router| {
             GateTestApplicationClient {
                 control: router.networkControlStore.clone(),
+                storage: router.localCore.runtimeStorageHost(),
                 pendingFailure: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                consistencyVersion: Some(7),
             }
             .gateClock()
             .unwrap()
@@ -604,7 +638,9 @@ async fn preference_edits_reopen_a_settled_storage_provider_gate() {
         assert_eq!(
             GateTestApplicationClient {
                 control: router.networkControlStore.clone(),
+                storage: router.localCore.runtimeStorageHost(),
                 pendingFailure: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                consistencyVersion: Some(7),
             }
             .gateClock()
             .unwrap(),
@@ -613,7 +649,7 @@ async fn preference_edits_reopen_a_settled_storage_provider_gate() {
     }
 }
 
-/// Continues healthy replication and retries partial business failures without arming transport backoff.
+/// Healthy replication continues; deterministic owner failures do not schedule unchanged work again.
 #[tokio::test]
 async fn partial_plugin_failure_keeps_healthy_replication_moving() {
     let _guard = routeTestGlobalLock().lock().await;
@@ -631,7 +667,8 @@ async fn partial_plugin_failure_keeps_healthy_replication_moving() {
     access[0]
         .updateDeviceSpacePolicy("sync.partial.plugin".into(), "v1".into())
         .unwrap();
-    observer.synchronizeOnce().await.unwrap();
+    observer.testExpirePeerSyncBackoff(&routers[0].localNodeId());
+    assert!(observer.synchronizeOnce().await.is_err());
     assert_eq!(
         routers[1]
             .networkControlStore
@@ -641,15 +678,17 @@ async fn partial_plugin_failure_keeps_healthy_replication_moving() {
         before + 1
     );
     let markers = fullPassMarkers(&peers[1]);
+    observer.testExpirePeerSyncBackoff(&routers[0].localNodeId());
     observer.synchronizeOnce().await.unwrap();
     assert!(
-        fullPassMarkers(&peers[1]) > markers,
-        "partial failures must remain eligible for retry"
+        fullPassMarkers(&peers[1]) == markers,
+        "deterministic failures must wait for a changed state or an explicit request"
     );
     access[0]
         .updateDeviceSpacePolicy("sync.partial.plugin".into(), "v2".into())
         .unwrap();
-    observer.synchronizeOnce().await.unwrap();
+    observer.testExpirePeerSyncBackoff(&routers[0].localNodeId());
+    assert!(observer.synchronizeOnce().await.is_err());
     assert_eq!(
         routers[1]
             .networkControlStore
@@ -659,7 +698,7 @@ async fn partial_plugin_failure_keeps_healthy_replication_moving() {
         before + 2
     );
     pendingFailure.store(false, std::sync::atomic::Ordering::SeqCst);
-    observer.synchronizeOnce().await.unwrap();
+    observer.synchronizeReachablePeer(routers[0].localNodeId(), 512).await.unwrap();
     observer.synchronizeOnce().await.unwrap();
     let settled = fullPassMarkers(&peers[1]);
     observer.synchronizeOnce().await.unwrap();
@@ -696,4 +735,219 @@ async fn applied_remote_progress_does_not_reopen_a_settled_gate() {
         settled,
         "received progress must not start a pass this device owes nothing to"
     );
+}
+
+
+/// Injects snapshot races at the application boundary while using real peer routing and sync gates.
+struct CorrectionRaceApplication {
+    inner: GateTestApplicationClient,
+    snapshot: Arc<StdMutex<operit_store::Transaction::Snapshot>>,
+    fault: &'static str,
+    reports: std::sync::atomic::AtomicUsize,
+    authority: Arc<StdMutex<operit_store::Transaction::Snapshot>>,
+    faultPending: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait(?Send)]
+impl operit_link::CoreLinkSharedClient for CorrectionRaceApplication {
+    async fn call(&self, request: operit_link::CoreCallRequest) -> operit_link::CoreCallResponse {
+        let result = match request.methodName.as_str() {
+            "syncConsistency" => {
+                let mut snapshot = self.snapshot.lock().unwrap();
+                let report = self.reports.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if self.fault == "manifest" && report == 1 { snapshot.generation += 1; }
+                if self.fault == "new-write" && report == 0 && snapshot.node == "z" {
+                    self.inner.control.updatePolicy("async-boundary".into(), "new".into()).unwrap();
+                }
+                let content = operit_store::sync::SqlChatSyncStore::SqlChatSyncStore::snapshotContentDigest(&snapshot).unwrap();
+                let manifest = snapshot.manifest_with_digest(content).unwrap();
+                operit_link::toCoreValue(serde_json::json!({"manifests":[manifest],"pendingOwners":[],"errors":[],"boundary":operit_store::Transaction::digest(&self.inner.gateClock().unwrap()).unwrap()}))
+                    .map_err(|error| operit_link::CoreLinkError::internal(error.to_string()))
+            }
+            "syncReadSnapshot" | "syncReadCoverage" if request.methodName == self.fault && self.faultPending.swap(false, std::sync::atomic::Ordering::SeqCst) => {
+                Err(operit_link::CoreLinkError::internal("Snapshot changed; synchronize again"))
+            }
+            "syncReadSnapshot" if self.fault == "storage" => {
+                Err(operit_link::CoreLinkError::internal("database is corrupt"))
+            }
+            "syncReadSnapshot" | "syncReadCoverage" => {
+                // Both peers already hold this blob; only correction control flow is exercised here.
+                operit_link::toCoreValue(serde_json::json!({"contentHash":"0".repeat(64),"size":0}))
+                    .map_err(|error| operit_link::CoreLinkError::internal(error.to_string()))
+            }
+            "syncBlobExists" => {
+                let args: serde_json::Value = operit_link::fromCoreValue(request.args).unwrap();
+                operit_link::toCoreValue(vec![Ok::<_,String>(true);args["references"].as_array().unwrap().len()])
+            }
+                .map_err(|error| operit_link::CoreLinkError::internal(error.to_string())),
+            "syncRepairSnapshot" => {
+                let args: serde_json::Value = operit_link::fromCoreValue(request.args).unwrap();
+                let mut snapshot = self.snapshot.lock().unwrap();
+                let applied = args["expected"] == snapshot.token().unwrap()
+                    && !(self.fault == "syncRepairSnapshot" && self.faultPending.swap(false, std::sync::atomic::Ordering::SeqCst));
+                if applied { snapshot.data = self.authority.lock().unwrap().data.clone(); }
+                operit_link::toCoreValue(applied).map_err(|error| operit_link::CoreLinkError::internal(error.to_string()))
+            },
+            "syncApplyOperations" if self.fault == "new-write" && self.reports.load(std::sync::atomic::Ordering::SeqCst) > 0 => {
+                let args: serde_json::Value = operit_link::fromCoreValue(request.args.clone()).unwrap();
+                if !args["operations"].as_array().unwrap().is_empty() {
+                    self.snapshot.lock().unwrap().data.values = self.authority.lock().unwrap().data.values.clone();
+                }
+                return self.inner.call(request).await;
+            },
+            _ => return self.inner.call(request).await,
+        };
+        operit_link::CoreCallResponse { requestId: request.requestId, result }
+    }
+
+    async fn watchSnapshot(&self, request: operit_link::CoreWatchRequest) -> Result<operit_link::CoreEvent, operit_link::CoreLinkError> {
+        self.inner.watchSnapshot(request).await
+    }
+    async fn watch(&self, request: operit_link::CoreWatchRequest) -> Result<operit_link::CoreEventStream, operit_link::CoreLinkError> {
+        self.inner.watch(request).await
+    }
+    async fn openPush(&self, request: operit_link::CorePushRequest) -> Result<Box<dyn operit_link::CoreLinkPushSession>, operit_link::CoreLinkError> {
+        self.inner.openPush(request).await
+    }
+}
+
+#[tokio::test]
+async fn snapshot_changes_finish_in_the_same_pass_and_storage_errors_do_not_retry() {
+    use operit_store::Transaction::{Backend, Data, Owner, Snapshot};
+    let _guard = routeTestGlobalLock().lock().await;
+    installTestRuntimeScheduler();
+    for fault in ["syncReadSnapshot", "syncReadCoverage", "manifest", "syncRepairSnapshot", "storage"] {
+        let (mut routers, _access, peers, _) = gateMesh(&format!("sync-quiet-{fault}"));
+        let snapshots = ["z", "a"].map(|node| {
+            let mut data = Data::empty(Owner { backend: Backend::Sql,
+                path: operit_util::RuntimeStorageLayout::SQLITE_DATABASE_PATH.into(), format: 1, layout: 1 });
+            data.values.insert("record".into(), serde_json::json!({"columns":["value"],"rows":[[{"Text":node}]]}));
+            Arc::new(StdMutex::new(Snapshot { damage: None, node: node.into(), data, covered: BTreeSet::new(), generation: 0 }))
+        });
+        for (index, router) in routers.iter_mut().enumerate() {
+            router.installTestApplicationClient(Arc::new(CorrectionRaceApplication {
+                inner: GateTestApplicationClient { control: router.networkControlStore.clone(),
+                storage: router.localCore.runtimeStorageHost(),
+                    pendingFailure: Arc::new(std::sync::atomic::AtomicBool::new(false)), consistencyVersion: Some(7) },
+                snapshot: snapshots[index].clone(), fault, reports: std::sync::atomic::AtomicUsize::new(0),
+                authority: Arc::new(StdMutex::new(snapshots[0].lock().unwrap().clone())), faultPending: std::sync::atomic::AtomicBool::new(true),
+            }));
+        }
+        peers[1].link(&routers[0]);
+        peers[0].link(&routers[1]);
+        let observer = idleObserver(&routers[1]);
+        let result = observer.synchronizeOnce().await;
+        if fault == "storage" {
+            assert!(result.is_err());
+            assert!(observer.progressFlow().value().iter().any(|item| item.error.is_some()), "real storage failures must remain visible");
+            let before = synchronizedMethodCount(&peers[1], "syncReadSnapshot");
+            observer.synchronizeOnce().await.unwrap();
+            assert_eq!(synchronizedMethodCount(&peers[1], "syncReadSnapshot"), before, "storage errors must not arm a retry");
+            continue;
+        }
+        assert!(result.is_ok(), "{fault}: {result:?}");
+        assert!(observer.progressFlow().value().is_empty(), "a snapshot race must stay quiet: {fault}");
+        let before = synchronizedMethodCount(&peers[1], "syncConsistency");
+        assert_eq!(snapshots[0].lock().unwrap().data, snapshots[1].lock().unwrap().data);
+        observer.synchronizeOnce().await.unwrap();
+        assert_eq!(synchronizedMethodCount(&peers[1], "syncConsistency"), before, "a completed correction must idle: {fault}");
+        assert!(observer.progressFlow().value().is_empty(), "{fault}");
+    }
+}
+
+
+#[tokio::test]
+async fn metadata_differences_and_new_incremental_writes_never_start_a_full_transfer() {
+    use operit_store::Transaction::{Backend, Data, Owner, Revision, Snapshot};
+    let _guard = routeTestGlobalLock().lock().await;
+    installTestRuntimeScheduler();
+    for scenario in ["metadata", "local-row-ids", "new-write"] {
+        let (mut routers, _access, peers, _) = gateMesh(&format!("sync-no-full-{scenario}"));
+        let snapshots = ["z", "a"].map(|node| {
+            let mut data = Data::empty(Owner { backend: Backend::Sql,
+                path: operit_util::RuntimeStorageLayout::SQLITE_DATABASE_PATH.into(), format: 1, layout: 1 });
+            data.values.insert("record".into(), serde_json::json!({"columns":["value"],"rows":[[{"Text":if scenario == "new-write" {node} else {"same"}}]]}));
+            if scenario == "local-row-ids" {
+                data.values.insert("messages".into(), serde_json::json!({
+                    "columns":["messageId","chatId","timestamp","sender"],
+                    "rows":[[{"Integer":if node == "z" {1} else {100}}, {"Text":"same-chat"}, {"Integer":1000}, {"Text":"user"}]]
+                }));
+            }
+            data.revision = Some(Revision { createdAt: if node == "z" { 900 } else { 100 }, originDeviceId: node.into(), sequence: 1 });
+            data.deleted.insert(format!("old-{node}"));
+            Arc::new(StdMutex::new(Snapshot { damage: None, node: node.into(), data,
+                covered: BTreeSet::from([format!("{node}:1")]), generation: if node == "z" { 7 } else { 2 } }))
+        });
+        for (index, router) in routers.iter_mut().enumerate() {
+            router.installTestApplicationClient(Arc::new(CorrectionRaceApplication {
+                inner: GateTestApplicationClient { control: router.networkControlStore.clone(),
+                storage: router.localCore.runtimeStorageHost(),
+                    pendingFailure: Arc::new(std::sync::atomic::AtomicBool::new(false)), consistencyVersion: Some(7) },
+                snapshot: snapshots[index].clone(),
+                fault: if scenario == "new-write" { "new-write" } else { "" },
+                reports: std::sync::atomic::AtomicUsize::new(0),
+                authority: Arc::new(StdMutex::new(snapshots[0].lock().unwrap().clone())), faultPending: std::sync::atomic::AtomicBool::new(true),
+            }));
+        }
+        peers[1].link(&routers[0]);
+        peers[0].link(&routers[1]);
+        let observer = idleObserver(&routers[1]);
+        observer.synchronizeOnce().await.unwrap();
+        for method in ["syncReadSnapshot", "syncReadCoverage", "syncRepairSnapshot"] {
+            assert_eq!(synchronizedMethodCount(&peers[1], method), 0, "{scenario}: {method}");
+        }
+        assert!(observer.progressFlow().value().is_empty(), "{scenario}");
+        if scenario == "new-write" {
+            let new = routers[0].networkControlStore.currentSpaceOperations().unwrap().into_iter()
+                .find(|op|op.payload.to_string().contains("async-boundary")).expect("a real commit occurred after the empty export");
+            snapshots[1].lock().unwrap().data.values = snapshots[0].lock().unwrap().data.values.clone();
+            observer.synchronizeOnce().await.unwrap();
+            assert!(routers[1].networkControlStore.currentSpaceOperations().unwrap().iter().any(|op|op.opId == new.opId));
+            assert_eq!(synchronizedMethodCount(&peers[1], "syncReadSnapshot"), 0);
+            assert!(observer.progressFlow().value().is_empty());
+        }
+    }
+}
+
+/// Concurrent wakeups share one bidirectional exchange and preserve edits from either endpoint.
+#[tokio::test]
+async fn concurrent_peer_wakeups_use_one_coordinator_and_verified_boundaries() {
+    let _guard = routeTestGlobalLock().lock().await;
+    installTestRuntimeScheduler();
+    let (routers,access,peers,_) = gateMesh("sync-one-coordinator");
+    let promoted = routers[0].networkControlStore.setIdentity(operit_store::NetworkControlStore::NetworkControlIdentityAssignment {
+        nodeId: routers[1].localNodeId(), roleId: "admin".into() }).unwrap();
+    routers[1].networkControlStore.applySyncedOperation(&promoted).unwrap();
+    let workers = routers.iter().map(idleObserver).collect::<Vec<_>>();
+    for round in 0..2 {
+        for service in &access { service.updateDeviceSpacePolicy(format!("both-{round}"),"written".into()).unwrap(); }
+        let (a,b) = tokio::join!(workers[0].synchronizeOnce(),workers[1].synchronizeOnce());
+        a.unwrap(); b.unwrap();
+        assert_eq!(synchronizedMethodCount(&peers[0],"syncOperationsSince"),0);
+        assert!(synchronizedMethodCount(&peers[0],"syncRequest") > 0);
+        let before = fullPassMarkers(&peers[1]);
+        let (a,b) = tokio::join!(workers[0].synchronizeOnce(),workers[1].synchronizeOnce());
+        a.unwrap(); b.unwrap();
+        assert_eq!(fullPassMarkers(&peers[1]),before,"a verified boundary must not start an empty pass");
+        let histories = routers.iter().map(|r| r.networkControlStore.currentSpaceOperations().unwrap().into_iter()
+            .map(|op|op.opId).collect::<BTreeSet<_>>()).collect::<Vec<_>>();
+        assert_eq!(histories[0],histories[1]);
+    }
+}
+
+
+#[tokio::test]
+async fn different_software_versions_still_synchronize_with_one_protocol_version() {
+    let _guard = routeTestGlobalLock().lock().await;
+    installTestRuntimeScheduler();
+    let (routers, _, peers, _) = gateMesh("protocol-release-independence");
+    for (index, router) in routers.iter().enumerate() {
+        router.spaceStore.writeLocalDeviceProfile(format!("device-{index}"), "test".into(), "test".into(),
+            format!("{}.0.0", index + 2), None).unwrap();
+        router.spaceStore.writeLocalProtocol(crate::PeerProtocol::VERSION).unwrap();
+    }
+    routers[0].networkControlStore.updatePolicy("release-independent".into(), "synced".into()).unwrap();
+    idleObserver(&routers[1]).synchronizeOnce().await.unwrap();
+    assert!(synchronizedMethodCount(&peers[1], "protocol") > 0);
+    assert_eq!(routers[1].networkControlStore.currentState().unwrap().policies.get("release-independent"), Some(&"synced".to_owned()));
 }

@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
@@ -13,6 +13,73 @@ use operit_host_api::{
 };
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
+
+/// Keeps a native append descriptor open without buffering log records in user space.
+pub struct NativeFileAppendHandle {
+    file: File,
+    length: u64,
+}
+
+impl NativeFileAppendHandle {
+    /// Opens one append-only file and reads its starting size once.
+    pub fn open(path: &str) -> HostResult<Box<dyn operit_host_api::FileAppendHandle>> {
+        let file = fs::OpenOptions::new().create(true).append(true).open(path)?;
+        let length = file.metadata()?.len();
+        Ok(Box::new(Self { file, length }))
+    }
+}
+
+impl operit_host_api::FileAppendHandle for NativeFileAppendHandle {
+    /// Returns the byte count maintained by the sole writer.
+    fn byteLength(&self) -> u64 {
+        self.length
+    }
+
+    /// Appends directly to the descriptor; failed handles must be discarded by the owner.
+    fn append(&mut self, content: &[u8]) -> HostResult<()> {
+        self.file.write_all(content)?;
+        self.length += content.len() as u64;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod append_tests {
+    use super::*;
+
+    /// Preserves existing bytes and closes the descriptor before rotating the file on Windows too.
+    #[test]
+    fn append_handle_preserves_bytes_and_reopens_after_rotation() {
+        let directory = std::env::temp_dir().join(format!(
+            "operit-append-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("operit.log");
+        let archive = directory.join("operit.log.1");
+        fs::write(&path, b"previous\n").unwrap();
+        {
+            let mut writer = NativeFileAppendHandle::open(path.to_str().unwrap()).unwrap();
+            assert_eq!(writer.byteLength(), 9);
+            writer.append(b"next\n").unwrap();
+            writer.append(b"last\n").unwrap();
+            assert_eq!(writer.byteLength(), 19);
+            assert_eq!(fs::read(&path).unwrap(), b"previous\nnext\nlast\n");
+        }
+        fs::rename(&path, &archive).unwrap();
+        {
+            let mut writer = NativeFileAppendHandle::open(path.to_str().unwrap()).unwrap();
+            assert_eq!(writer.byteLength(), 0);
+            writer.append(b"fresh\n").unwrap();
+        }
+        assert_eq!(fs::read(&archive).unwrap(), b"previous\nnext\nlast\n");
+        assert_eq!(fs::read(&path).unwrap(), b"fresh\n");
+        fs::remove_file(path).unwrap();
+        fs::remove_file(archive).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct PosixFileSystemHost {
@@ -46,6 +113,12 @@ impl Default for PosixFileSystemHost {
 }
 
 impl FileSystemHost for PosixFileSystemHost {
+    /// Opens a persistent append descriptor after validating the native path.
+    fn openAppendFile(&self, path: &str) -> HostResult<Box<dyn operit_host_api::FileAppendHandle>> {
+        self.validatePath(path, "path")?;
+        NativeFileAppendHandle::open(path)
+    }
+
     fn envLabel(&self) -> &str {
         self.envLabel
     }
@@ -112,6 +185,26 @@ impl FileSystemHost for PosixFileSystemHost {
         fs::read(path).map_err(HostError::from)
     }
 
+    fn readFileBytesRange(&self, path: &str, offset: u64, length: usize) -> HostResult<Vec<u8>> {
+        self.validateReadableFile(path)?;
+        let mut file = File::open(path)?;
+        file.seek(SeekFrom::Start(offset))?;
+        let mut buffer = vec![0u8; length];
+        let mut read = 0;
+        loop {
+            let readCount = file.read(&mut buffer[read..])?;
+            if readCount == 0 {
+                break;
+            }
+            read += readCount;
+            if read == buffer.len() {
+                break;
+            }
+        }
+        buffer.truncate(read);
+        Ok(buffer)
+    }
+
     fn writeFile(&self, path: &str, content: &str, append: bool) -> HostResult<()> {
         self.validatePath(path, "path")?;
         ensure_parent_directory(path)?;
@@ -131,6 +224,14 @@ impl FileSystemHost for PosixFileSystemHost {
         self.validatePath(path, "path")?;
         ensure_parent_directory(path)?;
         fs::write(path, content).map_err(HostError::from)
+    }
+
+    fn appendFileBytes(&self, path: &str, content: &[u8]) -> HostResult<()> {
+        self.validatePath(path, "path")?;
+        ensure_parent_directory(path)?;
+        let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
+        file.write_all(content)?;
+        Ok(())
     }
 
     fn deleteFile(&self, path: &str, recursive: bool) -> HostResult<()> {

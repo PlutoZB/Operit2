@@ -1,0 +1,383 @@
+import 'dart:async';
+import 'dart:typed_data';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:operit2/core/bridge/OperitRuntimeBridge.dart';
+import 'package:operit2/core/link/CoreLinkCodec.dart';
+import 'package:operit2/core/link/CoreLinkProtocol.dart';
+import 'package:operit2/core/proxy/generated/CoreProxyClients.g.dart';
+import 'package:operit2/core/proxy/generated/CoreProxyModels.g.dart' as core;
+import 'package:operit2/ui/common/contributions/EmbeddedPluginSurfaceCatalog.dart';
+import 'package:operit2/ui/common/contributions/PluginWorkspacePresentation.dart';
+import 'package:operit2/ui/features/chat/components/workspace/WorkspaceSession.dart';
+import 'package:operit2/ui/features/chat/components/workspace/WorkspaceTabModels.dart';
+import 'package:operit2/ui/main/navigation/ToolPkgCatalogChangeBus.dart';
+
+/// Supplies real Link-encoded registration responses with controlled revocation.
+class CatalogBridge extends OperitRuntimeBridge {
+  String owner = 'owner';
+  String surface = 'workspace';
+  String routeRuntime = 'compose_dsl';
+  bool enabled = true;
+  bool duplicate = false;
+  int ownersRead = 0;
+  Completer<void>? gate;
+
+  /// Models enabled declarations without any plugin business or UI implementation.
+  @override
+  Future<Uint8List> callBytes(CoreCallRequest request) async {
+    if (request.methodName == 'getToolPkgNavigationEntries' && gate != null) {
+      await gate!.future;
+    }
+    final Object? value;
+    switch (request.methodName) {
+      case 'getToolPkgNavigationEntries':
+        value = [
+          if (enabled)
+            core.ToolPkgNavigationEntry(
+              containerPackageName: owner,
+              toolPkgId: owner,
+              entryId: 'page',
+              routeId: 'route',
+              params: null,
+              surface: surface,
+              title: 'Page',
+              description: '',
+              action: null,
+              icon: null,
+              order: 1,
+            ).toJson(),
+        ];
+      case 'getToolPkgUiRoutes':
+        final route = core.ToolPkgUiRoute(
+          containerPackageName: owner,
+          toolPkgId: owner,
+          routeId: 'route',
+          uiModuleId: 'page',
+          runtime: routeRuntime,
+          screen: 'ui/page.js',
+          title: 'Page',
+          description: '',
+          moduleSpec: const {},
+          keepAlive: true,
+        ).toJson();
+        value = [if (enabled) route, if (duplicate) route];
+      case 'getToolPkgContainerRuntime':
+        ownersRead++;
+        value = enabled ? runtime(owner).toJson() : null;
+      default:
+        throw StateError('Unexpected catalog method: ${request.methodName}');
+    }
+    return encodeCoreLink([0, value]);
+  }
+
+  /// Rejects unrelated stream setup so catalog tests cannot silently depend on it.
+  @override
+  Stream<CoreEvent> watchStream(CoreWatchRequest request) =>
+      throw UnimplementedError();
+
+  /// Rejects unrelated snapshot reads.
+  @override
+  Future<CoreEvent> watchSnapshot(CoreWatchRequest request) =>
+      throw UnimplementedError();
+
+  /// Rejects unrelated upload streams.
+  @override
+  Future<CorePushSink> push(CorePushRequest request) =>
+      throw UnimplementedError();
+}
+
+/// Provides complete runtime metadata using the same public proxy model as production.
+core.ToolPkgContainerRuntime runtime(String owner) =>
+    core.ToolPkgContainerRuntime(
+      packageName: owner,
+      displayName: const core.LocalizedText(values: {'en': 'Owner'}),
+      description: const core.LocalizedText(values: {'en': 'Test'}),
+      version: '1',
+      apiVersion: '2.0.0',
+      publicApi: null,
+      publicApis: const [],
+      requires: const [],
+      dependencyIssues: const [],
+      manifestExtensions: const {},
+      author: const [],
+      mainEntry: 'main.js',
+      themes: const [],
+      license: null,
+      sourceType: core.ToolPkgSourceType.externalValue,
+      sourcePath: 'test',
+      subpackages: const [],
+      resources: const [],
+      wasmModules: const [],
+      workflowTemplates: const [],
+      workspaceTemplates: const [],
+      uiModules: const [],
+      uiRoutes: const [],
+      chatComposerSlots: const [],
+      navigationEntries: const [],
+      desktopWidgets: const [],
+      appLifecycleHooks: const [],
+      messageProcessingPlugins: const [],
+      xmlRenderPlugins: const [],
+      inputMenuTogglePlugins: const [],
+      chatInputHooks: const [],
+      chatViewHooks: const [],
+      chatMessageHooks: const [],
+      chatLifecycleHooks: const [],
+      chatMessageMenuItems: const [],
+      chatRuntimeHooks: const [],
+      chatResponseHooks: const [],
+      hostEventHooks: const [],
+      toolLifecycleHooks: const [],
+      promptInputHooks: const [],
+      promptHistoryHooks: const [],
+      promptEstimateHistoryHooks: const [],
+      systemPromptComposeHooks: const [],
+      toolPromptComposeHooks: const [],
+      promptFinalizeHooks: const [],
+      promptEstimateFinalizeHooks: const [],
+      summaryGenerateHooks: const [],
+      coreCommands: const [],
+      aiProviders: const [],
+      manifestExtensionHandlers: const [],
+      logoResource: null,
+      marketOrigin: null,
+    );
+
+/// Resolves ordinary navigation through the same source owner used by the launcher.
+Future<PluginWorkspacePresentation> resolve(
+  CatalogBridge bridge, [
+  Map<String, Object?> input = const {},
+]) async => (await PluginWorkspacePresentation.fromNavigation(
+  clients: GeneratedCoreProxyClients(bridge),
+  sourceOwnerPackageName: 'owner',
+  routeId: 'route',
+  args: input,
+  language: 'en',
+  hostState: const {'chatId': 'chat-a'},
+))!;
+
+/// Verifies routing boundaries, page reuse and live owner revocation.
+void main() {
+  test(
+    'navigation detaches opaque arguments before resolving the catalog',
+    () async {
+      final input = {
+        'nested': <Object?>[1, true, null],
+      };
+      final pending = resolve(CatalogBridge(), input);
+      input['nested']!.add('later');
+      expect((await pending).input, {
+        'nested': [1, true, null],
+      });
+    },
+  );
+
+  test(
+    'exact enabled owner receives opaque input separately from host state',
+    () async {
+      final bridge = CatalogBridge();
+      final page = await resolve(bridge, {'any': 'plugin-data'});
+      expect(page.hostState, {'chatId': 'chat-a'});
+      expect(page.input, {'any': 'plugin-data'});
+      expect(bridge.ownersRead, 1);
+      expect(
+        () => page.hostState['chatId'] = 'replacement',
+        throwsUnsupportedError,
+      );
+    },
+  );
+
+  test('native and ambiguous workspace routes are rejected', () async {
+    for (final bridge in [
+      CatalogBridge()..routeRuntime = 'native',
+      CatalogBridge()..duplicate = true,
+    ]) {
+      await expectLater(resolve(bridge), throwsStateError);
+      expect(bridge.ownersRead, 0);
+    }
+  });
+
+  test(
+    'workspace pages reuse the exact namespaced instance in either split pane',
+    () async {
+      final bridge = CatalogBridge();
+      final first = await resolve(bridge, {'revision': 1});
+      final next = await resolve(bridge, {'revision': 2});
+      final session = WorkspaceSession();
+      var opens = 0;
+      session.onOpenRequested = () => opens++;
+      session.openPluginPage(first);
+      expect(session.tabs.length, 2);
+      session.openPluginPage(next);
+      expect(session.tabs.length, 2);
+      expect(session.tabs.last.pluginPresentation, same(next));
+      session.secondaryTabs.add(session.tabs.removeLast());
+      session.splitAxis = WorkspaceSplitAxis.horizontal;
+      session.openPluginPage(first);
+      expect(session.tabs.length, 1);
+      expect(session.secondaryTabs.single.pluginPresentation, same(first));
+      expect(opens, 3);
+      expect(session.secondaryTabs.single.kind, WorkspaceTabKind.plugin);
+      session.dispose();
+    },
+  );
+
+  test(
+    'per-agent tab identities survive rapid repeated opens in either pane',
+    () async {
+      final bridge = CatalogBridge();
+      final session = WorkspaceSession();
+      final requests = List.generate(
+        6,
+        (_) => resolve(bridge, {
+          'workspaceTabId': 'parent-a/agent-a',
+          'workspaceTabTitle': 'Agent A',
+          'parentChatId': 'parent-a',
+          'agentId': 'agent-a',
+        }),
+      );
+      final pages = await Future.wait(requests);
+      for (final page in pages) {
+        session.openPluginPage(page);
+      }
+      expect(session.tabs.length, 2);
+      expect(session.tabs.last.title, 'Agent A');
+      expect(pages.first.input, {
+        'parentChatId': 'parent-a',
+        'agentId': 'agent-a',
+      });
+      final firstIdentity = pages.first.identity;
+      final other = await resolve(bridge, {
+        'workspaceTabId': 'parent-a/agent-b',
+        'workspaceTabTitle': 'Agent B',
+        'parentChatId': 'parent-a',
+        'agentId': 'agent-b',
+      });
+      session.openPluginPage(other);
+      expect(session.tabs.length, 3);
+      expect(other.identity, isNot(firstIdentity));
+      expect(session.tabs.last.title, 'Agent B');
+      session.openPluginPage(pages.first);
+      expect(session.tabs.length, 3);
+      expect(session.selectedIndex, 1);
+      session.secondaryTabs.add(session.tabs.removeAt(1));
+      session.selectedIndex = 1;
+      session.splitAxis = WorkspaceSplitAxis.horizontal;
+      for (final page in pages) {
+        session.openPluginPage(page);
+      }
+      expect(session.tabs.length, 2);
+      expect(session.secondaryTabs.length, 1);
+      expect(session.secondarySelectedIndex, 0);
+      expect(session.secondaryTabs.single.identityToken, firstIdentity);
+      // Closing and reopening creates exactly one fresh tab for the same child.
+      session.secondaryTabs.clear();
+      session.openPluginPage(pages.first);
+      session.openPluginPage(pages.last);
+      expect(session.tabs.length, 3);
+      expect(session.tabs.last.identityToken, firstIdentity);
+      session.dispose();
+    },
+  );
+
+  test(
+    'tab IDs stay scoped to the owner and route with default route reuse',
+    () async {
+      final bridge = CatalogBridge();
+      final defaultPage = await resolve(bridge);
+      expect(defaultPage.title, 'Page');
+      final page = await resolve(bridge, {'workspaceTabId': 'agent'});
+      expect(page.identity, isNot(defaultPage.identity));
+      bridge.owner = 'other-owner';
+      final otherOwner = (await PluginWorkspacePresentation.fromNavigation(
+        clients: GeneratedCoreProxyClients(bridge),
+        sourceOwnerPackageName: 'other-owner',
+        routeId: 'route',
+        args: const {'workspaceTabId': 'agent'},
+        language: 'en',
+      ))!;
+      expect(otherOwner.identity, isNot(page.identity));
+    },
+  );
+
+  test('invalid workspace tab metadata is rejected', () async {
+    for (final key in ['workspaceTabId', 'workspaceTabTitle']) {
+      for (final value in ['', '  ', 1, <String>[]]) {
+        await expectLater(
+          resolve(CatalogBridge(), {key: value}),
+          throwsArgumentError,
+        );
+      }
+    }
+  });
+
+  test(
+    'ordinary navigation infers workspace placement and reuses the route',
+    () async {
+      final bridge = CatalogBridge();
+      final clients = GeneratedCoreProxyClients(bridge);
+      Future<PluginWorkspacePresentation?> navigate(
+        Map<String, Object?> args,
+      ) => PluginWorkspacePresentation.fromNavigation(
+        clients: clients,
+        sourceOwnerPackageName: 'owner',
+        routeId: 'route',
+        args: args,
+        language: 'en',
+        hostState: const {'chatId': 'chat-a'},
+      );
+      final first = (await navigate({'file': 'first.ts'}))!;
+      final next = (await navigate({'file': 'next.ts'}))!;
+      expect(first.input, {'file': 'first.ts'});
+      expect(next.hostState, {'chatId': 'chat-a'});
+      expect(first.identity, next.identity);
+      final session = WorkspaceSession();
+      session.openPluginPage(first);
+      session.openPluginPage(next);
+      expect(session.tabs.length, 2);
+      expect(session.tabs.last.pluginPresentation, same(next));
+      session.dispose();
+      bridge.surface = 'toolbox';
+      expect(await navigate({}), isNull);
+      bridge.surface = 'workspace';
+      bridge.owner = 'foreign';
+      expect(await navigate({}), isNull);
+      bridge.owner = 'owner';
+      bridge.routeRuntime = 'native';
+      await expectLater(navigate({}), throwsStateError);
+    },
+  );
+
+  test(
+    'shared catalogs remove disabled entries and ignore completions after disposal',
+    () async {
+      final bridge = CatalogBridge();
+      final catalog = EmbeddedPluginSurfaceCatalog(
+        clients: GeneratedCoreProxyClients(bridge),
+        surfaces: const {'workspace'},
+      );
+      final loaded = Completer<void>();
+      catalog.addListener(() {
+        if (!loaded.isCompleted) loaded.complete();
+      });
+      catalog.setLanguage('en');
+      await loaded.future;
+      expect(catalog.entries.length, 1);
+      bridge.enabled = false;
+      final removed = Completer<void>();
+      catalog.addListener(() {
+        if (!removed.isCompleted) removed.complete();
+      });
+      ToolPkgCatalogChangeBus.notifyCatalogChanged(reloadPluginCode: false);
+      await removed.future;
+      expect(catalog.entries, isEmpty);
+      bridge.gate = Completer<void>();
+      catalog.setLanguage('zh');
+      catalog.dispose();
+      bridge.gate!.complete();
+      await Future<void>.delayed(Duration.zero);
+      expect(catalog.entries, isEmpty);
+    },
+  );
+}

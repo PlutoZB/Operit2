@@ -21,6 +21,7 @@ import '../common/layout/ApplicationZoomPreferences.dart';
 import '../features/chat/tts/TtsFloatingPanel.dart';
 import '../features/startup/RuntimeActivityOverlay.dart';
 import '../../core/host/browser/RuntimeBrowserOwnerHost.dart';
+import '../window/DesktopWindowChrome.dart';
 import 'OperitThemeAssets.dart';
 import 'ThemeAppearanceErrorScreen.dart';
 import 'ThemeCircularRevealHost.dart';
@@ -264,77 +265,93 @@ class _OperitThemeState extends State<OperitTheme> {
               widget.initialThemePreferenceSnapshot.themeMode;
     return _OperitThemeScope(
       controller: _controller,
-      child: ThemeRenderStack(
-        children: <Widget>[
-          if (retainApplication)
-            Offstage(
-              key: const ValueKey('appearance-application'),
-              offstage: !activeThemeReady && !showUnconfiguredApp,
-              child: TickerMode(
-                enabled: activeThemeReady || showUnconfiguredApp,
-                child: ExcludeFocus(
-                  excluding: !activeThemeReady && !showUnconfiguredApp,
-                  child: ThemeAssetScope(
-                    resolver: _themeAssets,
-                    child: _OperitMaterialApp(
-                      themeMode: themeMode,
-                      themePreferenceSnapshot:
-                          _controller.themePreferenceSnapshot,
-                      hostInteractionHostsEnabled:
-                          activeThemeReady &&
-                          widget.hostInteractionHostsEnabled,
-                      zoom: _zoom,
-                      zoomShortcutsEnabled:
-                          runtimeReady && _runtimeStartCompleted,
-                      onZoomChanged: _changeZoom,
-                      child: widget.child,
+      child: DesktopWindowChrome(
+        themeMode: themeMode,
+        lightColorScheme: _seedColorScheme(
+          Brightness.light,
+          _controller.themePreferenceSnapshot,
+        ),
+        darkColorScheme: _seedColorScheme(
+          Brightness.dark,
+          _controller.themePreferenceSnapshot,
+        ),
+        child: ThemeRenderStack(
+          children: <Widget>[
+            if (retainApplication)
+              Offstage(
+                key: const ValueKey('appearance-application'),
+                offstage: !activeThemeReady && !showUnconfiguredApp,
+                child: TickerMode(
+                  enabled: activeThemeReady || showUnconfiguredApp,
+                  child: ExcludeFocus(
+                    excluding: !activeThemeReady && !showUnconfiguredApp,
+                    child: ThemeAssetScope(
+                      resolver: _themeAssets,
+                      child: _OperitMaterialApp(
+                        themeMode: themeMode,
+                        themePreferenceSnapshot:
+                            _controller.themePreferenceSnapshot,
+                        hostInteractionHostsEnabled:
+                            activeThemeReady &&
+                            widget.hostInteractionHostsEnabled,
+                        zoom: _zoom,
+                        zoomShortcutsEnabled:
+                            runtimeReady && _runtimeStartCompleted,
+                        onZoomChanged: _changeZoom,
+                        child: widget.child,
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
-          if (!activeThemeReady && !showUnconfiguredApp)
-            ThemeRenderRoot(
-              key: const ValueKey('appearance-status'),
-              title: 'Operit2',
-              themePreferenceSnapshot: _controller.themePreferenceSnapshot,
-              lightColorScheme: _seedColorScheme(
-                Brightness.light,
-                _controller.themePreferenceSnapshot,
-              ),
-              darkColorScheme: _seedColorScheme(
-                Brightness.dark,
-                _controller.themePreferenceSnapshot,
-              ),
-              // Startup and repair use system typography while font assets are being prepared.
-              fontFamily: _defaultFontFamily,
-              fontFamilyFallback: _defaultFontFamilyFallback,
-              themeMode: themeMode,
-              localizationsDelegates: AppLocalizations.localizationsDelegates,
-              supportedLocales: AppLocalizations.supportedLocales,
-              builder: (context, child) =>
-                  AnnotatedRegion<SystemUiOverlayStyle>(
-                    value: operitSystemUiOverlayStyle(
-                      Theme.of(context).colorScheme,
+            if (!activeThemeReady && !showUnconfiguredApp)
+              ThemeRenderRoot(
+                key: const ValueKey('appearance-status'),
+                title: 'Operit2',
+                themePreferenceSnapshot: _controller.themePreferenceSnapshot,
+                lightColorScheme: _seedColorScheme(
+                  Brightness.light,
+                  _controller.themePreferenceSnapshot,
+                ),
+                darkColorScheme: _seedColorScheme(
+                  Brightness.dark,
+                  _controller.themePreferenceSnapshot,
+                ),
+                // Startup and repair use system typography while font assets are being prepared.
+                fontFamily: _defaultFontFamily,
+                fontFamilyFallback: _defaultFontFamilyFallback,
+                themeMode: themeMode,
+                localizationsDelegates: AppLocalizations.localizationsDelegates,
+                supportedLocales: AppLocalizations.supportedLocales,
+                builder: (context, child) =>
+                    AnnotatedRegion<SystemUiOverlayStyle>(
+                      value: operitSystemUiOverlayStyle(
+                        Theme.of(context).colorScheme,
+                      ),
+                      child: DesktopWindowFrame(
+                        transparentSurface: _controller
+                            .themePreferenceSnapshot
+                            .transparentSurfaceEnabled,
+                        child: child!,
+                      ),
                     ),
-                    child: child!,
-                  ),
-              home: runtimeReady && _controller.themeLoadError != null
-                  ? ThemeAppearanceErrorScreen(
-                      error: _controller.themeLoadError!,
-                      onRetry: _controller.reloadTheme,
-                      onReset: _controller.restoreDefaultAppearance,
-                    )
-                  : RuntimeBootstrapScreen(
-                      message: runtimeReady
-                          ? '正在读取外观设置'
-                          : !runtimeConfigured
-                          ? '请先在主窗口配置运行时目录和工作区目录'
-                          : _runtimeStartupMessage,
-                      errorText: _runtimeStartupError?.toString(),
-                    ),
-            ),
-        ],
+                home: runtimeReady && _controller.themeLoadError != null
+                    ? ThemeAppearanceErrorScreen(
+                        error: _controller.themeLoadError!,
+                        onRetry: _controller.reloadTheme,
+                        onReset: _controller.restoreDefaultAppearance,
+                      )
+                    : RuntimeBootstrapScreen(
+                        message: runtimeReady
+                            ? '正在读取外观设置'
+                            : !runtimeConfigured
+                            ? '请先在主窗口配置运行时目录和工作区目录'
+                            : _runtimeStartupMessage,
+                        errorText: _runtimeStartupError?.toString(),
+                      ),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -389,7 +406,12 @@ class _OperitMaterialApp extends StatelessWidget {
             value: operitSystemUiOverlayStyle(Theme.of(context).colorScheme),
             child: OperitThemeBackground(
               themePreferenceSnapshot: themePreferenceSnapshot,
-              child: materialChild!,
+              child: DesktopWindowFrame(
+                transparentSurface:
+                    themePreferenceSnapshot.transparentSurfaceEnabled,
+                zoom: zoom,
+                child: materialChild!,
+              ),
             ),
           ),
         );
@@ -557,7 +579,8 @@ class OperitThemeController {
   /// Persists a partial update through synchronized Space appearance preferences.
   Future<void> saveThemeSettings({
     String? inputStyle,
-    String? chatStyle,
+    String? userChatStyle,
+    String? aiChatStyle,
     bool? bubbleShowAvatar,
     bool? bubbleWideLayoutEnabled,
     bool? bubbleUserRoundedCornersEnabled,
@@ -634,7 +657,8 @@ class OperitThemeController {
   }) async {
     await _preferencesManager.saveThemeSettings(
       inputStyle: inputStyle,
-      chatStyle: chatStyle,
+      userChatStyle: userChatStyle,
+      aiChatStyle: aiChatStyle,
       bubbleShowAvatar: bubbleShowAvatar,
       bubbleWideLayoutEnabled: bubbleWideLayoutEnabled,
       bubbleUserRoundedCornersEnabled: bubbleUserRoundedCornersEnabled,
@@ -798,6 +822,148 @@ Future<void> _saveStartupThemeModeDefault(ThemeMode themeMode) {
   return RuntimeBootstrapManager.instance.saveStartupThemeMode(themeMode);
 }
 
+/// Renders an inert appearance in its own scope without starting runtime
+/// observers or writing the application's selected theme.
+class OperitThemePreview extends StatefulWidget {
+  const OperitThemePreview({
+    super.key,
+    required this.snapshot,
+    required this.child,
+    this.visual,
+    this.assets,
+  });
+
+  final ThemePreferenceSnapshot snapshot;
+  final PreparedThemeVisual? visual;
+  final ThemeAssetResolver? assets;
+  final Widget child;
+
+  @override
+  State<OperitThemePreview> createState() => _OperitThemePreviewState();
+}
+
+class _OperitThemePreviewState extends State<OperitThemePreview> {
+  late final OperitThemeController _controller = OperitThemeController(
+    onChanged: () {},
+  );
+  final _assets = ThemeAssetStore();
+  Future<void>? _preparation;
+  late ThemeAssetResolver _resolver;
+
+  @override
+  void initState() {
+    super.initState();
+    _prepare();
+  }
+
+  @override
+  void didUpdateWidget(covariant OperitThemePreview oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!mapEquals(oldWidget.snapshot.toJson(), widget.snapshot.toJson()) ||
+        oldWidget.visual != widget.visual ||
+        oldWidget.assets != widget.assets) {
+      _prepare();
+    }
+  }
+
+  void _prepare() {
+    final visual = widget.visual;
+    _resolver = visual == null
+        ? widget.assets ?? _assets
+        : _PreviewAssetResolver(
+            visual: visual.resources,
+            runtime: widget.assets ?? _assets,
+          );
+    final snapshot = visual?.snapshot(widget.snapshot) ?? widget.snapshot;
+    _controller.setInitialThemePreferenceSnapshot(snapshot);
+    if (visual != null) {
+      for (final font in [
+        visual.resources.sans,
+        visual.resources.user,
+        visual.resources.ai,
+      ]) {
+        _loadedCustomFontFamilies[font.family] = font.family;
+      }
+      _preparation = null;
+    } else if (snapshot.fontType == UserPreferencesManager.FONT_TYPE_FILE ||
+        (snapshot.bubbleUserUseCustomFont &&
+            snapshot.bubbleUserFontType ==
+                UserPreferencesManager.FONT_TYPE_FILE) ||
+        (snapshot.bubbleAiUseCustomFont &&
+            snapshot.bubbleAiFontType ==
+                UserPreferencesManager.FONT_TYPE_FILE)) {
+      _preparation = _prepareCustomFonts(snapshot).then((families) {
+        _loadedCustomFontFamilies.addAll(families);
+      });
+    } else {
+      _preparation = null;
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<void>(
+      future: _preparation,
+      builder: (context, preparation) {
+        if (preparation.hasError) {
+          return Center(
+            child: Text(
+              AppLocalizations.of(
+                context,
+              )!.settingsAppearanceThemeConfigFailed('${preparation.error}'),
+            ),
+          );
+        }
+        if (_preparation != null &&
+            preparation.connectionState != ConnectionState.done) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        final snapshot = _controller.themePreferenceSnapshot;
+        final brightness = switch (snapshot.themeMode) {
+          ThemeMode.light => Brightness.light,
+          ThemeMode.dark => Brightness.dark,
+          ThemeMode.system => MediaQuery.platformBrightnessOf(context),
+        };
+        return _OperitThemeScope(
+          controller: _controller,
+          child: ThemeAssetScope(
+            resolver: _resolver,
+            child: Theme(
+              data: buildOperitThemeData(
+                _seedColorScheme(brightness, snapshot),
+                snapshot,
+                fontFamily: _fontFamily(snapshot),
+                fontFamilyFallback: _fontFamilyFallback(snapshot),
+              ),
+              child: IgnorePointer(child: ExcludeFocus(child: widget.child)),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Template references are checked in memory; saved media uses the same runtime
+/// owner as the catalog. Both are available in previews that mix these sources.
+class _PreviewAssetResolver implements ThemeAssetResolver {
+  const _PreviewAssetResolver({required this.visual, required this.runtime});
+  final ThemeAssetResolver? visual;
+  final ThemeAssetResolver runtime;
+
+  @override
+  Future<Uint8List> readBytes(String reference) =>
+      (reference.startsWith('assets/') ? visual ?? runtime : runtime).readBytes(
+        reference,
+      );
+}
+
 class _OperitThemeScope extends InheritedWidget {
   const _OperitThemeScope({required this.controller, required super.child});
 
@@ -857,7 +1023,8 @@ ThemePreferenceSnapshot _themePreferenceSnapshotWith(
     inputSendAssetSize: snapshot.inputSendAssetSize,
     inputStopAsset: snapshot.inputStopAsset,
     inputStopAssetSize: snapshot.inputStopAssetSize,
-    chatStyle: snapshot.chatStyle,
+    userChatStyle: snapshot.userChatStyle,
+    aiChatStyle: snapshot.aiChatStyle,
     bubbleShowAvatar: snapshot.bubbleShowAvatar,
     bubbleWideLayoutEnabled: snapshot.bubbleWideLayoutEnabled,
     cursorUserBubbleColor: snapshot.cursorUserBubbleColor,
@@ -1294,7 +1461,7 @@ const List<String> _monospaceFontFamilyFallback = <String>[
   'monospace',
 ];
 
-const Color _brandSeedColor = Color(0xFFBBDEFB);
+const Color _brandSeedColor = Color(0xFF3B82F6);
 
 /// Builds one Material color scheme and applies the secondary accent color.
 ColorScheme _seedColorScheme(
@@ -1318,11 +1485,47 @@ ColorScheme _seedColorScheme(
     brightness: brightness,
     dynamicSchemeVariant: DynamicSchemeVariant.tonalSpot,
   );
-  if (!themePreferenceSnapshot.useCustomColors ||
-      themePreferenceSnapshot.customSecondaryColor == null) {
-    return scheme;
+
+  final isDark = brightness == Brightness.dark;
+  final customSecondary =
+      themePreferenceSnapshot.useCustomColors &&
+          themePreferenceSnapshot.customSecondaryColor != null
+      ? Color(themePreferenceSnapshot.customSecondaryColor!)
+      : null;
+
+  // Decouple neutral surface tones from seed color to eliminate cyan/teal tint,
+  // providing a clean, professional neutral dark palette and crisp neutral light palette.
+  if (isDark) {
+    return scheme.copyWith(
+      surface: const Color(0xFF161616),
+      surfaceDim: const Color(0xFF121212),
+      surfaceBright: const Color(0xFF262626),
+      surfaceContainerLowest: const Color(0xFF0D0E10),
+      surfaceContainerLow: const Color(0xFF131314),
+      surfaceContainer: const Color(0xFF18181A),
+      surfaceContainerHigh: const Color(0xFF202023),
+      surfaceContainerHighest: const Color(0xFF26272B),
+      outline: const Color(0xFF4C4D53),
+      outlineVariant: const Color(0xFF262628),
+      onSurface: const Color(0xFFECECEC),
+      onSurfaceVariant: const Color(0xFFA0A1A7),
+      secondary: customSecondary ?? scheme.secondary,
+    );
+  } else {
+    return scheme.copyWith(
+      surface: const Color(0xFFFFFFFF),
+      surfaceDim: const Color(0xFFEDEDF0),
+      surfaceBright: const Color(0xFFFFFFFF),
+      surfaceContainerLowest: const Color(0xFFFFFFFF),
+      surfaceContainerLow: const Color(0xFFF7F8F9),
+      surfaceContainer: const Color(0xFFF0F2F5),
+      surfaceContainerHigh: const Color(0xFFE8EAEF),
+      surfaceContainerHighest: const Color(0xFFE0E3E8),
+      outline: const Color(0xFF8F929A),
+      outlineVariant: const Color(0xFFE2E4E8),
+      onSurface: const Color(0xFF1B1C1E),
+      onSurfaceVariant: const Color(0xFF5A5C63),
+      secondary: customSecondary ?? scheme.secondary,
+    );
   }
-  return scheme.copyWith(
-    secondary: Color(themePreferenceSnapshot.customSecondaryColor!),
-  );
 }

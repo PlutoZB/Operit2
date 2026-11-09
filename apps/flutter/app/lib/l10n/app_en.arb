@@ -1,11 +1,14 @@
 {
   "@@locale": "en",
+  "chatPromoteToRoot": "Promote to main conversation",
   "workspaceUnsavedChangesTitle": "Unsaved changes",
   "workspaceUnsavedChangesMessage": "Save your changes before closing this file?",
   "workspaceDiscardChanges": "Discard changes",
   "askOperitHint": "Ask Operit",
   "aiChat": "AI Chat",
   "fullscreenInput": "Fullscreen input",
+  "noticeExpand": "Expand",
+  "noticeCollapse": "Collapse",
   "expandInput": "Expand input",
   "collapseInput": "Collapse input",
   "settings": "Settings",
@@ -38,6 +41,15 @@
   },
   "chatQueueAddMessage": "Queue message",
   "chatQueueAdded": "Added to queue",
+  "chatSendOptions": "Choose how to send",
+  "chatQueueAddMessageDescription": "Send after the current reply finishes (default)",
+  "chatGuideCurrentTurn": "Guide current conversation",
+  "chatGuideCurrentTurnDescription": "Apply in a later model request without interrupting this turn",
+  "chatInterruptAndSend": "Interrupt and send",
+  "chatInterruptAndSendDescription": "Stop the current reply and send this message now",
+  "chatGuidanceAccepted": "Guidance added for a later model request",
+  "chatGuidanceTextOnly": "Guidance supports text only. Remove attachments and the reply target first.",
+  "chatQueueWithdrawToEditor": "Withdraw to editor",
   "chatPleaseCreateNewChat": "Please create a chat",
   "cancel": "Cancel",
   "send": "Send",
@@ -49,6 +61,13 @@
   "receivingToolResultAiResponse": "Receiving AI response after tool execution...",
   "summarizingMemories": "Summarizing memories...",
   "summaryGenerating": "Generating summary...",
+  "summaryStageCore": "Summarizing the core task...",
+  "summaryStageConstraints": "Summarizing user requests and constraints...",
+  "summaryStageFiles": "Summarizing key files and code...",
+  "summaryStageErrors": "Summarizing errors and fixes...",
+  "summaryStageInteraction": "Summarizing interaction and context...",
+  "summaryStageNext": "Summarizing next steps...",
+  "summaryStageFormatting": "Formatting the summary...",
   "chatCompressingHistory": "Compressing history records...",
   "executingPlan": "Executing plan...",
   "executingTool": "Executing tool: {toolName}",
@@ -90,6 +109,9 @@
     }
   },
   "close": "Close",
+  "workspaceCloseOtherTabs": "Close Others",
+  "workspaceCloseTabsToRight": "Close to the Right",
+  "workspaceCloseAllTabs": "Close All",
   "commonExpand": "Expand",
   "commonCollapse": "Collapse",
   "create": "Create",
@@ -145,6 +167,15 @@
       }
     }
   },
+  "messageLocatorSearchMessages": "Search messages",
+  "messageLocatorViewFavorites": "View favorites",
+  "messageLocatorAll": "All",
+  "messageLocatorFavorites": "Favorites",
+  "messageLocatorNoFavorites": "No favorite messages yet",
+  "messageLocatorLoadFailed": "Could not load messages. Please try again.",
+  "messageLocatorFavoriteFailed": "Could not update favorite. Please try again.",
+  "messageLocatorAddFavorite": "Favorite message",
+  "messageLocatorRemoveFavorite": "Remove favorite",
   "messageLocatorNoMatches": "No matching messages",
   "messageSenderUser": "User",
   "messageSenderSummary": "Summary",
@@ -196,7 +227,7 @@
   "workspaceAddFolderDescription": "Mount another folder into the current workspace",
   "workspaceProjectTypeDialogTitle": "Choose project type",
   "workspaceProjectTypeDialogDescription": "Choose the default workspace type to create",
-  "workspaceUnbindTitle": "Unbind workspace",
+  "workspaceUnbindTitle": "Remove project from this chat",
   "workspaceUnbindDescription": "Detach this chat without deleting workspace files",
   "workspaceUnbindConfirmation": "Unbind the workspace from this chat? The workspace and its files will be kept, and other chats will not be affected. You can bind a workspace again later.",
   "workspaceUnbindFailed": "Failed to unbind workspace. Please try again.",
@@ -496,8 +527,6 @@
     }
   },
   "settingsModelSetCurrentActive": "Set active",
-  "settingsChatThinkingMode": "Thinking mode",
-  "settingsChatThinkingModeDescription": "Let supported models produce steadier reasoning.",
   "settingsChatStreamOutput": "Stream output",
   "settingsChatStreamOutputDescription": "Show generated replies progressively.",
   "settingsModelProfilesSection": "Model profiles",
@@ -721,6 +750,23 @@
       "error": {}
     }
   },
+  "localModelsAddModel": "Add model",
+  "localModelsFilterDownloads": "Downloads",
+  "localModelsAllTypes": "All types",
+  "localModelsNoMatches": "No matching models",
+  "localModelsResetFilters": "Reset filters",
+  "localModelsDetails": "Model details",
+  "localModelsMoreActions": "More actions",
+  "localModelsResultCount": "Showing {count} of {total} models",
+  "@localModelsResultCount": {
+    "placeholders": {
+      "count": {"type": "int"},
+      "total": {"type": "int"}
+    }
+  },
+  "localModelsHubRepositoryTab": "Repository",
+  "localModelsDownloadFailed": "Download failed",
+  "localModelsDownloadPausedLabel": "Paused",
   "localModelsCatalog": "Model catalog",
   "localModelsCategorySpeechToText": "Speech-to-text models",
   "localModelsCategoryTextToSpeech": "Text-to-speech models",
@@ -818,6 +864,36 @@
   "settingsModelAvailableSourceFetched": "Fetched",
   "settingsModelAvailableSourceHistory": "History",
   "settingsModelAvailableEmptyFetched": "No fetched models. Choose Include history to see catalog IDs.",
+  "settingsModelUnrecognized": "Unrecognized",
+  "settingsModelCatalogUpdatedAt": "Capabilities and context from models.dev, updated {time}",
+  "@settingsModelCatalogUpdatedAt": {
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsModelCatalogUpdateFailed": "Could not download model details: {error}",
+  "@settingsModelCatalogUpdateFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsModelCatalogUpdateFailedUsing": "Could not update model details, using those from {time}: {error}",
+  "@settingsModelCatalogUpdateFailedUsing": {
+    "placeholders": {
+      "time": {
+        "type": "String"
+      },
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsModelCatalogNotDownloaded": "Model details have not been downloaded yet",
+  "settingsModelCatalogRetry": "Retry",
   "settingsModelCustomModel": "Custom model",
   "settingsModelModelId": "Model ID",
   "settingsModelDuplicateModelId": "This model has already been added to this provider.",
@@ -841,9 +917,7 @@
   "settingsModelContextLength": "Context length",
   "settingsModelMaxContextLength": "Max context length",
   "settingsModelMaxContextLengthInvalid": "Enter a max context length greater than 0",
-  "settingsModelSummaryThreshold": "Summary token threshold",
-  "settingsModelSummaryByMessageCount": "Summarize by message count",
-  "settingsModelSummaryMessageCount": "Summary message threshold",
+  "settingsModelSummaryThreshold": "Summarize at",
   "settingsModelCustomHeaders": "Custom headers",
   "settingsModelCustomParameters": "Custom parameters JSON",
   "settingsModelToolCall": "Tool calling",
@@ -856,18 +930,134 @@
   "settingsModelDirectVideoDescription": "Send video directly to models that support video input.",
   "settingsModelGoogleSearch": "Google Search",
   "settingsModelGoogleSearchDescription": "Enable provider-side search capability.",
-  "settingsModelContext": "Context window",
+  "settingsModelContext": "Context",
   "settingsModelSummary": "Auto summary",
   "settingsModelThinking": "Thinking",
-  "settingsModelThinkingOption": "Thinking option",
-  "settingsModelThinkingRules": "Thinking rules JSON",
+  "thinkingLevelLabel": "Thinking",
+  "thinkingAlwaysOn": "Always thinking",
+  "thinkingChip": "Thinking",
+  "settingsModelThinkingSourceDeclared": "Levels from your description",
+  "settingsModelThinkingSourceLocalRuntime": "Runs locally: thinking switches on or off, and the switch does nothing for a model that cannot think",
+  "settingsModelThinkingUnknown": "The catalog has no thinking details for this model",
+  "settingsModelThinkingNotAdjustable": "This API cannot change how this model thinks",
+  "settingsModelThinkingNotSupported": "This model does not think",
+  "settingsModelThinkingCarried": "Carried over from the level you set last",
+  "settingsModelThinkingDescribe": "Describe",
+  "settingsModelThinkingUseCatalog": "Use catalog",
+  "settingsModelThinkingDescribeTitle": "How this model thinks",
+  "settingsModelThinkingKindNone": "Does not think",
+  "settingsModelThinkingKindAlways": "Always thinks, no control",
+  "settingsModelThinkingKindSwitch": "On or off",
+  "settingsModelThinkingKindLevels": "Levels",
+  "settingsModelThinkingKindBudget": "Token budget",
+  "settingsModelThinkingCanTurnOff": "Can be turned off",
+  "settingsModelThinkingBudgetMin": "Minimum tokens",
+  "settingsModelThinkingBudgetMax": "Maximum tokens",
+  "settingsModelThinkingLevelsRequired": "Pick at least one level",
   "settingsModelMediaHistory": "Media history",
   "settingsModelCapabilities": "Capabilities",
   "settingsModelBuiltinTools": "Built-in tools",
   "settingsModelBuiltinToolExclusive": "Turns off external tool calling when enabled",
-  "settingsModelConnectionTestSection": "Connection test",
   "settingsModelRunConnectionTest": "Test current model",
-  "settingsModelTestModel": "Test model",
+  "settingsModelTestModel": "Test",
+  "settingsModelCapabilityToolCall": "Tools",
+  "settingsModelCapabilityImage": "Image",
+  "settingsModelCapabilityAudio": "Audio",
+  "settingsModelCapabilityVideo": "Video",
+  "settingsModelClaudeCache": "Claude 1h cache",
+  "settingsModelClaudeCacheDescription": "Sets a 1-hour TTL on explicit cache breakpoints; when off, the default TTL applies.",
+  "settingsModelSummaryThresholdDescription": "Summarize when the context fills to this share. 0 turns summaries off.",
+  "settingsModelMoreActions": "More actions",
+  "settingsModelRestoreDefaults": "Restore defaults",
+  "settingsModelDescribeThinking": "Describe thinking levels",
+  "settingsModelDeleteModel": "Delete model",
+  "settingsModelSaveFailed": "Could not save: {error}",
+  "@settingsModelSaveFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsModelTestAll": "Test all",
+  "settingsModelTestProgress": "Testing {done}/{total}",
+  "@settingsModelTestProgress": {
+    "placeholders": {
+      "done": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsModelTestSummary": "{passed} passed, {failed} failed",
+  "@settingsModelTestSummary": {
+    "placeholders": {
+      "passed": {
+        "type": "int"
+      },
+      "failed": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsModelTestAllPassed": "All {count} passed",
+  "@settingsModelTestAllPassed": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsModelTestCouldNotRun": "The test could not run",
+  "settingsModelCopyError": "Copy error",
+  "settingsModelSelect": "Select",
+  "settingsModelCheckAll": "Select all",
+  "settingsModelCheckedCount": "{count} selected",
+  "@settingsModelCheckedCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsModelDeleteModelsTitle": "Delete {count} models?",
+  "@settingsModelDeleteModelsTitle": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsModelDeleteModelsMessage": "Their settings are deleted with them.",
+  "settingsModelDeleteModelsKept": "{count} in use by functions will be kept: {names}",
+  "@settingsModelDeleteModelsKept": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      },
+      "names": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsModelDeleteModelsBlocked": "The selected models are used by these functions. Change the function model assignments first: {functions}",
+  "@settingsModelDeleteModelsBlocked": {
+    "placeholders": {
+      "functions": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsModelDeletedCount": "Deleted {count} models",
+  "@settingsModelDeletedCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "settingsModelTestingConnection": "Testing current model connection…",
   "settingsModelTestedModel": "Tested model",
   "settingsModelConnectionTestPassed": "All checks passed",
@@ -1062,6 +1252,8 @@
   "settingsRuntimeCurrentSpace": "Current device space",
   "settingsRuntimeOverviewDescription": "Devices in the same space can connect and share data and routes.",
   "settingsRuntimeRenameSpace": "Rename device space",
+  "settingsRuntimeResetTransactions": "Reset transactions",
+  "settingsRuntimeResetTransactionsDone": "Sync transactions rebuilt from this device’s current content",
   "settingsRuntimeLeaveSpace": "Leave device space",
   "settingsRuntimeLeaveSpaceTitle": "Leave the current device space?",
   "settingsRuntimeLeaveSpaceDescription": "This device will create a new single-device space. Business data and paired devices are preserved.",
@@ -1324,7 +1516,8 @@
   "settingsAppearanceClearUserAvatar": "Clear user avatar",
   "settingsAppearanceClearAiAvatar": "Clear AI avatar",
   "settingsAppearanceChatDisplaySection": "Chat display",
-  "settingsAppearanceMessageStyle": "Message style",
+  "settingsAppearanceUserMessageStyle": "User message style",
+  "settingsAppearanceAiMessageStyle": "AI message style",
   "settingsAppearanceMessageStyleClean": "Command",
   "settingsAppearanceMessageStyleCard": "Bubble",
   "settingsAppearanceMessageColors": "Message colors",
@@ -1474,7 +1667,7 @@
   "settingsDataInputTokens": "Input",
   "settingsDataOutputTokens": "Output",
   "settingsDataOpenDetailedStats": "View detailed statistics",
-  "settingsDataOpenDetailedStatsDescription": "Open daily trends, input/output token changes, heatmap intensity, and usage breakdown by provider, model, and function model.",
+  "settingsDataOpenDetailedStatsDescription": "View the usage heatmap and model usage timeline with minute-level zoom.",
   "settingsDataRefreshTokenStats": "Refresh statistics",
   "settingsDataResetTokenStats": "Reset statistics",
   "settingsDataDetailedStatsTitle": "Detailed statistics",
@@ -2038,14 +2231,13 @@
       }
     }
   },
-  "settingsPeerTransportHelp": "Listener transports (multiple selections). HTTP and WebSocket can share a port; TCP cannot share that port with them. Bluetooth requires platform support. Clear all selections and disable discovery to stop listening. Changing settings interrupts existing connections. Disabling discovery alone does not stop direct connections.",
+  "settingsPeerTransportHelp": "Listener transports (multiple selections). HTTP, WebSocket and TCP share one listening port and can be combined freely. Bluetooth requires platform support. Clear all selections and disable discovery to stop listening. Changing settings interrupts existing connections. Disabling discovery alone does not stop direct connections.",
   "settingsPeerBindAddress": "Listen IP address",
   "settingsPeerBindAddressHelp": "Example: 0.0.0.0 for LAN access; IPv6 addresses are also supported.",
   "settingsPeerBindPort": "Listen port",
   "settingsPeerBindPortHelp": "The port used by fixed listener mode.",
   "settingsPeerBindPortAutomaticHelp": "The system assigns an available port. The actual port appears after startup.",
   "settingsPeerDiscoveryNeedsTransport": "Select at least one transport before enabling discovery.",
-  "settingsPeerPortConflict": "TCP cannot currently share a listen port with HTTP/WebSocket. Select TCP or HTTP/WebSocket.",
   "settingsPeerAddressRequired": "Enter a listen IP address.",
   "settingsPeerPortRequired": "Enter a port from 1 to 65535.",
   "settingsPeerApplied": "Listener settings applied.",
@@ -2122,7 +2314,7 @@
   "deviceSpaceConnectDirectHint": "This device is already a Space member. Pairing it adds a direct link without joining again; pairing shows a six-digit code on the other device for you to enter.",
   "deviceSpaceUpdateEndpoint": "Update direct address",
   "deviceSpaceUpdateEndpointLabel": "Direct address",
-  "deviceSpaceUpdateEndpointHint": "For example ws://192.168.1.20:37195/link",
+  "deviceSpaceUpdateEndpointHint": "e.g. ws://host:port/link or host:port — use the peer's current listen port",
   "deviceSpaceUpdateEndpointSaved": "Direct address updated",
   "deviceSpaceDirectLinkEstablished": "Direct link established: {device}",
   "@deviceSpaceDirectLinkEstablished": {
@@ -2137,6 +2329,8 @@
   "deviceSpaceConnectionSettings": "Connection settings",
   "deviceSpaceViewRequest": "View request",
   "devicePickerNearby": "Nearby devices",
+  "devicePickerDiscoveryFailed": "Nearby device discovery failed: {error}",
+  "@devicePickerDiscoveryFailed": {"placeholders": {"error": {"type": "String"}}},
   "devicePickerEmpty": "No nearby devices found",
   "devicePickerHint": "Connect both devices to the same network and enable discovery on the other device.",
   "devicePickerManual": "Connect using an address",
@@ -2160,8 +2354,8 @@
   "settingsAppearanceThemeConfigDelete": "Delete an inactive theme configuration",
   "settingsAppearanceThemeConfigName": "Theme name",
   "settingsAppearanceThemeConfigNameRequired": "Enter a theme name",
-  "settingsAppearanceThemeConfigCustomHint": "Click + to create and manage independent theme configurations.",
-  "settingsAppearanceThemeConfigEditingHint": "Appearance changes are saved to the selected theme configuration.",
+  "settingsAppearanceThemeConfigCustomHint": "Create a theme to save your appearance. Tap a card to switch; choose Edit to customize.",
+  "settingsAppearanceThemeConfigEditingHint": "Tap a card to switch themes. Mode shortcuts change only the current theme. Edits save automatically.",
   "settingsAppearanceThemeConfigFailed": "Theme operation failed: {detail}",
   "@settingsAppearanceThemeConfigFailed": {
     "placeholders": {
@@ -2243,7 +2437,7 @@
   "localModelsInvalidSettings": "Check the thread count, context size and batch size.",
   "localModelsFilterAll": "All models",
   "localModelsFilterInstalled": "Installed only",
-  "localModelsSearchCatalog": "Search by name or inference engine",
+  "localModelsSearchCatalog": "Search models, tags or engines",
   "deviceSpaceSyncPeer": "a space device",
   "deviceSpaceSyncActive": "Syncing with {device}",
   "@deviceSpaceSyncActive": {
@@ -2263,6 +2457,12 @@
   },
   "deviceSpaceSyncChecking": "Checking for changes",
   "deviceSpaceSyncRecords": "Exchanging records",
+  "deviceSpaceSyncRecordProgress": "{completed} / {total} records · {percent}%",
+  "@deviceSpaceSyncRecordProgress": {"placeholders": {"completed": {"type": "int"}, "total": {"type": "int"}, "percent": {"type": "int"}}},
+  "deviceSpaceSyncPendingCount": "{count} records pending application",
+  "@deviceSpaceSyncPendingCount": {"placeholders": {"count": {"type": "int"}}},
+  "deviceSpaceSyncCounting": "Counting total · {count} records processed",
+  "@deviceSpaceSyncCounting": {"placeholders": {"count": {"type": "int"}}},
   "deviceSpaceSyncFiles": "Transferring and verifying files",
   "deviceSpaceSyncRetrying": "Sync interrupted. Retrying automatically.",
   "deviceSpaceSyncPending": "Some data is still pending. Retrying automatically.",
@@ -2294,5 +2494,123 @@
   "runtimeActivitySyncCompleted": "Sync complete",
   "runtimeActivityWaiting": "Waiting to retry",
   "runtimeActivityExpand": "Show background tasks",
-  "runtimeActivityLoadingPackages": "Loading extensions"
+  "runtimeActivityLoadingPackages": "Loading extensions",
+  "peerQrTitle": "QR connection",
+  "peerQrScan": "Scan code",
+  "peerQrShow": "My code",
+  "peerQrShowHint": "Scan this code on another device to connect to this device.",
+  "peerQrScanHint": "Scan the Operit connection code on the other device.",
+  "peerQrTrustHint": "This QR code is valid for 5 minutes. Share it only with trusted devices. Confirming joins directly; this device automatically approves when it has administrator approval permissions.",
+  "peerQrConfirmJoin": "Confirm join",
+  "peerQrConfirmJoinHint": "Join this device’s space? Confirm to connect and submit the join request without entering a pairing code.",
+  "peerQrListenerRequired": "Enable receiving connections in connection settings and connect to a network first.",
+  "peerQrCopy": "Copy connection info",
+  "peerQrCopied": "Copied",
+  "peerQrImport": "Import QR image",
+  "peerQrPaste": "Or paste connection info",
+  "peerQrRead": "Read connection info",
+  "peerQrWrongDevice": "This code belongs to a different device. Scan the code for the selected device.",
+  "peerQrImageInvalid": "No QR code could be read. Choose a clear QR image smaller than 16 MB.",
+  "peerQrCameraUnavailable": "Camera scanning is unavailable. Import a QR image or paste connection info instead.",
+  "peerQrCameraPermission": "Camera access is required. Allow it in system settings, or import a QR image.",
+  "peerQrDevice": "Connect device",
+  "peerQrScanAgain": "Scan another code",
+  "peerQrMethodsHint": "Can’t find the device? Connect with a QR code.",
+  "toolParametersLabel": "Parameters",
+  "toolResultLabel": "Result",
+  "toolGroupThinkingCount": "{count} thinking",
+  "toolGroupCallCount": "{count, plural, one{{count} call} other{{count} calls}}",
+  "toolGroupSearchCount": "{count} search",
+  "toolEditedFileCount": "{count, plural, one{Edited {count} file} other{Edited {count} files}}",
+  "toolViewChanges": "View changes",
+  "toolViewFileDiff": "View diff for {fileName}",
+  "@toolEditedFileCount": {"placeholders": {"count": {"type": "int"}}},
+  "@toolViewFileDiff": {"placeholders": {"fileName": {"type": "String"}}},
+  "toolGroupCompleted": "Completed",
+  "toolGroupExecuting": "Executing",
+  "@toolGroupThinkingCount": {"placeholders": {"count": {"type": "int"}}},
+  "@toolGroupCallCount": {"placeholders": {"count": {"type": "int"}}},
+  "@toolGroupSearchCount": {"placeholders": {"count": {"type": "int"}}},
+  "settingsDataTimelineTitle": "Model usage over time",
+  "settingsDataTimelineHint": "One line per model. Pinch or scroll to zoom, drag to move, and tap to inspect a time bucket.",
+  "settingsDataTimelineHours": "{hours}h",
+  "@settingsDataTimelineHours": {
+    "placeholders": {
+      "hours": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsDataTimelineBucket": "{minutes} min buckets",
+  "@settingsDataTimelineBucket": {
+    "placeholders": {
+      "minutes": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsDataTimelineSecondsBucket": "{seconds} sec buckets",
+  "@settingsDataTimelineSecondsBucket": {
+    "placeholders": {
+      "seconds": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsDataTimelineEarlier": "Earlier",
+  "settingsDataTimelineLater": "Later",
+  "settingsDataTimelineRecent": "Recent 3h",
+  "settingsDataTimelineRange": "Visible time range",
+  "settingsDataTimelineSelectModel": "Select a model below to display its usage",
+  "settingsDataTimelineSpend": "Spending (estimated)",
+  "settingsDataTimelineCacheRate": "Cache hit rate",
+  "settingsDataTimelineSpendHint": "Estimated using current model prices. Shares the time range above.",
+  "settingsDataTimelineCacheRateHint": "Cached input / total input per time bucket. Idle periods have no rate.",
+  "settingsDataTimelineNoPrices": "No matching model prices",
+  "settingsDataTimelinePricesFailed": "Could not load model prices. Refresh to retry.",
+  "settingsDataTimelineUnpriced": "{count} requests have unknown cost",
+  "@settingsDataTimelineUnpriced": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsDataTimelineKnownSpend": "Known spending (estimated)",
+  "settingsDataDetailedStatsRangeLastDay": "Last 24 hours",
+  "settingsDataTimelineAverageInput": "Average input per request",
+  "settingsDataTimelineAverageInputHint": "Input tokens / requests per bucket, to spot growing context sizes. Idle periods are gaps.",
+  "settingsDataTimelineCacheSavings": "Cache savings (estimated)",
+  "settingsDataTimelineCacheSavingsHint": "At current prices, cached input cost compared with regular input. Per-request billing saves 0; negative values mean a cache surcharge.",
+  "settingsDataTimelineTokensPerRequest": "{tokens} tokens / request",
+  "@settingsDataTimelineTokensPerRequest": {
+    "placeholders": {
+      "tokens": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsDataTimelineUnknownSavings": "Savings unknown for {count} requests",
+  "@settingsDataTimelineUnknownSavings": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "contextStatsSummaryLoadFailed": "Unable to load context statistics",
+  "contextStatsDevicesLoadFailed": "Unable to load device information",
+  "settingsAppearanceThemeLibrary": "Your themes",
+  "settingsAppearanceThemeLibraryHint": "Choose a look. Make it yours.",
+  "settingsAppearanceThemeActive": "In use",
+  "settingsAppearanceThemeApply": "Use this theme",
+  "settingsAppearanceThemeMore": "More theme actions",
+  "settingsAppearanceThemeDuplicate": "Create a copy",
+  "settingsAppearanceThemeUnboundHint": "Keep the current look and edit without binding a saved theme.",
+  "settingsAppearanceThemeDeleteTitle": "Delete theme",
+  "settingsAppearanceThemeDeleteConfirm": "Delete “{name}”? This cannot be undone.",
+  "settingsAppearancePreviewCollapse": "Collapse",
+  "settingsAppearancePreviewExpand": "Expand",
+  "@settingsAppearanceThemeDeleteConfirm": {"placeholders": {"name": {"type": "String"}}},
+  "settingsAppearanceThemeNew": "New theme"
 }

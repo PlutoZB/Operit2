@@ -64,6 +64,25 @@ pub(crate) fn presentFlutterToast(message: &str) -> HostResult<()> {
     ownerConfirmed("toast", serde_json::json!({ "message": message }))
 }
 
+/// Writes system clipboard text through the owner interaction boundary.
+pub(crate) fn setFlutterClipboardText(text: &str) -> HostResult<String> {
+    #[derive(serde::Deserialize)]
+    struct ClipboardWrite {
+        success: bool,
+        text: String,
+    }
+    let response: ClipboardWrite = ownerSystemOperation(
+        "set_clipboard_text",
+        serde_json::json!({ "text": text }),
+    )?;
+    if !response.success {
+        return Err(HostError::new(
+            "set_clipboard_text was not confirmed by the owner",
+        ));
+    }
+    Ok(response.text)
+}
+
 /// Reads a location from the owner that can display its authorization UI.
 pub(crate) fn ownerLocation(
     timeout: i32,
@@ -290,6 +309,13 @@ impl SystemOperationHost for FlutterSystemOperationBridge {
     /// Starts an app through the selected system host.
     fn startApp(&self, name: &str) -> HostResult<AppOperationData> {
         self.host.startApp(name)
+    }
+    fn startAppWithActivity(
+        &self,
+        name: &str,
+        activity: Option<&str>,
+    ) -> HostResult<AppOperationData> {
+        self.host.startAppWithActivity(name, activity)
     }
     /// Stops an app through the selected system host.
     fn stopApp(&self, name: &str) -> HostResult<AppOperationData> {
@@ -715,6 +741,41 @@ impl operit_host_api::TerminalHost for RuntimeSessionPublishingTerminalHost {
         timeoutMs: u64,
     ) -> operit_host_api::HostResult<operit_host_api::TerminalCommandOutput> {
         self.inner.executeInSession(sessionId, command, timeoutMs)
+    }
+
+    /// Preserves raw streaming when terminal access passes through the Flutter owner wrapper.
+    fn executeInSessionStreaming(
+        &self,
+        sessionId: &str,
+        command: &str,
+        timeoutMs: u64,
+        onOutput: &mut dyn FnMut(&[u8]) -> HostResult<()>,
+    ) -> HostResult<operit_host_api::TerminalCommandOutput> {
+        self.inner.executeInSessionStreaming(sessionId, command, timeoutMs, onOutput)
+    }
+
+    /// Retains the concrete Host's scheduling model and publishes command lifecycle changes.
+    fn scheduleInSessionStreaming(
+        self: Arc<Self>,
+        scheduler: Arc<dyn operit_host_api::HostRuntimeTaskSchedulerHost>,
+        sessionId: String,
+        command: String,
+        timeoutMs: u64,
+        mut onOutput: operit_host_api::TerminalOutputCallback,
+        onComplete: operit_host_api::TerminalCompletionCallback,
+    ) -> HostResult<()> {
+        let publisher = self.clone();
+        let mut started = false;
+        self.inner.clone().scheduleInSessionStreaming(
+            scheduler, sessionId, command, timeoutMs,
+            Box::new(move |bytes, finalFrame| {
+                if !started { publisher.publish_sessions()?; started = true; }
+                onOutput(bytes, finalFrame)
+            }),
+            Box::new(move |result| {
+                onComplete(result.and_then(|receipt| { self.publish_sessions()?; Ok(receipt) }));
+            }),
+        )
     }
 
     /// Executes a hidden command through the wrapped host.

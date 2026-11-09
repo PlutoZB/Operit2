@@ -6,7 +6,8 @@ import { parseDomainPayload, resolveChatConfiguration } from "./domain";
 import { combineCharacterPrompt } from "./character-prompt";
 import { listBindableChats } from "./chat-binding-catalog";
 import { parseChatSelection } from "./chat-bindings";
-import { clearFailedCandidates, enqueueCandidate, retryFailedCandidates, startMemoryRebuild } from "./memory-jobs/scheduler";
+import { enqueueCandidate, startMemoryRebuild } from "./memory-jobs/scheduler";
+import { memoryJobProducer } from "./memory-jobs/producer";
 import { listMemoryChats, pruneMissingMemoryChats, requireChat } from "./memory-jobs/chat";
 import type { CharacterRepository } from "./canonical";
 import type { Card, Group, GroupValues, Memory, MemoryGraphResult, MemoryOwner, MemorySearchOptions, MemorySettings, MemorySearchConfig, Request, RequestOutput, Snapshot, Store, StoreValues, Tag, TagChanges, TagEdit, TagValues, MemoryLink } from "./model";
@@ -37,6 +38,7 @@ export async function snapshot(host: CharacterRepository): Promise<Snapshot> {
     ttsConfigs,
     toolCatalog,
     memoryPreferences,
+    memoryOwnerKeys,
   ] = await Promise.all([
     host.listCharacters(),
     host.listGroups(),
@@ -47,8 +49,10 @@ export async function snapshot(host: CharacterRepository): Promise<Snapshot> {
     Promise.resolve().then(() => host.listTtsConfigs()),
     Promise.resolve().then(() => host.readToolCatalog()),
     host.readGlobalMemoryPreferences(),
+    host.listMemoryOwnerKeys(),
   ]);
   return {
+    memoryOwnerKeys,
     cards,
     groups,
     stores,
@@ -585,14 +589,9 @@ export async function dispatch(
         host,
       );
     case "retryFailedCandidates":
-      return executeDomain(
-        "memory.candidates.retryFailed",
-        { ownerKey: "ownerKey" in request ? request.ownerKey : await menuMemoryOwner(request.chatId, host) },
-        host,
-      );
     case "clearFailedCandidates":
       return executeDomain(
-        "memory.candidates.clearFailed",
+        request.action === "retryFailedCandidates" ? "memory.candidates.retryFailed" : "memory.candidates.clearFailed",
         { ownerKey: "ownerKey" in request ? request.ownerKey : await menuMemoryOwner(request.chatId, host) },
         host,
       );
@@ -633,6 +632,9 @@ export async function dispatch(
         request.tagChanges,
         host,
       );
+      return snapshot(host);
+    case "createMemoryLibrary":
+      await host.createMemoryLibrary(request.ownerKey);
       return snapshot(host);
     case "deleteCharacter":
       await deleteCharacter(request.id, host);
@@ -941,9 +943,9 @@ const handlers: DomainHandlers = {
   /** Enqueues only actual persisted message sources and genuine bound owners. */
   "memory.candidate.enqueue": (input, repository) => enqueueCandidate(input, repository),
   /** Returns genuine terminal failures to the pending queue for one later interval retry. */
-  "memory.candidates.retryFailed": (input, repository) => retryFailedCandidates(input.ownerKey, repository),
+  "memory.candidates.retryFailed": async (input, repository) => ({ retried: await repository.recoverFailedCandidates(input.ownerKey, await memoryJobProducer()) }),
   /** Removes genuine terminal failures from the owner queue. */
-  "memory.candidates.clearFailed": (input, repository) => clearFailedCandidates(input.ownerKey, repository),
+  "memory.candidates.clearFailed": async (input, repository) => ({ cleared: await repository.recoverFailedCandidates(input.ownerKey, null) }),
   /** Resolves chat configuration using this operation's existing repository snapshot. */
   "chat.configuration.resolve": (input, repository) => resolveConfiguration(input, {
     /** Reads only the requested character. */

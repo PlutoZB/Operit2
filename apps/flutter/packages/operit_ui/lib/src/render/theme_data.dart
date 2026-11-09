@@ -154,16 +154,18 @@ DialogThemeData _dialogTheme(ColorScheme colorScheme, TextTheme textTheme) {
     surfaceTintColor: Colors.transparent,
     elevation: 6,
     shadowColor: colorScheme.shadow.withValues(alpha: 0.18),
-    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+    constraints: const BoxConstraints(minWidth: 280, maxWidth: 560),
     clipBehavior: Clip.antiAlias,
     insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
     actionsPadding: const EdgeInsets.fromLTRB(24, 0, 24, 20),
-    titleTextStyle: textTheme.headlineSmall?.copyWith(
+    titleTextStyle: textTheme.titleLarge?.copyWith(
       color: colorScheme.onSurface,
-      fontWeight: FontWeight.w700,
+      fontWeight: FontWeight.w600,
     ),
     contentTextStyle: textTheme.bodyMedium?.copyWith(
       color: colorScheme.onSurfaceVariant,
+      height: 1.5,
     ),
     iconColor: colorScheme.primary,
     barrierColor: Colors.black.withValues(alpha: 0.38),
@@ -211,11 +213,11 @@ InputDecorationTheme _inputDecorationTheme(
     focusedErrorBorder: errorBorder.copyWith(
       borderSide: BorderSide(color: colorScheme.error, width: 1.4),
     ),
-    labelStyle: textTheme.labelSmall?.copyWith(
+    labelStyle: textTheme.labelMedium?.copyWith(
       color: colorScheme.onSurfaceVariant,
       fontWeight: FontWeight.w400,
     ),
-    floatingLabelStyle: textTheme.labelSmall?.copyWith(
+    floatingLabelStyle: textTheme.labelMedium?.copyWith(
       color: colorScheme.primary,
       fontWeight: FontWeight.w500,
     ),

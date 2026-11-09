@@ -45,8 +45,9 @@ class OperitDialogScaffold extends StatelessWidget {
     final dialogTheme = DialogTheme.of(context);
     final shape =
         dialogTheme.shape ??
-        RoundedRectangleBorder(borderRadius: BorderRadius.circular(28));
+        RoundedRectangleBorder(borderRadius: BorderRadius.circular(20));
     return Dialog(
+      constraints: BoxConstraints(maxWidth: maxWidth),
       child: ConstrainedBox(
         constraints: BoxConstraints(
           maxWidth: maxWidth,
@@ -79,8 +80,8 @@ class OperitDialogScaffold extends StatelessWidget {
                         overflow: TextOverflow.ellipsis,
                         style:
                             dialogTheme.titleTextStyle ??
-                            theme.textTheme.headlineSmall?.copyWith(
-                              fontWeight: FontWeight.w700,
+                            theme.textTheme.titleLarge?.copyWith(
+                              fontWeight: FontWeight.w600,
                             ),
                       ),
                     ),
@@ -98,13 +99,20 @@ class OperitDialogScaffold extends StatelessWidget {
                   ],
                 ),
               ),
-              if (maxHeight == null)
-                Padding(padding: contentPadding, child: child)
-              else
-                Flexible(
-                  fit: expandContent ? FlexFit.tight : FlexFit.loose,
-                  child: Padding(padding: contentPadding, child: child),
-                ),
+              Flexible(
+                fit: maxHeight != null && expandContent
+                    ? FlexFit.tight
+                    : FlexFit.loose,
+                // Wrap-content dialogs still need a bounded, scrollable body
+                // when the window shrinks or the keyboard is visible.
+                child: maxHeight == null
+                    ? SingleChildScrollView(
+                        primary: false,
+                        padding: contentPadding,
+                        child: child,
+                      )
+                    : Padding(padding: contentPadding, child: child),
+              ),
               if (actions.isNotEmpty) ...<Widget>[
                 OperitDialogActionBar(
                   padding: actionsPadding,

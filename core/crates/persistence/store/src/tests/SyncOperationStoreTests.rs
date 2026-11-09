@@ -12,12 +12,16 @@ use serde_json::{json, Value};
 
 #[derive(Clone, Default)]
 struct MemoryStorageHost {
+    journalHost: Arc<crate::transaction_test_host::TransactionJournalHost>,
+    releasePreferencesCache: bool,
     files: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
     writeCount: Arc<AtomicUsize>,
     readCount: Arc<AtomicUsize>,
+    policyReads: Arc<AtomicUsize>,
     rangeBytes: Arc<AtomicUsize>,
     forbidWholeJournalReads: Arc<AtomicBool>,
     forbidControlHistoryReads: Arc<AtomicBool>,
+    forbidWholePolicyReads: Arc<AtomicBool>,
     failAtomic: Arc<AtomicUsize>,
 }
 
@@ -29,6 +33,11 @@ impl MemoryStorageHost {
 }
 
 impl RuntimeStorageHost for MemoryStorageHost {
+    fn openTransactionDatabase(&self, path: &str) -> operit_host_api::HostResult<Box<dyn operit_host_api::RuntimeSqliteConnection>> {
+        self.journalHost.open(path)
+    }
+
+    fn retainPreferencesCache(&self) -> bool { !self.releasePreferencesCache }
     /// Confirms synchronous in-memory publication without copying or rewriting bytes.
     fn flushFile(&self, path: &str) -> operit_host_api::HostResult<()> {
         if !self.exists(path)? {
@@ -53,7 +62,11 @@ impl RuntimeStorageHost for MemoryStorageHost {
         if self.forbidWholeJournalReads.load(Ordering::SeqCst) && path.ends_with(".jsonl") {
             return Err(HostError::new("unbounded journal read"));
         }
+        if self.forbidWholePolicyReads.load(Ordering::SeqCst) && path.ends_with("space_policy.preferences.json") {
+            return Err(HostError::new("unbounded policy read"));
+        }
         self.readCount.fetch_add(1, Ordering::SeqCst);
+        if path.ends_with("space_policy.preferences.json") { self.policyReads.fetch_add(1, Ordering::SeqCst); }
         let files = self
             .files
             .lock()
@@ -78,9 +91,10 @@ impl RuntimeStorageHost for MemoryStorageHost {
             return Err(HostError::new("control query attempted to read authority history"));
         }
         if self.forbidWholeJournalReads.load(Ordering::SeqCst) && path.ends_with(".jsonl") {
-            assert!(length <= crate::SyncOperationJournal::JOURNAL_READ_BYTES);
+            assert!(length <= crate::LegacyTransactionImport::JOURNAL_READ_BYTES);
         }
         self.readCount.fetch_add(1, Ordering::SeqCst);
+        if path.ends_with("space_policy.preferences.json") { self.policyReads.fetch_add(1, Ordering::SeqCst); }
         let files = self.files.lock().map_err(|error| HostError::new(error.to_string()))?;
         let content = files.get(path).ok_or_else(|| HostError::new("missing runtime storage file"))?;
         let start = usize::try_from(offset)
@@ -251,14 +265,13 @@ fn domain_filtered_reads_do_not_publish_unrelated_preference_outboxes() {
             // Exports which request preferences must still publish the pending edit.
             let exported = read(&exportDomains);
             assert!(exported.iter().any(|operation| operation.domain == "preferences"));
-            assert_ne!(storage.readBytes(path).unwrap(), before);
+            assert_eq!(storage.readBytes(path).unwrap(), before);
             assert_eq!(read(&domains), vec![policy.clone()]);
             let reads = storage.readCount.load(Ordering::SeqCst);
             for _ in 0..5 { assert_eq!(read(&domains), vec![policy.clone()]); }
-            // Budgeted queries open the selected record once for the retain
-            // predicate and once for the output page; neither opens preferences.
+            // SQL planning does not reread business files or the retired JSONL carrier.
             assert_eq!(storage.readCount.load(Ordering::SeqCst) - reads,
-                5 * if budgeted { 2 } else { 1 },
+                0,
                 "warm policy queries must not load an unrelated encryption key");
         }
     }
@@ -414,8 +427,10 @@ fn clearing_identity_resets_to_default_user() {
 #[test]
 fn space_admission_preserves_identity_map_through_retry_and_replay() {
     use crate::NetworkControlStore::{NetworkControlCommand, NetworkControlCommandRecord, NetworkControlRole, NetworkControlStore};
-    let storage = Arc::new(MemoryStorageHost::default());
-    let store = NetworkControlStore::new(storage.clone()).unwrap();
+    for constrained in [false, true] {
+    let storage = Arc::new(MemoryStorageHost { releasePreferencesCache: constrained, ..Default::default() });
+    let store = if constrained { NetworkControlStore::newNodeLocal(storage.clone()).unwrap() }
+        else { NetworkControlStore::new(storage.clone()).unwrap() };
     let bootstrap = store.bootstrapCurrentSpace().unwrap();
     let admin = bootstrap.memberNodeIds.iter().next().unwrap().clone();
     store.defineRole(NetworkControlRole {
@@ -452,14 +467,18 @@ fn space_admission_preserves_identity_map_through_retry_and_replay() {
     }
     assert_eq!(store.validateSpacePolicy(&state.spaceId, &operations).unwrap(), state);
     store.validateSpaceAdmission(&state.spaceId, "source-space", &identities.keys().cloned().collect(), &operations).unwrap();
-    assert_eq!(NetworkControlStore::new(storage).unwrap().currentState().unwrap(), state);
+    let reopened = if constrained { NetworkControlStore::newNodeLocal(storage).unwrap() }
+        else { NetworkControlStore::new(storage).unwrap() };
+    assert_eq!(reopened.currentState().unwrap(), state);
+    }
 }
 
 /// Upgrade an existing join-only reviewer's log, then persist a new admission and reopen both.
 #[test]
 fn legacy_space_admission_survives_upgrade_without_rewriting_history() {
+    for constrained in [false, true] {
     use crate::NetworkControlStore::{NetworkControlCommandRecord, NetworkControlIdentityAssignment, NetworkControlRole, NetworkControlStore};
-    let storage = Arc::new(MemoryStorageHost::default());
+    let storage = Arc::new(MemoryStorageHost { releasePreferencesCache: constrained, ..Default::default() });
     let store = NetworkControlStore::new(storage.clone()).unwrap();
     let space = store.bootstrapCurrentSpace().unwrap();
     store.admitMember("zz-reviewer".into()).unwrap();
@@ -518,6 +537,7 @@ fn legacy_space_admission_survives_upgrade_without_rewriting_history() {
         let mut record = legacy.payload.clone();
         record["command"]["admit_space"] = malformed;
         assert!(serde_json::from_value::<NetworkControlCommandRecord>(record).is_err());
+    }
     }
 }
 
@@ -625,11 +645,77 @@ fn repeated_domain_queries_do_not_rescan_large_history() {
     for _ in 0..100 {
         assert_eq!(store.operationsSince(&SyncClock::empty(), &domains, usize::MAX).unwrap(), vec![policy.clone()]);
     }
-    // Each query opens just its selected record. Business history is not cached
-    // and neither the index nor an unrelated payload is read again.
-    assert_eq!(storage.readCount.load(Ordering::SeqCst) - reads, 100);
-    assert_eq!(storage.rangeBytes.load(Ordering::SeqCst) - bytes,
-        100 * (serde_json::to_vec(&policy).unwrap().len() + 1));
+    assert_eq!(storage.readCount.load(Ordering::SeqCst), reads);
+    assert_eq!(storage.rangeBytes.load(Ordering::SeqCst), bytes);
+
+}
+
+/// Paging reads each retained payload once instead of rescanning the remaining business history.
+#[test]
+fn filtered_pages_read_payload_bytes_linearly() {
+    for (domain, semantics, encrypted) in [
+        ("preferences", SyncOperationSemantics::EntityState, false),
+        ("preferences", SyncOperationSemantics::EntityState, true),
+        ("chat", SyncOperationSemantics::EntityState, false),
+        ("plugin_storage", SyncOperationSemantics::Transaction, false),
+    ] {
+        let host = Arc::new(MemoryStorageHost::default());
+        let store = SyncOperationStore::new(host.clone(), "linear-export");
+        let operations = (1..=512).map(|sequence| {
+            let mut entry = operation(sequence, "entry", &format!("entry-{sequence}"), "set",
+                semantics, json!({"storagePath":"runtime/data/probe.json","content":"x".repeat(4096),"encrypted":encrypted}));
+            entry.domain = domain.into();
+            if encrypted {
+                entry.payload["contractVersion"] = json!(1);
+                entry.payload["logicalTime"] = json!(sequence);
+                entry.createdAt = 10_000 - sequence;
+            }
+            entry
+        }).collect::<Vec<_>>();
+        store.appendOperations(&operations).unwrap();
+        drop(store);
+        let store = SyncOperationStore::new(host.clone(), "linear-export");
+        store.receipt().unwrap();
+        let bytes = host.rangeBytes.load(Ordering::SeqCst);
+        let mut receipt = SyncReceipt::default();
+        for (index, expected) in operations.chunks(16).enumerate() {
+            let mut inventory = BTreeSet::new();
+            let page = store.operationsSinceWithInventory(&receipt, &[domain.into()], 16, usize::MAX,
+                (index == 0).then_some(&mut inventory), Some(&|entry| entry.payload["content"].is_string())).unwrap();
+            if index == 0 { assert_eq!(inventory.len(), operations.len()); }
+            assert_eq!(page, expected);
+            for entry in page { receipt.observe(&entry.originDeviceId, entry.sequence); }
+        }
+        let readBytes = host.rangeBytes.load(Ordering::SeqCst) - bytes;
+        let journalBytes = host.files.lock().unwrap().iter().filter(|(path, _)| path.ends_with(".jsonl"))
+            .map(|(_, bytes)| bytes.len()).sum::<usize>();
+        // The first inventory scans once; encrypted headers resolve once after reopening.
+        let allowance = if encrypted { 3 } else { 2 };
+        assert!(readBytes <= journalBytes * allowance,
+            "{domain} encrypted={encrypted}: read {readBytes} bytes for a {journalBytes}-byte journal");
+        eprintln!("{domain} encrypted={encrypted}: payload reads={readBytes} journal={journalBytes}");
+    }
+}
+
+/// Resolves filtered revisions only for entities reached by the current page.
+#[test]
+fn filtered_compaction_does_not_open_later_entities() {
+    let host = Arc::new(MemoryStorageHost::default());
+    let store = SyncOperationStore::new(host.clone(), "lazy-compaction");
+    let operations = (1..=192).map(|sequence| operation(sequence, "message",
+        &format!("message-{}", (sequence - 1) / 3), "upsert", SyncOperationSemantics::EntityState,
+        json!({"export":sequence % 3 != 0,"content":"x".repeat(4096)}))).collect::<Vec<_>>();
+    store.appendOperations(&operations).unwrap();
+    let bytes = host.rangeBytes.load(Ordering::SeqCst);
+    let page = store.operationsSinceWithBudget(&SyncClock::empty(), &[], 8, usize::MAX,
+        |entry| entry.payload["export"] == true).unwrap();
+    assert_eq!(sequences(&page), vec![2, 5, 8, 11, 14, 17, 20, 23]);
+    let readBytes = host.rangeBytes.load(Ordering::SeqCst) - bytes;
+    assert!(readBytes < 32 * 5000, "small page opened later entity payloads: {readBytes} bytes");
+    let mut inventory = BTreeSet::new();
+    assert_eq!(store.operationsSinceWithInventory(&SyncClock::empty(), &[], 8, usize::MAX,
+        Some(&mut inventory), Some(&|entry| entry.payload["export"] == true)).unwrap(), page);
+    assert_eq!(inventory.len(), 64);
 }
 
 /// Verifies a synchronization clock includes every required origin sequence.
@@ -759,7 +845,8 @@ fn append_and_export_compact_repeated_stream_snapshots() {
         ),
     ];
     store.appendOperations(&operations).unwrap();
-    assert_eq!(host.writeCount(), 3);
+    let mut sql = host.openTransactionDatabase("sync-test/transactions.sqlite").unwrap();
+    assert_eq!(sql.query("SELECT COUNT(*) FROM originals",vec![]).unwrap()[0].valueAt(0).unwrap().asI64().unwrap(),3);
 
     let operations = store
         .operationsSince(&SyncClock::empty(), &["chat".to_string()], 100)
@@ -1271,24 +1358,16 @@ fn compaction_does_not_infer_coverage_from_matching_key_sets() {
 }
 
 
-/// Builds a raw journal with one corrupt middle line and verifies reads skip it.
+/// A failed legacy import resets the ledger while raw diagnostics remain available.
 #[test]
-fn corrupt_lines_are_skipped_by_reads_and_reported_by_scans() {
+fn corrupt_legacy_ledger_resets_without_disabling_raw_diagnostics() {
     let storage = Arc::new(MemoryStorageHost::default());
     let store = SyncOperationStore::new(storage.clone(), "corrupt-journal");
-    for sequence in 1..=3 {
-        store
-            .appendUnobservedOperation(&operation(
-                sequence,
-                "message",
-                &format!("m{sequence}"),
-                "upsert",
-                SyncOperationSemantics::EntityState,
-                json!({"text": "x"}),
-            ))
-            .unwrap();
-    }
+    // Legacy files are compatibility input; current writes use SQLite.
     let path = "corrupt-journal/operations/device-a.jsonl";
+    let raw = (1..=3).map(|sequence| serde_json::to_string(&operation(sequence, "message", &format!("m{sequence}"), "upsert", SyncOperationSemantics::EntityState, json!({"text":"x"}))).unwrap() + "\n").collect::<String>();
+    storage.writeBytes(path, raw.as_bytes()).unwrap();
+    storage.writeBytes("corrupt-journal/devices.json", br#"["device-a"]"#).unwrap();
     let original = storage.readBytes(path).unwrap();
     let lines: Vec<&[u8]> = original.split_inclusive(|byte| *byte == b'\n').collect();
     assert_eq!(lines.len(), 3);
@@ -1302,10 +1381,7 @@ fn corrupt_lines_are_skipped_by_reads_and_reported_by_scans() {
     // must rebuild from disk rather than keeping a process-pinned cache alive.
     drop(store);
     let reopened = SyncOperationStore::new(storage.clone(), "corrupt-journal");
-    let readable = reopened
-        .operationsSince(&SyncClock::empty(), &[], 100)
-        .unwrap();
-    assert_eq!(sequences(&readable), vec![1, 3]);
+    assert!(reopened.operationsSince(&SyncClock::empty(), &[], 100).unwrap().is_empty());
 
     // The raw scan classifies every line instead of failing on the bad one.
     let scan = reopened.scanOperationLog("device-a").unwrap();
@@ -1318,11 +1394,10 @@ fn corrupt_lines_are_skipped_by_reads_and_reported_by_scans() {
     assert_eq!(scan.findings[0].byteOffset, lines[0].len() as u64);
     assert_eq!(scan.findings[0].byteLength, "{ this is not json\n".len() as u64);
 
-    // Domain-filtered reads over the same journal also skip the damage.
-    let domainRead = reopened
-        .operationsSince(&SyncClock::empty(), &["chat".to_string()], 100)
-        .unwrap();
-    assert_eq!(sequences(&domainRead), vec![1, 3]);
+    reopened.quarantineOperationLines("device-a", &[scan.findings[0].byteOffset]).unwrap();
+    let repaired = reopened.operationsSince(&SyncClock::empty(), &["chat".into()], 100).unwrap();
+    // Repairing retired input does not import old transactions after a committed reset.
+    assert!(repaired.is_empty());
 }
 
 /// A missing journal scans as absent rather than as an error.
@@ -1337,24 +1412,16 @@ fn missing_journal_scans_as_absent() {
 }
 
 /// Quarantine removes exactly the damaged lines, keeps them reversible and
-/// leaves the journal readable through the same and fresh store instances.
+/// leaves raw diagnostics readable without repopulating the SQL journal.
 #[test]
 fn quarantine_moves_damaged_lines_to_a_reversible_sidecar() {
     let storage = Arc::new(MemoryStorageHost::default());
     let store = SyncOperationStore::new(storage.clone(), "quarantine-journal");
-    for sequence in 1..=2 {
-        store
-            .appendUnobservedOperation(&operation(
-                sequence,
-                "message",
-                &format!("m{sequence}"),
-                "upsert",
-                SyncOperationSemantics::EntityState,
-                json!({"text": "x"}),
-            ))
-            .unwrap();
-    }
+    // Legacy files are compatibility input; current writes use SQLite.
     let path = "quarantine-journal/operations/device-a.jsonl";
+    let raw = (1..=2).map(|sequence| serde_json::to_string(&operation(sequence, "message", &format!("m{sequence}"), "upsert", SyncOperationSemantics::EntityState, json!({"text":"x"}))).unwrap() + "\n").collect::<String>();
+    storage.writeBytes(path, raw.as_bytes()).unwrap();
+    storage.writeBytes("quarantine-journal/devices.json", br#"["device-a"]"#).unwrap();
     let original = storage.readBytes(path).unwrap();
     let lines: Vec<&[u8]> = original.split_inclusive(|byte| *byte == b'\n').collect();
     let badOffset = lines[0].len() as u64;
@@ -1381,10 +1448,9 @@ fn quarantine_moves_damaged_lines_to_a_reversible_sidecar() {
     assert_eq!(rescan.decodedLines, 2);
     assert_eq!(rescan.highestSequence, 2);
     let reopened = SyncOperationStore::new(storage.clone(), "quarantine-journal");
-    assert_eq!(
-        sequences(&reopened.operationsSince(&SyncClock::empty(), &[], 100).unwrap()),
-        vec![1, 2]
-    );
+    assert!(reopened.operationsSince(&SyncClock::empty(), &[], 100).unwrap().is_empty());
+    // The repair preserves the valid legacy lines for diagnostics, not automatic re-import.
+    assert_eq!(storage.readBytes(path).unwrap(), original);
 
     // The sidecar preserves the removed bytes verbatim for manual recovery.
     let sidecar = storage.readBytes("quarantine-journal/operations/device-a.jsonl.quarantine").unwrap();
@@ -1527,6 +1593,13 @@ fn sparse_receipt_exports_missing_predecessor_before_page_limit() {
             vec![earlier.clone()]
         );
     }
+    receipt.observe("device-a", 101);
+    store.withJournal(|journal| journal.transaction(|tx| {
+        tx.execute("UPDATE originals SET header='not JSON'", vec![])?;
+        Ok(())
+    })).unwrap();
+    assert!(store.operationsSince(&receipt, &[], 1).unwrap().is_empty());
+    assert!(store.preferenceMergeHistory().unwrap().is_empty());
 }
 
 /// Combines independent control acknowledgements with sparse receipts and out-of-order journal offsets.
@@ -1593,7 +1666,7 @@ fn control_acknowledgements_and_sparse_receipts_share_export_filtering() {
 fn conflicting_received_operation_does_not_commit_other_batch_entries() {
     let host = Arc::new(MemoryStorageHost::default());
     let store = SyncOperationStore::new(host, "conflicting-receive");
-    let first = operation(
+    let mut first = operation(
         1,
         "message",
         "first",
@@ -1601,6 +1674,7 @@ fn conflicting_received_operation_does_not_commit_other_batch_entries() {
         SyncOperationSemantics::EntityState,
         json!(1),
     );
+    first.domain = "binding".into();
     let second = operation(
         2,
         "message",
@@ -1636,18 +1710,13 @@ fn pending_preferences_are_encrypted_at_rest() {
     store
         .receiveOperations(std::slice::from_ref(&incoming))
         .unwrap();
-    let bytes = host
-        .readBytes("encrypted-receive/receive_state.json")
-        .unwrap();
-    assert!(
-        !String::from_utf8(bytes)
-            .unwrap()
-            .contains("pending-secret-token")
-    );
-    let pending = host.readBytes(&pending_path("encrypted-receive", &incoming.opId)).unwrap();
-    let encoded: Value = serde_json::from_slice(&pending).unwrap();
+    let mut sql = host.openTransactionDatabase("encrypted-receive/transactions.sqlite").unwrap();
+    let rows = sql.query("SELECT original FROM originals", vec![]).unwrap();
+    let pending = rows[0].valueAt(0).unwrap().asString().unwrap();
+    let encoded: Value = serde_json::from_str(&pending).unwrap();
     assert_eq!(encoded["payload"]["format"], ENCRYPTED_SYNC_PAYLOAD_FORMAT);
-    assert!(!String::from_utf8(pending).unwrap().contains("pending-secret-token"));
+    assert!(!pending.contains("pending-secret-token"));
+    assert!(!host.exists("encrypted-receive/receive_state.json").unwrap());
     let reopened = SyncOperationStore::new(Arc::new((*host).clone()), "encrypted-receive");
     assert_eq!(reopened.pendingOperations().unwrap(), vec![incoming]);
 }
@@ -1722,12 +1791,13 @@ fn retained_preferences_advance_past_retired_history_with_count_and_byte_limits(
     }
 }
 
-/// Completed SQL-owned operations retain content verification independently of their pending payloads.
+/// Non-chat operations retain immutable content verification after completion and restart.
 #[test]
 fn completed_receipt_rejects_changed_original_payload_after_restart() {
     let host = Arc::new(MemoryStorageHost::default());
     let store = SyncOperationStore::new(host.clone(), "receipt-content");
-    let original = operation(1, "message", "id", "upsert", SyncOperationSemantics::Transaction, json!({"content":"original"}));
+    let mut original = operation(1, "message", "id", "upsert", SyncOperationSemantics::Transaction, json!({"content":"original"}));
+    original.domain = "binding".into();
     store.receiveOperations(&[original.clone()]).unwrap();
     store.completeOperations(&[original.clone()]).unwrap();
     let restarted = SyncOperationStore::new(Arc::new((*host).clone()), "receipt-content");
@@ -1737,28 +1807,150 @@ fn completed_receipt_rejects_changed_original_payload_after_restart() {
     assert!(restarted.pendingOperations().unwrap().is_empty());
 }
 
-/// A retry after an interrupted append must remain a separate readable journal record.
+/// A journal/projection duplicate has one replay effect; conflicting immutable
+/// payloads must still fail before any policy state is returned.
 #[test]
-fn intact_operations_survive_retry_after_partial_journal_tail() {
-    for batch in [false, true] {
-        let host = Arc::new(MemoryStorageHost::default());
-        let store = SyncOperationStore::new(host.clone(), "runtime/sync");
-        let first = operation(1, "message", "one", "set", SyncOperationSemantics::Transaction, json!({"text":"one"}));
-        let second = operation(2, "message", "two", "set", SyncOperationSemantics::Transaction, json!({"text":"two"}));
-        let mut interrupted = serde_json::to_vec(&first).unwrap();
-        interrupted.extend_from_slice(b"\n{\"opId\":");
-        host.writeBytes(&store.operationsPath("device-a"), &interrupted).unwrap();
-        // First record spans an invalid tail in the offset index, but its identity remains readable.
-        store.appendOperations(std::slice::from_ref(&first)).unwrap();
-        if batch {
-            store.appendOperations(std::slice::from_ref(&second)).unwrap();
-        } else {
-            store.appendUnobservedOperation(&second).unwrap();
+fn control_replay_merges_projection_duplicates_and_rejects_conflicts() {
+    for constrained in [false, true] {
+    use crate::NetworkControlStore::NetworkControlStore;
+    use crate::PreferencesDataStore::stringPreferencesKey;
+    let storage = Arc::new(MemoryStorageHost { releasePreferencesCache: constrained, ..Default::default() });
+    let store = NetworkControlStore::new(storage.clone()).unwrap();
+    store.bootstrapCurrentSpace().unwrap();
+    store.admitMember("peer".into()).unwrap();
+    let before = store.currentSpaceOperations().unwrap();
+    let state = store.currentState().unwrap();
+    let projection = NetworkControlStore::projectionStore(storage);
+    projection.edit(|prefs| {
+        for operation in before.iter().rev() {
+            prefs.set(&stringPreferencesKey(&operation.opId), serde_json::to_value(operation).unwrap());
         }
-        // A new Host instance rebuilds all caches from the persisted bytes.
-        let restarted = SyncOperationStore::new(Arc::new((*host).clone()), "runtime/sync");
-        assert_eq!(restarted.operationsSince(&SyncClock::empty(), &[], 100).unwrap(), vec![first, second]);
+    }).unwrap();
+    assert_eq!(store.currentSpaceOperations().unwrap(), before);
+    assert_eq!(store.currentState().unwrap(), state);
+    let mut conflict = before.last().unwrap().clone();
+    conflict.payload["command"]["admit_member"]["nodeId"] = json!("other");
+    projection.edit(|prefs| prefs.set(&stringPreferencesKey(&conflict.opId), serde_json::to_value(&conflict).unwrap())).unwrap();
+    assert!(store.currentState().unwrap_err().contains("Conflicting immutable"));
     }
+}
+
+
+/// Compact replay must accept the string-encoded unit command as well as
+/// object-encoded commands and retain its membership effect after reopening.
+#[test]
+fn bounded_control_replay_accepts_leave_space_unit_commands() {
+    use crate::NetworkControlStore::NetworkControlStore;
+    let storage = Arc::new(MemoryStorageHost { releasePreferencesCache: true, ..Default::default() });
+    let store = NetworkControlStore::newNodeLocal(storage.clone()).unwrap();
+    let initial = store.bootstrapCurrentSpace().unwrap();
+    assert!(store.leaveCurrentSpace().unwrap().is_some());
+    let reopened = NetworkControlStore::newNodeLocal(storage).unwrap();
+    let state = reopened.currentState().unwrap();
+    assert_eq!(state.spaceId, initial.spaceId);
+    assert!(state.memberNodeIds.is_empty());
+}
+
+
+/// A constrained endpoint can relay an existing root through an ordinary member,
+/// but cannot accept a changed immutable payload under that root's identity.
+#[test]
+fn bounded_peer_control_repeats_exact_known_authority_and_applies_a_signed_exit() {
+    use crate::NetworkControlStore::NetworkControlStore;
+    let storage = Arc::new(MemoryStorageHost { releasePreferencesCache: true, ..Default::default() });
+    let store = NetworkControlStore::newNodeLocal(storage.clone()).unwrap();
+    store.bootstrapCurrentSpace().unwrap();
+    let bootstrap = store.currentSpaceOperations().unwrap().remove(0);
+    store.admitMember("peer".into()).unwrap();
+    let before = store.currentState().unwrap();
+    // Legacy caches need not use the operation ID as their physical map key.
+    let projection = NetworkControlStore::projectionStore(storage.clone());
+    projection.setTypedEntry("legacy-root-key", &bootstrap).unwrap();
+    projection.removeEntry(&bootstrap.opId).unwrap();
+    store.projectPeerControlOperations("peer", std::slice::from_ref(&bootstrap)).unwrap();
+    assert_eq!(store.currentState().unwrap(), before);
+    let files = storage.files.lock().unwrap().clone();
+    let mut changed = bootstrap.clone();
+    changed.payload["unknownSignedField"] = json!({"changed":true});
+    assert!(store.projectPeerControlOperations("peer", &[changed]).is_err());
+    assert_eq!(*storage.files.lock().unwrap(), files);
+    let mut leave = bootstrap;
+    leave.opId = "peer-leave".into();
+    leave.entityId = leave.opId.clone();
+    leave.originDeviceId = "peer".into();
+    leave.sequence = 1;
+    leave.createdAt = store.currentSpaceOperations().unwrap().iter().map(|operation| operation.createdAt).max().unwrap() + 1;
+    leave.payload = json!({"commandId":leave.entityId, "spaceId":before.spaceId,
+        "issuerNodeId":"peer", "command":"leave_space"});
+    store.projectPeerControlOperations("peer", &[leave]).unwrap();
+    assert!(!store.currentState().unwrap().memberNodeIds.contains("peer"));
+}
+
+/// Export preserves unknown payloads, rejects changed revisions and never writes.
+#[test]
+fn endpoint_control_export_pages_complete_immutable_authority_without_mutation() {
+    use crate::NetworkControlStore::NetworkControlStore;
+    let storage = Arc::new(MemoryStorageHost { releasePreferencesCache: true, ..Default::default() });
+    let store = NetworkControlStore::newNodeLocal(storage.clone()).unwrap();
+    let state = store.bootstrapCurrentSpace().unwrap();
+    store.admitMember("peer-a".into()).unwrap();
+    store.admitMember("peer-b".into()).unwrap();
+    let mut expected = store.currentSpaceOperations().unwrap();
+    let projection = NetworkControlStore::projectionStore(storage.clone());
+    expected[0].payload["futureField"] = json!({"keep": ["设备", null, 7]});
+    projection.setTypedEntry(&expected[0].opId, &expected[0]).unwrap();
+    // A legacy physical key and a semantically equal duplicate must not drop or
+    // duplicate authority. Other Spaces do not leak into this export.
+    projection.setTypedEntry("legacy-alias", &expected[0]).unwrap();
+    let mut archived = expected[0].clone();
+    archived.opId = "archived".into();
+    archived.payload["spaceId"] = json!("old-space");
+    projection.setTypedEntry(&archived.opId, &archived).unwrap();
+    let writes = storage.writeCount();
+    let manifest = store.spaceControlManifest(&state.spaceId).unwrap();
+    let first = store.spaceControlExport(&state.spaceId, None, None).unwrap();
+    let revision = first.revision.clone();
+    assert_eq!(manifest.revision, revision);
+    assert_eq!(manifest.count, expected.len());
+    assert_eq!(first.count, expected.len());
+    let mut after = None;
+    let mut actual = Vec::new();
+    loop {
+        let page = store.spaceControlExport(&state.spaceId, Some(&revision), after.as_deref()).unwrap();
+        assert_eq!(page.count, expected.len());
+        let Some(operation) = page.operation else { break; };
+        after = Some(operation.opId.clone());
+        actual.push(operation);
+    }
+    expected.sort_by(|left, right| left.opId.cmp(&right.opId));
+    assert_eq!(actual, expected);
+    assert_eq!(storage.writeCount(), writes);
+    assert!(store.spaceControlExport(&state.spaceId, Some(&revision), Some("missing")).unwrap_err().contains("CURSOR_INVALID"));
+    store.admitMember("peer-c".into()).unwrap();
+    assert!(store.spaceControlExport(&state.spaceId, Some(&revision), after.as_deref()).unwrap_err().contains("EXPORT_CHANGED"));
+    let mut conflict = expected[0].clone();
+    conflict.payload["futureField"] = json!(false);
+    projection.setTypedEntry("conflicting-alias", &conflict).unwrap();
+    assert!(store.spaceControlExport(&state.spaceId, None, None).unwrap_err().contains("Conflicting immutable"));
+}
+
+/// An endpoint must migrate its legacy journal before advertising a complete export.
+#[test]
+fn endpoint_control_export_refuses_to_omit_unmigrated_journal_authority() {
+    use crate::NetworkControlStore::NetworkControlStore;
+    let storage = Arc::new(MemoryStorageHost::default());
+    let legacy = NetworkControlStore::new(storage.clone()).unwrap();
+    let state = legacy.bootstrapCurrentSpace().unwrap();
+    let expected = legacy.currentSpaceOperations().unwrap();
+    let endpoint = NetworkControlStore::newNodeLocal(storage.clone()).unwrap();
+    assert!(endpoint.spaceControlExport(&state.spaceId, None, None).unwrap_err().contains("MIGRATION_REQUIRED"));
+    endpoint.migrateNodeLocalProjection(storage.as_ref()).unwrap();
+    let page = endpoint.spaceControlExport(&state.spaceId, None, None).unwrap();
+    assert_eq!(page.count, expected.len());
+    assert_eq!(page.operation, Some(expected[0].clone()));
+    let full = legacy.spaceControlExport(&state.spaceId, None, None).unwrap();
+    assert_eq!(full.count, page.count);
+    assert_eq!(full.operation, page.operation);
 }
 
 /// Cold receipt/index construction and every query intent use the same bounded reader.
@@ -1778,7 +1970,7 @@ fn journal_queries_use_bounded_ranges_after_reopen() {
             vec![operations[0].clone()]);
     }
     assert!(reopened.preferenceMergeHistory().unwrap().is_empty());
-    assert_eq!(reopened.scanOperationLog("device-a").unwrap().decodedLines, 40);
+    assert!(!reopened.scanOperationLog("device-a").unwrap().exists);
 }
 
 /// Shared handles serialize writes; the registry owns neither the state nor its Host.
@@ -1808,6 +2000,11 @@ fn relay_pages_compact_archived_and_pending_records_together() {
     let other = operation(3, "message", "other", "upsert", SyncOperationSemantics::EntityState, json!(3));
     store.appendOperation(&first).unwrap();
     store.receiveOperations(&[newer.clone(), other]).unwrap();
+    let mut inventory = BTreeSet::new();
+    let page = store.operationsSinceWithInventory(&SyncClock::empty(), &[], 1, 1024, Some(&mut inventory), Some(&|_| true)).unwrap();
+    assert_eq!(page, vec![newer.clone()]);
+    assert_eq!(inventory.len(), 2, "total must include later pages but exclude compacted old states");
+    assert!(!inventory.contains(&first.opId));
     assert_eq!(store.operationsSinceWithBudget(&SyncClock::empty(), &[], 1, 1024, |_|true).unwrap(), vec![newer.clone()]);
     // A caller's retention rule still runs before state compaction.
     assert_eq!(store.operationsSinceWithBudget(&SyncClock::empty(), &[], 1, 1024, |op|op.sequence != 2).unwrap(), vec![first]);
@@ -1816,54 +2013,207 @@ fn relay_pages_compact_archived_and_pending_records_together() {
     assert_eq!(store.pendingOperationCount().unwrap(), 1);
 }
 
-/// Migrating inline pending data publishes payloads before replacing its receipt ledger.
-#[test]
-fn legacy_receive_migration_is_streamed_and_retryable_after_commit_failure() {
-    let host = Arc::new(MemoryStorageHost::default());
-    let incoming = operation(7, "message", "old", "upsert", SyncOperationSemantics::EntityState,
-        json!({"text":"legacy-pending-data".repeat(8192)}));
-    let mut receipt = SyncReceipt::default();
-    receipt.observe("device-a", 7);
-    let original = serde_json::to_vec(&json!({"receipt":receipt,"pending":{incoming.opId.clone():incoming},"fingerprints":{}})).unwrap();
-    let path = "legacy-receive/receive_state.json";
-    host.writeBytes(path, &original).unwrap();
-    host.failAtomic.store(1, Ordering::SeqCst);
-    let store = SyncOperationStore::new(host.clone(), "legacy-receive");
-    assert!(store.receipt().is_err());
-    assert_eq!(host.readBytes(path).unwrap(), original);
-    drop(store);
-    host.failAtomic.store(0, Ordering::SeqCst);
-    let reopened = SyncOperationStore::new(host.clone(), "legacy-receive");
-    assert_eq!(reopened.receipt().unwrap(), receipt);
-    assert_eq!(reopened.pendingOperations().unwrap(), vec![incoming.clone()]);
-    let migrated = host.readBytes(path).unwrap();
-    assert!(migrated.len() < 2048);
-    assert_eq!(serde_json::from_slice::<Value>(&migrated).unwrap()["formatVersion"], 2);
-    assert!(host.exists(&pending_path("legacy-receive", &incoming.opId)).unwrap());
-}
-
 /// A receipt never acknowledges a payload whose durable file failed, and completion
 /// never removes a file before its metadata commit succeeds.
 #[test]
 fn receive_and_completion_keep_payloads_and_receipts_atomic() {
     let host = Arc::new(MemoryStorageHost::default());
     let store = SyncOperationStore::new(host.clone(), "receive-atomic");
-    let incoming = operation(1, "message", "one", "upsert", SyncOperationSemantics::EntityState, json!("data"));
-    host.failAtomic.store(2, Ordering::SeqCst);
+    assert_eq!(store.pendingOperationCount().unwrap(),0);
+    let mut sql = host.openTransactionDatabase("receive-atomic/transactions.sqlite").unwrap();
+    let incoming = operation(1,"message","one","upsert",SyncOperationSemantics::EntityState,json!("data"));
+    sql.executeBatch("CREATE TRIGGER reject_receive BEFORE INSERT ON originals BEGIN SELECT RAISE(ABORT,'receive failed'); END").unwrap();
     assert!(store.receiveOperations(&[incoming.clone()]).is_err());
-    assert!(!store.receipt().unwrap().containsSequence("device-a", 1));
-    assert_eq!(store.pendingOperationCount().unwrap(), 0);
-    host.failAtomic.store(0, Ordering::SeqCst);
+    assert!(!store.receipt().unwrap().containsSequence("device-a",1));
+    assert_eq!(store.pendingOperationCount().unwrap(),0);
+    sql.executeBatch("DROP TRIGGER reject_receive").unwrap();
     store.receiveOperations(&[incoming.clone()]).unwrap();
-    let path = pending_path("receive-atomic", &incoming.opId);
-    host.failAtomic.store(1, Ordering::SeqCst);
+    sql.executeBatch("CREATE TRIGGER reject_completion BEFORE UPDATE ON originals BEGIN SELECT RAISE(ABORT,'completion failed'); END").unwrap();
     assert!(store.completeOperations(&[incoming.clone()]).is_err());
-    assert!(host.exists(&path).unwrap());
-    assert_eq!(store.pendingOperations().unwrap(), vec![incoming.clone()]);
-    host.failAtomic.store(0, Ordering::SeqCst);
+    assert_eq!(store.pendingOperations().unwrap(),vec![incoming.clone()]);
+    sql.executeBatch("DROP TRIGGER reject_completion").unwrap();
     store.completeOperations(&[incoming]).unwrap();
-    assert!(!host.exists(&path).unwrap());
-    assert!(store.receipt().unwrap().containsSequence("device-a", 1));
+    assert_eq!(store.pendingOperationCount().unwrap(),0);
+    assert!(store.receipt().unwrap().containsSequence("device-a",1));
+}
+
+/// The adapted authority reader keeps the bounded journal path without publishing
+/// unrelated preference outboxes, and retains archived/pending export semantics.
+#[test]
+fn archived_control_replay_is_bounded_and_does_not_publish_preference_outboxes() {
+    use crate::PreferencesDataStore::{PreferencesDataStore, stringPreferencesKey};
+    use operit_util::RuntimeStorageLayout::RUNTIME_SYNC_DIR_PATH;
+
+    let host = Arc::new(MemoryStorageHost::default());
+    let path = "runtime/config/preferences/control-replay.preferences.json";
+    let preferences = PreferencesDataStore::newWithStorage(host.clone(), path);
+    preferences.edit(|data| data.set(&stringPreferencesKey("theme"), json!("dark"))).unwrap();
+    let committed: Value = serde_json::from_slice(&host.readBytes(path).unwrap()).unwrap();
+    assert!(committed.get("__operit_transaction_commit").is_none());
+
+    let store = SyncOperationStore::new(host.clone(), RUNTIME_SYNC_DIR_PATH);
+    let mut archived = operation(1, "command", "archived", "apply",
+        SyncOperationSemantics::Transaction, json!({"permission":"archived"}));
+    archived.domain = NETWORK_CONTROL_SYNC_DOMAIN.to_owned();
+    let business = operation(2, "message", "unrelated", "upsert",
+        SyncOperationSemantics::EntityState, json!({"text":"x".repeat(8192)}));
+    let mut pending = operation(3, "command", "pending", "apply",
+        SyncOperationSemantics::Transaction, json!({"permission":"pending"}));
+    pending.domain = NETWORK_CONTROL_SYNC_DOMAIN.to_owned();
+    store.appendOperations(&[archived.clone(), business]).unwrap();
+    store.receiveOperations(std::slice::from_ref(&pending)).unwrap();
+    drop(store);
+
+    host.forbidWholeJournalReads.store(true, Ordering::SeqCst);
+    let reopened = SyncOperationStore::new(host.clone(), RUNTIME_SYNC_DIR_PATH);
+    let before = host.readBytes(path).unwrap();
+    assert_eq!(reopened.archivedControlOperations().unwrap(), vec![archived, pending.clone()]);
+    assert_eq!(host.readBytes(path).unwrap(), before);
+
+    reopened.setExportFloor("device-a", 1).unwrap();
+    assert_eq!(reopened.archivedControlOperations().unwrap(), vec![pending]);
+    assert_eq!(host.readBytes(path).unwrap(), before);
+    // The fixture has a real pending outbox: an explicit export still publishes it.
+    assert!(reopened.publishPreferenceOutboxes().unwrap().is_empty());
+    let published: Value = serde_json::from_slice(&host.readBytes(path).unwrap()).unwrap();
+    assert!(published.get("__operit_transaction_commit").is_none());
+}
+
+/// Receipt lookup validates immutable conflicts even when the matching receipt
+/// sorts before the conflicting alias, and cannot append another admission.
+#[test]
+fn bounded_review_receipts_validate_complete_history_and_local_sequences() {
+    use crate::NetworkControlStore::NetworkControlStore;
+    let storage = Arc::new(MemoryStorageHost { releasePreferencesCache: true, ..Default::default() });
+    let store = NetworkControlStore::newNodeLocal(storage.clone()).unwrap();
+    let initial = store.bootstrapCurrentSpace().unwrap();
+    let issuer = initial.memberNodeIds.iter().next().unwrap();
+    for index in 0..20 { store.updatePolicy(format!("history-{index}"), "unchanged".into()).unwrap(); }
+    let identities = BTreeMap::from([("esp".into(), "edge".into())]);
+    let receipt = store.admitSpaceForReview("source".into(), identities.clone(), "bounded").unwrap();
+    assert_eq!(receipt.sequence, 22);
+    assert_eq!(store.spaceControlOperation(&initial.spaceId, &receipt.entityId, issuer).unwrap(), Some(receipt.clone()));
+    assert!(store.spaceControlOperation(&initial.spaceId, &receipt.entityId, "other").unwrap().is_none());
+    assert_eq!(store.admitSpaceForReview("source".into(), identities.clone(), "bounded").unwrap(), receipt);
+    let next = store.updatePolicy("after-review".into(), "kept".into()).unwrap();
+    assert_eq!(next.sequence, receipt.sequence + 1);
+    let projection = NetworkControlStore::projectionStore(storage.clone());
+    let mut alias = receipt.clone();
+    alias.payload["futureField"] = json!({"immutable": true});
+    projection.setTypedEntry("zz-conflicting-alias", &alias).unwrap();
+    let writes = storage.writeCount();
+    assert!(store.spaceControlOperation(&initial.spaceId, &receipt.entityId, issuer)
+        .unwrap_err().contains("Conflicting immutable"));
+    assert!(store.admitSpaceForReview("source".into(), identities, "bounded").is_err());
+    assert_eq!(storage.writeCount(), writes);
+}
+
+/// Paged authority must never allocate a whole expanded policy on current
+/// endpoint files. Its digest and all unknown payload bytes stay compatible.
+#[test]
+fn endpoint_control_export_streams_ranges_with_identical_digest_for_all_key_orders() {
+    use crate::NetworkControlStore::NetworkControlStore;
+    use sha2::{Digest, Sha256};
+    let storage = Arc::new(MemoryStorageHost { releasePreferencesCache: true, ..Default::default() });
+    let store = NetworkControlStore::newNodeLocal(storage.clone()).unwrap();
+    let state = store.bootstrapCurrentSpace().unwrap();
+    for index in 0..12 { store.admitMember(format!("peer-{index}-range-boundary")).unwrap(); }
+    let projection = NetworkControlStore::projectionStore(storage.clone());
+    let mut expected = store.currentSpaceOperations().unwrap();
+    expected[0].payload["futureField"] = json!({"text":"设备  \n \"".repeat(100),"unknown":[null,9]});
+    projection.setTypedEntry(&expected[0].opId, &expected[0]).unwrap();
+    expected.sort_by(|a,b| a.opId.cmp(&b.opId));
+    // The range parser must hash legacy structural whitespace verbatim too.
+    let path = "runtime/link_access/space_policy.preferences.json";
+    let pretty: Value = serde_json::from_slice(&storage.readBytes(path).unwrap()).unwrap();
+    storage.writeBytes(path, &serde_json::to_vec_pretty(&pretty).unwrap()).unwrap();
+    let revision = projection.withEncodedEntries(|entries| {
+        let mut hash = Sha256::new();
+        hash.update(b"operit.endpoint-control-export.v1\0");
+        hash.update((state.spaceId.len() as u64).to_be_bytes()); hash.update(state.spaceId.as_bytes());
+        for (key, raw) in entries {
+            for bytes in [key.as_bytes(), raw.get().as_bytes()] {
+                hash.update((bytes.len() as u64).to_be_bytes()); hash.update(bytes);
+            }
+        }
+        format!("{:x}", hash.finalize())
+    }).unwrap();
+    let original = storage.readBytes(path).unwrap();
+    let writes = storage.writeCount();
+    storage.forbidWholePolicyReads.store(true, Ordering::SeqCst);
+    let manifest = store.spaceControlManifest(&state.spaceId).unwrap();
+    assert_eq!(manifest.revision, revision);
+    assert_eq!(manifest.count, expected.len());
+    let mut after = None;
+    let mut actual = Vec::new();
+    loop {
+        let page = store.spaceControlExport(&state.spaceId, Some(&revision), after.as_deref()).unwrap();
+        assert_eq!(page.revision, revision);
+        assert_eq!(page.count, expected.len());
+        let Some(operation) = page.operation else { break; };
+        after = Some(operation.opId.clone()); actual.push(operation);
+    }
+    assert_eq!(actual, expected);
+    assert_eq!(storage.writeCount(), writes);
+    storage.forbidWholePolicyReads.store(false, Ordering::SeqCst);
+    assert_eq!(storage.readBytes(path).unwrap(), original);
+    // Unordered legacy maps retain the old sorted export and exact digest.
+    let entries: BTreeMap<String, Box<serde_json::value::RawValue>> = serde_json::from_slice(&original).unwrap();
+    let reversed = format!("{{{}}}", entries.iter().rev().map(|(key, raw)|
+        format!("{}:{}", serde_json::to_string(key).unwrap(), raw.get())).collect::<Vec<_>>().join(","));
+    storage.writeBytes(path, reversed.as_bytes()).unwrap();
+    let legacy = store.spaceControlExport(&state.spaceId, Some(&revision), None).unwrap();
+    assert_eq!(legacy.operation, expected.first().cloned());
+    assert_eq!(storage.readBytes(path).unwrap(), reversed.as_bytes());
+}
+
+/// Reopened query handles share the live projection without reading or retaining its history.
+#[test]
+fn control_queries_share_projection_and_observe_revocation() {
+    use crate::NetworkControlStore::NetworkControlStore;
+    for constrained in [false, true] {
+        let host = Arc::new(MemoryStorageHost { releasePreferencesCache: constrained, ..Default::default() });
+        let owner = NetworkControlStore::newNodeLocal(host.clone()).unwrap();
+        owner.bootstrapCurrentSpace().unwrap();
+        owner.admitMember("peer".into()).unwrap();
+        for index in 0..32 { owner.updatePolicy("display".into(), index.to_string()).unwrap(); }
+        owner.currentState().unwrap();
+        let reads = host.policyReads.load(Ordering::SeqCst);
+        for _ in 0..32 {
+            let reader = NetworkControlStore::newNodeLocal(host.clone()).unwrap();
+            assert!(reader.nodeHasCapability("peer", "runtime.execute", None).unwrap());
+            assert!(!reader.nodeIsDisconnected("peer").unwrap());
+        }
+        assert_eq!(host.policyReads.load(Ordering::SeqCst), reads, "read-only admission checks reread history");
+        let reader = NetworkControlStore::newNodeLocal(host.clone()).unwrap();
+        owner.disconnectNode("peer".into()).unwrap();
+        assert!(reader.nodeIsDisconnected("peer").unwrap());
+        owner.removeMember("peer".into()).unwrap();
+        assert!(!reader.nodeHasCapability("peer", "runtime.execute", None).unwrap());
+        owner.admitMember("peer".into()).unwrap();
+        assert!(!reader.nodeIsDisconnected("peer").unwrap());
+    }
+}
+
+/// Direct journal publication invalidates the same projection as node-local imports.
+#[test]
+fn control_projection_observes_independent_journal_appends() {
+    use crate::NetworkControlStore::{NetworkControlStore, NetworkControlCommand, NetworkControlCommandRecord};
+    let host = Arc::new(MemoryStorageHost::default());
+    let owner = NetworkControlStore::new(host.clone()).unwrap();
+    let before = owner.bootstrapCurrentSpace().unwrap();
+    let issuer = before.memberNodeIds.iter().next().unwrap().clone();
+    let journal = SyncOperationStore::new(host.clone(), "runtime/sync");
+    let mutation = journal.appendLocalOperation(&issuer, NewSyncOperation {
+        domain: "network_control".into(), entityType: "command".into(), entityId: "external-policy".into(),
+        operation: "apply".into(), semantics: SyncOperationSemantics::Transaction,
+        payload: serde_json::to_value(NetworkControlCommandRecord {
+            commandId: "external-policy".into(), spaceId: before.spaceId.clone(), issuerNodeId: issuer.clone(),
+            command: NetworkControlCommand::PolicyUpdate { policyId: "external".into(), value: "committed".into() },
+        }).unwrap(),
+    }).unwrap();
+    assert_eq!(mutation.domain, "network_control");
+    assert_eq!(owner.currentState().unwrap().policies.get("external").map(String::as_str), Some("committed"));
 }
 
 /// Verifies change summaries drop progress this device only learned from peers.
@@ -1873,12 +2223,12 @@ fn authored_clock_retains_only_local_origins() {
     clock.setSequence("core-local", 3);
     clock.setSequence("core-local:sql", 7);
     clock.setSequence("core-local:preferences:abcd", 2);
-    clock.setSequence("core-remote", 9);
+    clock.setSequence("node-local", 9);
     clock.setSequence("core-remote:sql", 4);
-    clock.retainAuthoredBy("core-local");
+    clock.retainAuthoredBy("core-local", "node-local");
     assert_eq!(
         clock.sequences.keys().cloned().collect::<Vec<_>>(),
-        vec!["core-local", "core-local:preferences:abcd", "core-local:sql"]
+        vec!["core-local", "core-local:preferences:abcd", "core-local:sql", "node-local"]
     );
 }
 
@@ -2024,10 +2374,11 @@ fn control_state_tracks_atomic_receipts_and_pending_completion() {
             nodeId: "phone".into(),
         },
     );
-    host.failAtomic.store(1, Ordering::SeqCst);
+    let mut sql = host.openTransactionDatabase(&format!("{RUNTIME_SYNC_DIR_PATH}/transactions.sqlite")).unwrap();
+    sql.executeBatch("CREATE TRIGGER reject_control_receive BEFORE INSERT ON originals BEGIN SELECT RAISE(ABORT,'receive failed'); END").unwrap();
     assert!(journal.receiveOperations(&[disconnect.clone()]).is_err());
     assert!(!control.nodeIsDisconnected("phone").unwrap());
-    host.failAtomic.store(0, Ordering::SeqCst);
+    sql.executeBatch("DROP TRIGGER reject_control_receive").unwrap();
     journal.receiveOperations(&[disconnect.clone()]).unwrap();
     assert!(control.nodeIsDisconnected("phone").unwrap());
     journal.completeOperations(&[disconnect.clone()]).unwrap();
@@ -2050,7 +2401,7 @@ fn control_state_tracks_atomic_receipts_and_pending_completion() {
 /// Repair is a mutation too: removing a journal command must immediately update
 /// the existing readers instead of leaving their authorization snapshot stale.
 #[test]
-fn control_state_updates_when_a_command_is_quarantined() {
+fn quarantining_legacy_files_preserves_committed_sql_authority() {
     use crate::NetworkControlStore::NetworkControlStore;
     use operit_util::RuntimeStorageLayout::RUNTIME_SYNC_DIR_PATH;
     let host = Arc::new(MemoryStorageHost::default());
@@ -2059,33 +2410,11 @@ fn control_state_updates_when_a_command_is_quarantined() {
     control.admitMember("phone".into()).unwrap();
     let disconnect = control.disconnectNode("phone".into()).unwrap();
     let journal = SyncOperationStore::new(host.clone(), RUNTIME_SYNC_DIR_PATH);
-    let raw = host
-        .readBytes(&journal.operationsPath(&disconnect.originDeviceId))
-        .unwrap();
-    let mut offset = 0u64;
-    for line in raw.split_inclusive(|byte| *byte == b'\n') {
-        let operation: SyncOperation = serde_json::from_slice(line).unwrap();
-        if operation.opId == disconnect.opId {
-            break;
-        }
-        offset += line.len() as u64;
-    }
+    let path = journal.operationsPath(&disconnect.originDeviceId);
+    host.writeBytes(&path, (serde_json::to_string(&disconnect).unwrap() + "\n").as_bytes()).unwrap();
+    journal.quarantineOperationLines(&disconnect.originDeviceId, &[0]).unwrap();
     assert!(control.nodeIsDisconnected("phone").unwrap());
-    journal
-        .quarantineOperationLines(&disconnect.originDeviceId, &[offset])
-        .unwrap();
-    assert!(!control.nodeIsDisconnected("phone").unwrap());
-    assert_eq!(control.currentSpaceOperations().unwrap().len(), 2);
-    host.writeBytes(&journal.operationsPath(&disconnect.originDeviceId), &raw)
-        .unwrap();
-    host.forbidControlHistoryReads.store(true, Ordering::SeqCst);
-    assert!(journal.reloadNetworkControlState().is_err());
-    assert!(
-        control.currentState().is_err(),
-        "failed recovery must not serve old authority"
-    );
-    host.forbidControlHistoryReads
-        .store(false, Ordering::SeqCst);
+    assert!(control.currentSpaceOperations().unwrap().contains(&disconnect));
     journal.reloadNetworkControlState().unwrap();
     assert!(control.nodeIsDisconnected("phone").unwrap());
 }
@@ -2198,46 +2527,146 @@ fn concurrent_control_writes_publish_one_shared_state() {
     );
 }
 
-
-/// Skipping only finishes after the immutable original and receive ledger are durable.
 #[test]
-fn skipped_preference_completion_preserves_pending_on_failure_and_receipts_on_retry() {
-    for failure in [1, 3] {
-        let host = Arc::new(MemoryStorageHost::default());
-        let store = SyncOperationStore::new(host.clone(), "skip-atomic");
-        let mut incoming = operation(
-            1,
-            "settings",
-            "settings",
-            "set",
-            SyncOperationSemantics::EntityState,
-            json!({"storagePath":"runtime/config/preferences/skipped.preferences.json", "key":"settings", "value":true, "encrypted":false, "formatVersion":2, "schemaVersion":1}),
-        );
-        incoming.domain = "preferences".into();
+fn repeated_preference_snapshots_do_not_rewrite_prepared_files() {
+    use crate::PreferencesDataStore::{stringPreferencesKey, PreferencesDataStore};
+    let storage = Arc::new(MemoryStorageHost::default());
+    let stores: Vec<_> = (0..20).map(|index| {
+        let path = format!("runtime/plugin_data/space/com.operit.test/{index}.preferences.json");
+        let store = PreferencesDataStore::newWithStorage(storage.clone(), &path)
+            .withSchema(1, |_, _| Ok(()));
+        store.edit(|values| values.set(&stringPreferencesKey("value"), json!(index))).unwrap();
         store
-            .receiveOperations(std::slice::from_ref(&incoming))
-            .unwrap();
-        let pendingPath = pending_path("skip-atomic", &incoming.opId);
-        host.failAtomic.store(failure, Ordering::SeqCst);
-        assert!(store
-            .skipOperations(std::slice::from_ref(&incoming))
-            .is_err());
-        assert_eq!(store.pendingOperations().unwrap(), vec![incoming.clone()]);
-        assert!(host.exists(&pendingPath).unwrap());
-        assert_eq!(store.preferenceHistory().unwrap(), vec![incoming.clone()]);
-        host.failAtomic.store(0, Ordering::SeqCst);
-        store
-            .skipOperations(std::slice::from_ref(&incoming))
-            .unwrap();
-        assert_eq!(store.pendingOperationCount().unwrap(), 0);
-        assert!(!host.exists(&pendingPath).unwrap());
-        assert!(store.receipt().unwrap().containsSequence("device-a", 1));
-        drop(store);
-        let reopened = SyncOperationStore::new(host, "skip-atomic");
-        reopened
-            .receiveOperations(std::slice::from_ref(&incoming))
-            .unwrap();
-        assert_eq!(reopened.pendingOperationCount().unwrap(), 0);
-        assert_eq!(reopened.preferenceHistory().unwrap(), vec![incoming]);
+    }).collect();
+    let snapshots: Vec<_> = stores.iter().map(|store| store.syncSnapshot().unwrap()).collect();
+    let writes = storage.writeCount();
+    for _ in 0..5 {
+        for (store, expected) in stores.iter().zip(&snapshots) {
+            assert_eq!(store.syncSnapshot().unwrap(), *expected);
+        }
     }
+    assert_eq!(storage.writeCount(), writes, "100 unchanged snapshots must perform zero file writes");
+    let upgraded = stores[0].clone().withSchema(2, |_, values| {
+        values.set(&stringPreferencesKey("upgraded"), json!(true));
+        Ok(())
+    });
+    assert!(!upgraded.isSyncPrepared().unwrap());
+    assert_eq!(upgraded.syncSnapshot().unwrap().data.values["upgraded"], json!(true));
+    assert!(upgraded.isSyncPrepared().unwrap());
+    assert!(storage.writeCount() > writes, "a real format migration must still be persisted");
+}
+
+#[test]
+fn preference_replay_reads_only_its_completed_sql_target() {
+    let storage = Arc::new(MemoryStorageHost::default());
+    let store = SyncOperationStore::new(storage, "runtime/sync");
+    let path = "runtime/plugin_data/space/com.operit.test/selected.preferences.json";
+    let make = |sequence, path: &str| {
+        let mut op = operationFromOrigin("peer", sequence, "preference", &serde_json::to_string(&(path, "value")).unwrap(),
+            "set", json!({"storagePath":path,"key":"value","value":sequence,"encrypted":false,"formatVersion":1}));
+        op.domain = "preferences".into();
+        op
+    };
+    let selected = make(1, path);
+    let mut completed = vec![selected.clone()];
+    completed.extend((2..1002).map(|sequence| make(sequence, "runtime/plugin_data/space/com.operit.test/other.preferences.json")));
+    store.appendOperations(&completed).unwrap();
+    let pending = make(1002, path);
+    store.receiveOperations(std::slice::from_ref(&pending)).unwrap();
+    // An all-history scan would try to parse these unrelated headers and fail.
+    store.withJournal(|journal| journal.transaction(|tx| {
+        tx.execute("UPDATE originals SET header='not a JSON header' WHERE target<>?1", vec![crate::SqliteStore::SqliteValue::Text(path.into())])?;
+        Ok(())
+    })).unwrap();
+    for _ in 0..3 {
+        assert_eq!(store.archivedPreferenceHistory(path).unwrap(), vec![selected.clone()]);
+    }
+    store.completeOperations(std::slice::from_ref(&pending)).unwrap();
+    assert_eq!(store.archivedPreferenceHistory(path).unwrap(), vec![selected, pending]);
+}
+
+#[test]
+fn empty_preference_preparation_only_initializes_requested_owners() {
+    use crate::{PreferenceMerge::{self, PreferenceMergeSchema, PreferenceMergeStore},
+        PreferencesDataStore::{stringPreferencesKey, CoreNodeStateStore, PreferencesDataStore}};
+    let storage = Arc::new(MemoryStorageHost::default());
+    PreferencesDataStore::newWithStorage(storage.clone(), "runtime/plugin_data/space/com.operit.test/existing.preferences.json")
+        .edit(|values| values.set(&stringPreferencesKey("value"), json!("existing"))).unwrap();
+    let path = "runtime/config/preferences/requested.preferences.json";
+    CoreNodeStateStore::newWithStorage(storage.clone(), path)
+        .edit(|values| values.set(&stringPreferencesKey("value"), json!("requested"))).unwrap();
+    let schema = PreferenceMergeSchema { stores: vec![PreferenceMergeStore::values(path, false,
+        |storage, path| PreferencesDataStore::newWithStorage(storage, path))] };
+    let outcomes = PreferenceMerge::applyIndependentOperations(storage.clone(), &schema, &[], &[], |_, _| true);
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].paths, BTreeSet::from([path.into()]));
+    assert!(outcomes[0].result.is_ok(), "{:?}", outcomes[0].result);
+    let writes = storage.writeCount();
+    assert!(PreferenceMerge::applyIndependentOperations(storage.clone(), &schema, &[], &[], |_, _| true).is_empty());
+    assert_eq!(storage.writeCount(), writes);
+}
+
+/// Run explicitly to compare the previous all-header scan with indexed owner replay.
+#[test]
+#[ignore = "manual history query benchmark"]
+fn benchmark_preference_owner_history_queries() {
+    let store = SyncOperationStore::new(Arc::new(MemoryStorageHost::default()), "runtime/sync");
+    let paths: Vec<_> = (0..45).map(|i| format!("runtime/plugin_data/space/com.operit.test/{i}.preferences.json")).collect();
+    let operations: Vec<_> = (1..=15_389).map(|sequence| {
+        let path = &paths[sequence as usize % paths.len()];
+        let mut op = operationFromOrigin("peer", sequence, "preference", &serde_json::to_string(&(path, "value")).unwrap(),
+            "set", json!({"storagePath":path,"key":"value","value":"x".repeat(256),"encrypted":false,"formatVersion":1}));
+        op.domain = "preferences".into();
+        op
+    }).collect();
+    store.appendOperations(&operations).unwrap();
+    let start = std::time::Instant::now();
+    let previous: Vec<Vec<SyncOperation>> = paths.iter().map(|path| {
+        store.withJournal(|journal| journal.headers(Some(false))).unwrap().into_iter()
+            .filter(|header| header.route.storage_path.as_deref() == Some(path))
+            .map(|header| store.original(&header.op_id).unwrap()).collect()
+    }).collect();
+    let before = start.elapsed();
+    let start = std::time::Instant::now();
+    let indexed: Vec<_> = paths.iter().map(|path| store.archivedPreferenceHistory(path).unwrap()).collect();
+    let after = start.elapsed();
+    assert_eq!(indexed, previous);
+    eprintln!("history replay: {} originals / {} owners; all-header scan={before:?}, indexed={after:?}, speedup={:.2}x",
+        operations.len(), paths.len(), before.as_secs_f64() / after.as_secs_f64());
+}
+
+#[test]
+fn empty_preference_preparation_replays_explicit_history_for_a_prepared_dynamic_owner() {
+    use crate::{PreferenceMerge::{self, PreferenceMergeSchema},
+        PreferencesDataStore::{stringPreferencesKey, PreferencesDataStore}};
+    let source = Arc::new(MemoryStorageHost::default());
+    let target = Arc::new(MemoryStorageHost::default());
+    let path = "runtime/plugin_data/space/com.operit.test/history.preferences.json";
+    let remote = PreferencesDataStore::newWithStorage(source.clone(), path);
+    remote.edit(|values| values.set(&stringPreferencesKey("remote"), json!(true))).unwrap();
+    let history = SyncOperationStore::new(source, "runtime/sync").preferenceHistory().unwrap();
+    let local = PreferencesDataStore::newWithStorage(target.clone(), path);
+    local.prepareSync().unwrap();
+    // A caller explicitly supplying history still requests replay, even without incoming work.
+    let outcomes = PreferenceMerge::applyIndependentOperations(target, &PreferenceMergeSchema::default(), &history, &[], |_, _| true);
+    assert_eq!(outcomes.len(), 1);
+    assert!(outcomes[0].result.is_ok(), "{:?}", outcomes[0].result);
+    assert_eq!(local.data().unwrap().get(&stringPreferencesKey("remote")), Some(&json!(true)));
+}
+
+/// A recoverable file intent owns its ID before publication in the journal.
+#[test]
+fn direct_allocator_skips_reserved_preference_id() {
+    let host = Arc::new(MemoryStorageHost::default());
+    let journal = SyncOperationStore::new(host, "runtime/sync");
+    let mutation = || NewSyncOperation {
+        domain: "preferences".into(), entityType: "allocator-test".into(), entityId: "allocator-test".into(),
+        operation: "set".into(), semantics: SyncOperationSemantics::EntityState, payload: json!({}),
+    };
+    let reserved = journal.withJournal(|j|j.reserve("allocator-test:preferences", mutation())).unwrap();
+    let direct = journal.appendLocalOperation("allocator-test:preferences", mutation()).unwrap();
+    assert_eq!(reserved.sequence, 1);
+    assert_eq!(direct.sequence, 2);
+    let next = journal.withJournal(|j|j.reserve("allocator-test:preferences", mutation())).unwrap();
+    assert_eq!(next.sequence, 3);
 }

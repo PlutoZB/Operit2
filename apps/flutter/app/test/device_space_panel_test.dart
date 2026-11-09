@@ -133,6 +133,8 @@ class DeviceSpacePanelBridge extends OperitRuntimeBridge {
   List<Map<String, Object?>> paired = <Map<String, Object?>>[];
   Map<String, String> statuses = <String, String>{};
   final List<String> calls = <String>[];
+  final failures = <String>{};
+  bool left = false;
   final StreamController<CoreEvent> prompts =
       StreamController<CoreEvent>.broadcast();
 
@@ -140,15 +142,37 @@ class DeviceSpacePanelBridge extends OperitRuntimeBridge {
   @override
   Future<Uint8List> callBytes(CoreCallRequest request) async {
     calls.add(request.methodName);
+    if (failures.contains(request.methodName)) {
+      throw StateError('injected failure: ${request.methodName}');
+    }
     switch (request.methodName) {
       case 'deviceSpace':
         return encodeCoreLink([
           0,
           <String, Object?>{
             'spaceId': 'space',
-            'spaceName': '测试空间',
+            'spaceName': left ? '恢复后的空间' : '测试空间',
             'spaceRevision': 3,
             'members': <String>['self', 'tablet', 'relay'],
+          },
+        ]);
+      case 'syncResetTransactions':
+        return encodeCoreLink([0, <String, Object?>{'owners': 3, 'files': 1}]);
+      case 'leaveDeviceSpace':
+        left = true;
+        failures.clear();
+        topology = <String, Object?>{
+          ...topology,
+          'devices': <Object?>[(topology['devices']! as List).first],
+          'connections': <Object?>[],
+        };
+        return encodeCoreLink([
+          0,
+          <String, Object?>{
+            'spaceId': 'new-space',
+            'spaceName': '恢复后的空间',
+            'spaceRevision': 1,
+            'members': <String>['self'],
           },
         ]);
       case 'deviceSpaceTopology':
@@ -337,6 +361,98 @@ void main() {
     await tester.pump();
     await bridge.prompts.close();
   }
+
+  testWidgets(
+    'reset transactions appears above leave and rebuilds without leaving',
+    (tester) async {
+      final bridge = DeviceSpacePanelBridge(
+        topology: _topology(),
+        control: _control(),
+      );
+      await mountPanel(tester, bridge);
+      final l10n = AppLocalizations.of(
+        tester.element(find.byType(RuntimeSettingsPanel)),
+      )!;
+      await tester.tap(find.byIcon(Icons.more_horiz_rounded).first);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      final reset = find.text(l10n.settingsRuntimeResetTransactions);
+      expect(
+        tester.getTopLeft(reset).dy,
+        lessThan(
+          tester.getTopLeft(find.text(l10n.settingsRuntimeLeaveSpace)).dy,
+        ),
+      );
+      await tester.tap(reset);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(
+        bridge.calls.where((call) => call == 'syncResetTransactions'),
+        hasLength(1),
+      );
+      expect(bridge.left, isFalse);
+      expect(
+        find.text(l10n.settingsRuntimeResetTransactionsDone),
+        findsOneWidget,
+      );
+      await tester.pump(const Duration(seconds: 4));
+      await unmount(tester, bridge);
+    },
+  );
+
+  for (final failed in ['deviceSpace', 'deviceSpaceTopology']) {
+    testWidgets('$failed failure keeps local leave accessible', (tester) async {
+      final bridge = DeviceSpacePanelBridge(
+        topology: _topology(),
+        control: _control(),
+      )..failures.add(failed);
+      await mountPanel(tester, bridge);
+      expect(find.textContaining('injected failure: $failed'), findsWidgets);
+      final l10n = AppLocalizations.of(
+        tester.element(find.byType(RuntimeSettingsPanel)),
+      )!;
+      final leave = find.widgetWithText(
+        TextButton,
+        l10n.settingsRuntimeLeaveSpace,
+      );
+      expect(leave, findsOneWidget);
+      expect(tester.widget<TextButton>(leave).onPressed, isNotNull);
+      await tester.tap(leave);
+      await tester.pump();
+      await tester.tap(
+        find.widgetWithText(
+          FilledButton,
+          l10n.settingsRuntimeLeaveSpaceConfirm,
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(
+        bridge.calls.where((call) => call == 'leaveDeviceSpace'),
+        hasLength(1),
+      );
+      expect(find.textContaining('injected failure: $failed'), findsNothing);
+      expect(find.byIcon(Icons.more_horiz_rounded), findsWidgets);
+      expect(find.text('android-tablet'), findsNothing);
+      expect(tester.takeException(), isNull);
+      await unmount(tester, bridge);
+    });
+  }
+
+  testWidgets('control failure preserves healthy device rows', (tester) async {
+    final bridge = DeviceSpacePanelBridge(
+      topology: _topology(),
+      control: _control(),
+    )..failures.add('deviceSpaceControl');
+    await mountPanel(tester, bridge);
+    expect(find.text('android-tablet'), findsOneWidget);
+    expect(
+      find.textContaining('injected failure: deviceSpaceControl'),
+      findsWidgets,
+    );
+    expect(tester.takeException(), isNull);
+    await unmount(tester, bridge);
+  });
 
   testWidgets(
     'member rows stay readable without device-management capabilities',

@@ -1,12 +1,13 @@
 //! A local exit survives the Space switch and is retried over ordinary paired
 //! snapshot exchanges. Once a neighbor has the receipt in its control log, the
 //! receipt travels through the existing same-Space synchronization paths.
+use operit_util::RuntimeStorageLayout::{RUNTIME_SPACE_DEPARTURES_PATH};
 use super::*;
 use crate::PeerStateStore::PeerStateStore;
 use operit_store::NetworkControlStore::{NetworkControlCommand, NetworkControlCommandRecord};
 use std::collections::BTreeSet;
 
-const PENDING: &str = "runtime/link_access/space_departures.preferences.json";
+const PENDING: &str = RUNTIME_SPACE_DEPARTURES_PATH;
 
 #[derive(Serialize, Deserialize)]
 struct Departure {
@@ -97,7 +98,11 @@ pub(super) async fn exchange(service: &dyn NodeSpaceContext, peer: &str) -> Resu
     // The former neighbor may still list us in the old Space. This
     // exchange delivers/acks exits; it must never adopt that stale view.
     observe(service, peer, &remote.departures, &remote.controlOperations)?;
-    if pending(service, peer)?.is_empty() && remote.departures.is_empty() { return Ok(()); }
+    let remoteHasDepartures = !remote.departures.is_empty();
+    // The peer's full snapshot is no longer needed. Release it before building
+    // our response and revalidating the authenticated transport's authority.
+    drop(remote);
+    if pending(service, peer)?.is_empty() && !remoteHasDepartures { return Ok(()); }
     let snapshot = peerSpaceSnapshotForPeer(service, peer)?;
     let request = CoreCallRequest::new(operit_link::nextCoreRouteRequestId("space-exit"),
         NODE_SPACE_TARGET, "observeSpaceSnapshot", toCoreValue(snapshot).map_err(|error| error.to_string())?);

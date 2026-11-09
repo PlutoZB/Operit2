@@ -7,6 +7,12 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:operit_ui/operit_ui.dart'
+    show
+        operitDesignBridgeEnabled,
+        OperitDesignSurface,
+        operitDesignDomCaptureScript,
+        operitDesignDomRuntimeRequestScript;
 import 'package:mime/mime.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_all/webview_all.dart';
@@ -14,7 +20,6 @@ import 'package:webview_all/webview_all.dart';
 import '../../../../core/bridge/ProxyCoreRuntimeBridge.dart';
 import '../../../../core/logging/ClientLogger.dart';
 import '../../../../core/proxy/generated/CoreProxyClients.g.dart';
-import '../../../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;
 import 'ToolPkgComposeDslWebViewResourceLoader.dart';
 import 'ComposeDslImageSource.dart';
 import 'ToolPkgComposeDslWebViewBridgeRuntime.dart';
@@ -181,6 +186,7 @@ class ComposeDslWebViewHostRegistry {
     required WebViewController controller,
     required Future<Uri> Function(String url) resolveNavigationUri,
     required Future<void> Function() prepareDocumentStartBridge,
+    required Future<void> Function(String html, String? baseUrl) loadHtml,
     required ComposeDslWebViewStateSnapshot state,
   }) {
     if (executionContextKey.trim().isEmpty || controllerKey.trim().isEmpty) {
@@ -200,6 +206,7 @@ class ComposeDslWebViewHostRegistry {
       controller: controller,
       resolveNavigationUri: resolveNavigationUri,
       prepareDocumentStartBridge: prepareDocumentStartBridge,
+      loadHtml: loadHtml,
       state: state,
       javascriptInterfaceActionIds: registeredInterfaces.map(
         (name, methods) => MapEntry(name, Map<String, String>.of(methods)),
@@ -469,16 +476,15 @@ class ComposeDslWebViewHostRegistry {
           final html = _string(commandPayload['html']);
           final options = _stringMap(commandPayload['options']);
           await binding.prepareDocumentStartBridge();
-          await controller.loadHtmlString(
-            injectComposeDslWebViewBridgeRuntimeIntoHtml(
-              html,
-              javascriptInterfaces: listJavascriptInterfaces(
-                executionContextKey: executionContextKey,
-                controllerKey: controllerKey,
-              ),
+          final preparedHtml = injectComposeDslWebViewBridgeRuntimeIntoHtml(
+            html,
+            javascriptInterfaces: listJavascriptInterfaces(
+              executionContextKey: executionContextKey,
+              controllerKey: controllerKey,
             ),
-            baseUrl: _string(options['baseUrl']).trim().ifNotEmpty,
           );
+          final baseUrl = _string(options['baseUrl']).trim().ifNotEmpty;
+          await binding.loadHtml(preparedHtml, baseUrl);
           return _bridgeSuccess(null);
         case 'reload':
           await controller.reload();
@@ -667,10 +673,36 @@ class _ComposeDslWebViewState extends State<ComposeDslWebView> {
       )
       ..setBackgroundColor(Colors.transparent)
       ..setNavigationDelegate(_navigationDelegate());
-    _webViewWidget = WebViewWidget(
+    final webView = WebViewWidget(
       controller: _controller,
       gestureRecognizers: _pageGestureRecognizers,
     );
+    _webViewWidget = operitDesignBridgeEnabled
+        ? OperitDesignSurface(
+            onRuntimeRequest: (request) async {
+              Object? result = await _controller.runJavaScriptReturningResult(
+                operitDesignDomRuntimeRequestScript(request),
+              );
+              for (var depth = 0; result is String && depth < 3; depth++) {
+                result = jsonDecode(result);
+              }
+              return result;
+            },
+            readScene: () async {
+              Object? result = await _controller.runJavaScriptReturningResult(
+                operitDesignDomCaptureScript,
+              );
+              for (var depth = 0; result is String && depth < 3; depth++) {
+                result = jsonDecode(result);
+              }
+              if (result is! Map) {
+                throw StateError('WebView did not return a design scene');
+              }
+              return Map<String, Object?>.from(result);
+            },
+            child: webView,
+          )
+        : webView;
     if (_supportsComposeDslPageHooks) {
       _bridgeChannelRegistration = _controller.addJavaScriptChannel(
         composeDslWebViewBridgeChannelName,
@@ -1093,8 +1125,7 @@ class _ComposeDslWebViewState extends State<ComposeDslWebView> {
         packageName: host.packageName,
         scheme: scheme,
         dispatchDecision: _dispatchInterceptRequestDecision,
-        readFileBytes: (path) async =>
-            base64.decode(await _readVfsFileBase64(path)),
+        readFileBytes: host.readResourceBytes,
       );
       _resourceLoader = loader;
       _resourceRegistration = _controller.setLocalResourceHandler(
@@ -1147,9 +1178,6 @@ class _ComposeDslWebViewState extends State<ComposeDslWebView> {
     if (uri.host.isNotEmpty || (method != 'GET' && method != 'HEAD')) {
       throw StateError('VFS WebView resources require a local GET or HEAD URL');
     }
-    final contentBase64 = await _readVfsFileBase64(
-      Uri.decodeComponent(uri.path),
-    );
     return <String, Object?>{
       'action': 'respond',
       'response': <String, Object?>{
@@ -1157,34 +1185,25 @@ class _ComposeDslWebViewState extends State<ComposeDslWebView> {
         'mimeType':
             lookupMimeType(uri.path) ??
             (throw StateError('Unknown resource MIME type')),
-        'base64': method == 'HEAD' ? '' : contentBase64,
+        'filePath': Uri.decodeComponent(uri.path),
       },
     };
   }
 
-  /// Reads resource paths through the shared VFS and host file API.
-  Future<String> _readVfsFileBase64(String path) async {
-    final result = await _runtimeClients.application
-        .aiToolHandler()
-        .executeTool(
-          tool: core_proxy.CoreOperitToolsToolExecutionManagerAiTool(
-            name: 'read_file_binary',
-            parameters: [
-              core_proxy.CoreOperitToolsToolExecutionManagerToolParameter(
-                name: 'path',
-                value: path,
-              ),
-            ],
-          ),
-        );
-    if (!result.success) {
-      throw StateError('VFS resource $path: ${result.error}');
+  /// Prepares inline resources before WebView preloading, including controller loads.
+  Future<void> _loadHtml(String html, String? baseUrl) async {
+    if (ComposeDslWebViewResourceLoader.hasLocalHtmlResources(html, baseUrl)) {
+      _servingVfsFiles = true;
+      final loader = await _ensureResourceLoader();
+      final prepared = await loader.prepareHtml(html, baseUrl: baseUrl);
+      await _controller.loadHtmlString(
+        prepared.html,
+        baseUrl: prepared.baseUrl,
+      );
+    } else {
+      _servingVfsFiles = false;
+      await _controller.loadHtmlString(html, baseUrl: baseUrl);
     }
-    final data = result.result.value;
-    if (data is! core_proxy.BinaryFileContentData) {
-      throw StateError('VFS resource did not return binary file content');
-    }
-    return data.contentBase64;
   }
 
   /// Resolves every local navigation through the native VFS resource loader.
@@ -1232,12 +1251,12 @@ class _ComposeDslWebViewState extends State<ComposeDslWebView> {
         final uri = await _webViewUriFor(_request.url!, isMainFrame: true);
         await _controller.loadRequest(uri, headers: _request.headers);
       } else if (_request.html != null) {
-        await _controller.loadHtmlString(
+        await _loadHtml(
           injectComposeDslWebViewBridgeRuntimeIntoHtml(
             _request.html!,
             javascriptInterfaces: _javascriptInterfaces,
           ),
-          baseUrl: _request.baseUrl,
+          _request.baseUrl,
         );
       } else {
         await _controller.loadRequest(Uri.parse('about:blank'));
@@ -1331,6 +1350,7 @@ class _ComposeDslWebViewState extends State<ComposeDslWebView> {
       controller: _controller,
       resolveNavigationUri: (url) => _webViewUriFor(url, isMainFrame: true),
       prepareDocumentStartBridge: _prepareDocumentStartBridge,
+      loadHtml: _loadHtml,
       state: _stateSnapshot(),
     );
   }
@@ -1680,6 +1700,7 @@ class _ComposeDslWebViewControllerBinding {
     required this.controller,
     required this.resolveNavigationUri,
     required this.prepareDocumentStartBridge,
+    required this.loadHtml,
     required this.state,
     required this.javascriptInterfaceActionIds,
   });
@@ -1690,6 +1711,7 @@ class _ComposeDslWebViewControllerBinding {
   final WebViewController controller;
   final Future<Uri> Function(String url) resolveNavigationUri;
   final Future<void> Function() prepareDocumentStartBridge;
+  final Future<void> Function(String html, String? baseUrl) loadHtml;
   ComposeDslWebViewStateSnapshot state;
   final Map<String, Map<String, String>> javascriptInterfaceActionIds;
 }

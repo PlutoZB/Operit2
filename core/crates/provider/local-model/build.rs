@@ -16,6 +16,10 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() != Ok("wasm32") {
         let mut config = cmake::Config::new("native");
         config.profile("Release").build_target("operit_local_llm");
+        // cmake-rs copies cc's LC_ALL=C compiler delta onto the native build;
+        // C.UTF-8 keeps FetchContent archives with non-ASCII entry names
+        // extractable on hosts without generated locales (Debian 12).
+        config.env("LC_ALL", "C.UTF-8");
         // Prevent nested native builds from exhausting memory on large CI workers.
         if std::env::var_os("CMAKE_BUILD_PARALLEL_LEVEL").is_none() {
             let threads = std::thread::available_parallelism()
@@ -88,6 +92,21 @@ fn main() {
         let windows = os == "windows";
         let shared = windows || os == "android" || target_env == "ohos";
         let out_dir = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+        // Keep fetched sources and object paths below Windows' native tool limits.
+        // Hash the full Cargo output path to isolate targets, profiles and features.
+        let mut build_id = std::hash::DefaultHasher::new();
+        std::hash::Hash::hash(&out_dir, &mut build_id);
+        let manifest_dir =
+            std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
+        let repo_root = manifest_dir
+            .ancestors()
+            .nth(4)
+            .expect("Local models must be built from core/crates/provider/local-model");
+        config.out_dir(
+            repo_root
+                .join("target/local-llm")
+                .join(format!("{:016x}", std::hash::Hasher::finish(&build_id))),
+        );
         let profile_dir = out_dir
             .ancestors()
             .nth(3)
@@ -154,7 +173,10 @@ fn main() {
             return;
         }
         match os.as_str() {
-            "macos" | "ios" => println!("cargo:rustc-link-lib=c++"),
+            "macos" | "ios" => {
+                println!("cargo:rustc-link-lib=c++");
+                println!("cargo:rustc-link-lib=framework=Accelerate");
+            }
             _ => {
                 let libraries = std::fs::read_to_string(build.join("operit_cxx_runtime.txt"))
                     .expect("CMake must report the configured C++ runtime");

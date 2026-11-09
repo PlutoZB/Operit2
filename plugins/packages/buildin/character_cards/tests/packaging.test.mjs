@@ -10,7 +10,7 @@ import path from "node:path";
 import vm from "node:vm";
 import { buildMainScript, buildUiScreenScripts, buildRuntimeToolsScript, createHtmlDocument, createPackageArchive } from "../scripts/build.mjs";
 
-const require = createRequire(new URL("../../workflow/package.json", import.meta.url));
+const require = createRequire(import.meta.url);
 const { unzipSync } = require("fflate");
 const root = fileURLToPath(new URL("../", import.meta.url));
 const repositoryRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
@@ -43,6 +43,20 @@ test("all esbuild outputs are byte-identical from repository and plugin working 
     assert.equal(Buffer.compare(repositoryBytes, pluginBytes), 0, "Working-directory-dependent artifact bytes: " + name);
   }
   assert.equal(process.cwd(), originalDirectory, "Cross-directory builds must not mutate the parent process working directory");
+});
+
+/** Rebuilding on a different day must keep the exact archive identity used by bundled update checks. */
+test("package bytes do not depend on the build clock", async (t) => {
+  const main = await buildMainScript(), tools = await buildRuntimeToolsScript(), html = await createHtmlDocument(), screens = await buildUiScreenScripts();
+  t.mock.timers.enable({ apis: ["Date"], now: new Date(2025, 0, 1).getTime() });
+  const before = await createPackageArchive(main, tools, html, screens);
+  t.mock.timers.setTime(new Date(2026, 10, 5).getTime());
+  const after = await createPackageArchive(main, tools, html, screens);
+  assert.equal(digest(before), digest(after));
+  const changedMain = Buffer.concat([main, Buffer.from("\n// Updated runtime code\n")]);
+  const changed = await createPackageArchive(changedMain, tools, html, screens);
+  assert.notEqual(digest(before), digest(changed));
+  assert.deepEqual(Buffer.from(unzipSync(changed)["dist/main.js"]), changedMain);
 });
 
 /** Computes the exact artifact identity without printing complete generated source on failure. */
@@ -144,6 +158,12 @@ test("single Core production archive exactly matches the packaged plugin and its
   const manifest = JSON.parse(Buffer.from(entries["manifest.json"]).toString("utf8"));
   assert.equal(manifest.public_api, "src/api.ts"); assert.ok(Object.hasOwn(entries, manifest.public_api));
   assert.deepEqual(manifest.subpackages, [{ id: "character_memory", entry: "dist/tools.js" }]);
+  assert.equal(manifest.wasm_modules.length, 1);
+  assert.equal(manifest.wasm_modules[0].id, "usearch");
+  assert.equal(digest(entries[manifest.wasm_modules[0].path]), digest(await readFile(path.join(root, manifest.wasm_modules[0].path))));
+  for (const file of ["vendor/usearch/index.cpp", "vendor/usearch/build.py", "vendor/usearch/LICENSE-USEARCH", "vendor/usearch/LICENSE-EMSCRIPTEN"]) {
+    assert.ok(Object.hasOwn(entries, file), "Archive omitted the memory-owned WASM source or license: " + file);
+  }
   for (const file of [...await sourcePaths("src"), ...await sourcePaths("web"), ...await sourcePaths("scripts")]) {
     assert.ok(Object.hasOwn(entries, file), "Production archive omitted module: " + file);
     assert.equal(digest(entries[file]), digest(await readFile(path.join(root, file))), "Production archive has stale module: " + file);

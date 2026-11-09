@@ -167,7 +167,7 @@ source policy.
 
 ### Terminal Node.js versions
 
-Android, iOS/iSH, OpenHarmony, and Web runtime builders target Node.js 24 from
+Android, iOS/ARM64, OpenHarmony, and Web runtime builders target Node.js 24 from
 Alpine v3.23 and reject an installed APK database with another Node major.
 Their generated rootfs/initramfs artifacts must be rebuilt; CI `setup-node`
 only selects the build host's Node. Desktop terminals use the user's system
@@ -176,25 +176,31 @@ on those hosts; CI configuration alone cannot upgrade an end user's machine.
 
 ## iOS Runtime Source Pins
 
-The iOS runtime source set is reproducible from the pins in
-`tools/ios-runtime/ish/fetch_sources.py` and
-`tools/ios-runtime/ish/build_alpine_rootfs_linux.sh`:
+The iOS runtime is built from the independent C++ sources under
+`hosts/ios/linux-runtime`. It has no iSH or external ARM64 emulator dependency.
+`tools/ios-runtime/arm64/build.sh` builds the host CLI, iOS device/simulator static
+libraries and `OperitArm64.xcframework`. Runner invokes the same build through
+`apps/flutter/app/ios/build_arm64_runtime.sh`.
 
 | Component | Pin | Source and integrity |
 | --- | --- | --- |
-| iSH | `7864dd601e615d0fc09b888a93d327f458b25a1d` | GitHub archive; SHA-256 is recorded in `fetch_sources.py` |
-| iSH libapps | `b8cacae35e5b11d64bb736a053921c16ca7faf9e` | GitHub archive; SHA-256 is recorded in `fetch_sources.py` |
-| iSH Linux | `8ec9bf17f89c6dba818f3ed2427de4223e78644a` | GitHub archive; SHA-256 is recorded in `fetch_sources.py` |
-| libarchive | `fc6563f5130d8a7ee1fc27c0e55baef35119f26c` | GitHub archive; SHA-256 is recorded in `fetch_sources.py` |
-| iSH Alpine rootfs | `g00712ff0a54b2839c5aa1a8ed758003ca65357dc` | GitHub release archive; SHA-256 is recorded in `build_alpine_rootfs_linux.sh` |
-| iSH Alpine repository | Alpine v3.23, x86 | `https://dl-cdn.alpinelinux.org/alpine/v3.23` |
-| uv | 0.12.1, i686 musl | GitHub release archive; SHA-256 is recorded in `build_alpine_rootfs_linux.sh` |
-| pnpm in iSH rootfs | 10.12.1 | npm registry archive; SHA-256 is recorded in `build_alpine_rootfs_linux.sh` |
+| Runtime | Repository sources, C++17 | `hosts/ios/linux-runtime/CMakeLists.txt` |
+| Alpine minirootfs | 3.23.6, aarch64 | Archive URL and SHA-256 in `tools/ios-runtime/arm64/rootfs.json` |
+| Alpine packages | v3.23 main/community, aarch64 | Signed APK packages installed by `tools/ios-runtime/arm64/build_rootfs_linux.sh` |
+| Node.js | Major 24 | Installed APK database checked by `tools/runtime/verify_alpine_node24.py` |
 
-The iOS workflow runs on `macos-15` and records the installed Xcode SDK,
-Clang, Meson, and Ninja versions in its cache key. Keep those runner and source
-pins synchronized with `.github/workflows/ios-flutter-build.yml` and
-`.github/workflows/ios-app-package-build.yml`.
+Build the complete development root on Linux using
+`sudo bash tools/ios-runtime/arm64/build_rootfs_linux.sh`. The script supports
+native AArch64 Linux and x86_64 Linux with qemu-user-static/binfmt configured for
+the build. QEMU is a build tool and is not embedded in the iOS app. The resulting
+`Runner/arm64-rootfs.tar.gz` and SHA-256 sidecar are consumed by the iOS workflow.
+`package_rootfs.py` validates externally supplied AArch64 archives before publishing
+them to Runner.
+
+The iOS workflows use `macos-15`, Xcode's iOS SDK, CMake and the Apple Clang
+compiler. Keep their build commands synchronized with
+`.github/workflows/ios-flutter-build.yml`, `ios-app-package-build.yml` and
+`ios-arm64-runtime.yml`.
 
 ## Generated Plugin Assets
 
@@ -254,6 +260,51 @@ The aarch64 Linux CLI release requires an `aarch64-linux-gnu-gcc` cross C compil
 the Fedora `/usr/aarch64-redhat-linux/sys-root/fc43` sysroot. The build release script injects
 the sysroot's `limits.h` while compiling C dependencies because Fedora's cross compiler
 is built without target headers.
+
+## Debian 12 Linux CLI Build Container
+
+`build_cli_linux_debian12.py` builds the Linux CLI inside a Debian 12
+container. Binaries link against Debian 12's glibc (2.36) and require the
+GCC 12 C++ runtime (`GLIBCXX_3.4.30`), so they run on Debian 12, Ubuntu
+22.04, and newer distributions that reject binaries built on newer hosts
+(`GLIBC_2.xx not found`). Packaging, installer files, embedded plugin
+assets, and artifact naming match `build_cli_linux.py`; the release-standard
+x86_64 musl build stays available there. The driver rejects a packaged
+binary that references glibc symbols newer than 2.36.
+
+Prerequisites: `podman` (rootless, preferred) or `docker`. The image is
+provisioned by running `containers/debian12/image-setup.sh` in a scratch
+container and committing it, so kernels without the overlayfs module (where
+`podman build` cannot mount its build context) are supported; container
+storage itself uses the btrfs driver on btrfs filesystems. When podman's
+default storage configuration is unusable, the driver falls back to
+`CONTAINERS_STORAGE_CONF=~/.config/containers/storage.conf` (set
+`driver = "btrfs"` there on btrfs hosts).
+
+```bash
+# Host architecture; use --arches all for x86_64 + aarch64
+python3 tools/build_scripts/build_cli_linux_debian12.py
+
+# On a restricted network, point the first image build at reachable mirrors
+# and export rustup mirror variables for the container:
+python3 tools/build_scripts/build_cli_linux_debian12.py \
+  --base-image docker.m.daocloud.io/library/debian:12 \
+  --apt-mirror mirrors.ustc.edu.cn \
+  --rebuild-image
+export RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static
+export RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup
+# Slow npm downloads: forward a registry mirror into the container.
+python3 tools/build_scripts/build_cli_linux_debian12.py \
+  --env npm_config_registry=https://registry.npmmirror.com
+```
+
+Rust is not baked into the image. The driver provisions rustup (toolchain
+version from `RUST_TOOLCHAIN_VERSION`, defaulting to the release-pinned
+1.95.0), the cargo cache, and the pnpm store under the git-ignored
+`tools/release/work/debian12/`, so image rebuilds do not re-download the
+toolchain or crates. The aarch64 target cross-compiles with
+`gcc-aarch64-linux-gnu` and needs no additional sysroot. `--shell` opens the
+container with the same mounts for debugging.
 
 ## Local CLI Checks
 
@@ -506,9 +557,11 @@ fvm dart pub get --enforce-lockfile
 
 `lib/core/proxy/generated/*.g.dart` is generated at build time and gitignored.
 The app build scripts (`build_flutter_android.py`, `build_flutter_ios.py`,
-`build_flutter_macos.py`) regenerate it before `pub get`. When you invoke
-`flutter build`, `flutter analyze`, or `fvm dart pub get` outside those scripts
-on a clean checkout, generate it first, or Dart analysis fails with
+`build_flutter_macos.py`) regenerate it before `pub get`. Direct Windows and
+macOS Flutter builds also build the Rust bridge before Flutter assembles Dart,
+so `flutter run -d macos` and `flutter build macos` generate the proxy automatically.
+For `flutter analyze`, `fvm dart pub get`, or other platform builds outside those
+scripts on a clean checkout, generate it first to avoid
 `uri_has_not_been_generated` errors:
 
 ```powershell

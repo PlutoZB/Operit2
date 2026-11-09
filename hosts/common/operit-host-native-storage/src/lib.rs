@@ -40,10 +40,7 @@ impl NativeRuntimeStorageWriteSession {
             file.sync_all()?;
         }
         drop(file);
-        atomicReplace(&self.temporaryPath, &self.targetPath)?;
-        if sync {
-            syncParentDirectory(&self.targetPath)?;
-        }
+        publishStagedFile(&self.temporaryPath, &self.targetPath, sync)?;
         Ok(())
     }
 }
@@ -505,13 +502,25 @@ impl NativeRuntimeStorageHost {
         }
     }
 
+    fn managedRoot(&self, path: &str) -> HostResult<Option<&Path>> {
+        let normalized = normalizeStoragePath(path)?.join("/");
+        if normalized == "workspaces" || normalized.starts_with("workspaces/") {
+            return Ok(Some(self.workspaceRoot.as_path()));
+        }
+        if ["runtime/data/chat_outputs", "runtime/data/chat_attachments", "runtime/data/attachment_sources"].iter().any(|root|
+            normalized == *root || normalized.starts_with(&format!("{root}/")) || root.starts_with(&format!("{normalized}/"))) {
+            return Ok(Some(self.runtimeRoot.as_path()));
+        }
+        Ok(None)
+    }
+
     // Enforce non-following workspace access at the actual storage boundary too:
     // recheck components before reads/writes, rather than trusting an earlier listing.
     fn resolveFile(&self, path: &str) -> HostResult<PathBuf> {
         let resolved = self.resolve(path)?;
         let segments = normalizeStoragePath(path)?;
-        if segments.first().map(String::as_str) == Some("workspaces") {
-            let mut current = self.workspaceRoot.clone();
+        if let Some(root) = self.managedRoot(path)? {
+            let mut current = root.to_path_buf();
             for segment in segments.iter().skip(1) {
                 current.push(segment);
                 match fs::symlink_metadata(&current) {
@@ -521,7 +530,7 @@ impl NativeRuntimeStorageHost {
                         return Err(HostError::new("Workspace storage requires a regular file or directory")),
                     Ok(_) => {},
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
-                    Err(error) => return Err(error.into()),
+                    Err(error) => return Err(storageIoError("Inspect storage path", &current, error)),
                 }
             }
         }
@@ -595,6 +604,10 @@ impl RuntimeStorageWriteHost for NativeRuntimeStorageHost {
 }
 
 impl RuntimeStorageHost for NativeRuntimeStorageHost {
+    fn openTransactionDatabase(&self, path: &str) -> operit_host_api::HostResult<Box<dyn operit_host_api::RuntimeSqliteConnection>> {
+        RuntimeSqliteHost::openSqliteDatabase(self, path)
+    }
+
     fn runtimeRootDir(&self) -> Option<PathBuf> {
         Some(self.runtimeRoot.clone())
     }
@@ -604,12 +617,14 @@ impl RuntimeStorageHost for NativeRuntimeStorageHost {
     }
 
     fn readBytes(&self, path: &str) -> HostResult<Vec<u8>> {
-        Ok(fs::read(self.resolveFile(path)?)?)
+        let resolved = self.resolveFile(path)?;
+        fs::read(&resolved).map_err(|error| storageIoError("Read storage file", &resolved, error))
     }
 
     /// Reads one bounded byte range from native runtime storage.
     fn readBytesRange(&self, path: &str, offset: u64, length: usize) -> HostResult<Vec<u8>> {
-        let mut file = fs::File::open(self.resolveFile(path)?)?;
+        let resolved = self.resolveFile(path)?;
+        let mut file = fs::File::open(&resolved).map_err(|error| storageIoError("Open storage file", &resolved, error))?;
         file.seek(SeekFrom::Start(offset))?;
         let mut bytes = vec![0; length];
         let count = file.read(&mut bytes)?;
@@ -621,6 +636,23 @@ impl RuntimeStorageHost for NativeRuntimeStorageHost {
         let mut session = self.createWriteSession(path)?;
         session.writeChunk(content)?;
         session.commitFast()
+    }
+
+    /// Reads native file metadata without opening or hashing file contents.
+    fn modifiedAt(&self, path: &str) -> HostResult<i64> {
+        let resolved = self.resolveFile(path)?;
+        let time = fs::metadata(&resolved).and_then(|metadata| metadata.modified())
+            .map_err(|error| storageIoError("Read storage metadata", &resolved, error))?;
+        let elapsed = time.duration_since(std::time::UNIX_EPOCH).map_err(|e| HostError::new(e.to_string()))?;
+        i64::try_from(elapsed.as_micros()).map_err(|e| HostError::new(e.to_string()))
+    }
+
+    /// Preserves the source modification time on every native platform.
+    fn setModifiedAt(&self, path: &str, modifiedAt: i64) -> HostResult<()> {
+        let micros = u64::try_from(modifiedAt).map_err(|e| HostError::new(e.to_string()))?;
+        let file = fs::OpenOptions::new().write(true).open(self.resolveFile(path)?)?;
+        file.set_times(fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_micros(micros)))?;
+        Ok(())
     }
 
     /// Flushes and atomically replaces an identity-private catalog.
@@ -652,7 +684,7 @@ impl RuntimeStorageHost for NativeRuntimeStorageHost {
 
     fn delete(&self, path: &str, recursive: bool) -> HostResult<()> {
         let path = self.resolveFile(path)?;
-        if !path.exists() {
+        if !path.try_exists().map_err(|error| storageIoError("Inspect storage deletion target", &path, error))? {
             return Ok(());
         }
         if path.is_dir() {
@@ -669,61 +701,62 @@ impl RuntimeStorageHost for NativeRuntimeStorageHost {
 
     fn exists(&self, path: &str) -> HostResult<bool> {
         let resolved = self.resolve(path)?;
-        if normalizeStoragePath(path)?.first().map(String::as_str) == Some("workspaces") {
+        if self.managedRoot(path)?.is_some() {
             // A dangling link is still an occupied destination, never a new writable file.
-            return match fs::symlink_metadata(resolved) {
+            return match fs::symlink_metadata(&resolved) {
                 Ok(_) => Ok(true),
                 // A former descendant also ceases to exist when its parent
                 // directory has been replaced by a regular file.
                 Err(error) if matches!(error.kind(),
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
                 ) => Ok(false),
-                Err(error) => Err(error.into()),
+                Err(error) => Err(storageIoError("Inspect storage path", &resolved, error)),
             };
         }
-        Ok(resolved.exists())
+        resolved.try_exists().map_err(|error| storageIoError("Inspect storage path", &resolved, error))
     }
 
     fn list(&self, prefix: &str) -> HostResult<Vec<RuntimeStorageEntry>> {
         let directory = self.resolve(prefix)?;
         let mut entries = Vec::new();
-        let managedWorkspace = normalizeStoragePath(prefix)?.first().map(String::as_str)
-            == Some("workspaces");
-        if managedWorkspace {
+        let managedRoot = self.managedRoot(prefix)?;
+        let managedWorkspace = managedRoot.is_some();
+        if let Some(root) = managedRoot {
             // Never descend into links, even when a caller lists a linked directory directly.
             // The configured workspace root itself is trusted; only its descendants are scanned.
-            let relative = directory.strip_prefix(&self.workspaceRoot)
+            let relative = directory.strip_prefix(root)
                 .map_err(|_| HostError::new("Workspace listing escaped its root"))?;
-            let mut current = self.workspaceRoot.clone();
+            let mut current = root.to_path_buf();
             for component in relative.components() {
                 current.push(component);
                 match fs::symlink_metadata(&current) {
                     Ok(metadata) if isStorageLink(&metadata) => return Ok(entries),
                     Ok(_) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(entries),
-                    Err(error) => return Err(error.into()),
+                    Err(error) => return Err(storageIoError("Inspect storage directory", &current, error)),
                 }
             }
         }
-        if !directory.exists() {
+        if !directory.try_exists().map_err(|error| storageIoError("Inspect storage directory", &directory, error))? {
             return Ok(entries);
         }
-        for entry in fs::read_dir(directory)? {
-            let entry = entry?;
+        for entry in fs::read_dir(&directory).map_err(|error| storageIoError("List storage directory", &directory, error))? {
+            let entry = entry.map_err(|error| storageIoError("Read storage directory entry", &directory, error))?;
             // The atomic writer stages a private sibling until commit; a killed
             // process leaves it behind and no listing may ever publish it.
             if isPartialStagingFile(&entry.file_name().to_string_lossy()) {
                 continue;
             }
             let metadata = if managedWorkspace {
-                let metadata = fs::symlink_metadata(entry.path())?;
+                let metadata = fs::symlink_metadata(entry.path())
+                    .map_err(|error| storageIoError("Inspect storage entry", &entry.path(), error))?;
                 // Do not copy link targets or try reading sockets, devices and FIFOs as files.
                 if isStorageLink(&metadata) || (!metadata.is_dir() && !metadata.is_file()) {
                     continue;
                 }
                 metadata
             } else {
-                entry.metadata()?
+                entry.metadata().map_err(|error| storageIoError("Inspect storage entry", &entry.path(), error))?
             };
             entries.push(RuntimeStorageEntry {
                 path: self.storagePathForPhysical(&entry.path())?,
@@ -758,6 +791,14 @@ fn isStorageLink(metadata: &fs::Metadata) -> bool {
     }
     #[cfg(not(windows))]
     false
+}
+
+/// Publishes a closed staging file through the Host's platform-specific atomic replacement.
+#[allow(non_snake_case)]
+pub fn publishStagedFile(source: &Path, target: &Path, sync: bool) -> HostResult<()> {
+    atomicReplace(source, target)?;
+    if sync { syncParentDirectory(target)?; }
+    Ok(())
 }
 
 /// Persists the directory entry published by a durable write or journal append.
@@ -828,7 +869,7 @@ fn windowsExtendedPath(path: &Path) -> HostResult<PathBuf> {
     } else {
         std::env::current_dir()?.join(path)
     };
-    let text = absolute.to_string_lossy();
+    let text = absolute.to_string_lossy().replace('/', "\\");
     if text.starts_with(r"\\?\") || text.starts_with(r"\??\") {
         return Ok(absolute);
     }
@@ -861,6 +902,13 @@ fn legacySecurePath(runtimeRoot: &Path, segments: &[&str]) -> HostResult<PathBuf
         resolved.push(segment);
     }
     Ok(resolved)
+}
+
+/// Adds the physical operation path while preserving the system error classification.
+fn storageIoError(operation: &str, path: &Path, error: std::io::Error) -> HostError {
+    let mut error = HostError::from(error);
+    error.message = format!("{operation} {}: {}", path.display(), error.message);
+    error
 }
 
 /// Normalizes a runtime storage path into safe relative segments.
@@ -1168,36 +1216,40 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn workspace_listing_skips_file_directory_broken_and_cyclic_links() {
+    fn managed_file_listing_skips_file_directory_broken_and_cyclic_links() {
         use std::os::unix::fs::symlink;
-        let root = std::env::temp_dir().join(format!("operit-workspace-links-{}", uuid::Uuid::new_v4()));
-        let workspace = root.join("workspaces");
-        let body = workspace.join("project");
+        let root = std::env::temp_dir().join(format!("operit-managed-links-{}", uuid::Uuid::new_v4()));
         let outside = root.join("outside");
-        fs::create_dir_all(&body).unwrap();
         fs::create_dir_all(&outside).unwrap();
-        fs::write(body.join("normal.txt"), b"portable").unwrap();
         fs::write(outside.join("secret.txt"), b"local only").unwrap();
-        symlink(outside.join("secret.txt"), body.join("file-link")).unwrap();
-        symlink(&outside, body.join("directory-link")).unwrap();
-        symlink(&body, body.join("loop")).unwrap();
-        symlink(body.join("missing"), body.join("broken-link")).unwrap();
-        symlink(&outside, workspace.join("linked-workspace")).unwrap();
-        let host = NativeRuntimeStorageHost::new(root.join("runtime"), workspace);
-        let entries = host.list("workspaces/project").unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].path, "workspaces/project/normal.txt");
-        assert_eq!(host.list("workspaces").unwrap().len(), 1);
-        for path in ["workspaces/project/loop", "workspaces/project/loop/loop",
-            "workspaces/project/directory-link", "workspaces/linked-workspace"] {
-            assert!(host.list(path).unwrap().is_empty(), "{path}");
+        let host = NativeRuntimeStorageHost::new(root.join("runtime"), root.join("workspaces"));
+        for prefix in ["workspaces", "runtime/data/chat_outputs", "runtime/data/chat_attachments", "runtime/data/attachment_sources"] {
+            let managed = root.join(prefix);
+            let body = managed.join("project");
+            fs::create_dir_all(&body).unwrap();
+            fs::write(body.join("normal.txt"), b"portable").unwrap();
+            symlink(outside.join("secret.txt"), body.join("file-link")).unwrap();
+            symlink(&outside, body.join("directory-link")).unwrap();
+            symlink(&body, body.join("loop")).unwrap();
+            symlink(body.join("missing"), body.join("broken-link")).unwrap();
+            symlink(&outside, managed.join("linked-directory")).unwrap();
+            let entries = host.list(&format!("{prefix}/project")).unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].path, format!("{prefix}/project/normal.txt"));
+            assert_eq!(host.list(prefix).unwrap().len(), 1);
+            for suffix in ["project/loop", "project/loop/loop", "project/directory-link", "linked-directory"] {
+                let path = format!("{prefix}/{suffix}");
+                assert!(host.list(&path).unwrap().is_empty(), "{path}");
+            }
+            for suffix in ["project/file-link", "project/directory-link/new.txt", "project/broken-link"] {
+                assert!(host.writeBytes(&format!("{prefix}/{suffix}"), b"overwrite").is_err());
+            }
+            let link = format!("{prefix}/project/file-link");
+            assert!(host.readBytes(&link).is_err());
+            assert!(host.readBytesRange(&link, 0, 4).is_err());
+            assert!(!outside.join("new.txt").exists());
+            assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"local only");
         }
-        assert!(host.writeBytes("workspaces/project/file-link", b"overwrite").is_err());
-        assert!(host.writeBytes("workspaces/project/directory-link/new.txt", b"overwrite").is_err());
-        assert!(host.writeBytes("workspaces/project/broken-link", b"overwrite").is_err());
-        assert!(host.readBytes("workspaces/project/file-link").is_err());
-        assert!(!outside.join("new.txt").exists());
-        assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"local only");
         fs::remove_dir_all(root).unwrap();
     }
 

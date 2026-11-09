@@ -34,6 +34,8 @@ pub fn pluginSdkSurface() -> operit_plugin_sdk_ipc::PluginSdkSurface {
 pub struct LocalCoreProxy {
     peerServices: Arc<std::sync::OnceLock<operit_node_runtime::NodeServices::NodeServices>>,
     application: Arc<Mutex<OperitApplication>>,
+    // Factory access shares live services without contending with application calls.
+    applicationServices: Arc<OperitApplication>,
     applicationSharedClient: Arc<std::sync::Mutex<std::sync::Weak<LocalApplicationSharedClient<Self>>>>,
     // Retains the shared command view; its executor holds only a Weak reference.
     #[cfg(not(target_arch = "wasm32"))]
@@ -140,6 +142,7 @@ impl LocalCoreProxy {
             toolRuntimeSupport,
             deviceToolService,
             toolPkgShutdown,
+            applicationServices: Arc::new(application.sharedCoreCommandRuntime()),
             application: Arc::new(Mutex::new(application)),
             applicationSharedClient: Arc::new(std::sync::Mutex::new(std::sync::Weak::new())),
             #[cfg(not(target_arch = "wasm32"))]
@@ -330,7 +333,7 @@ impl CoreLinkSharedClient for LocalCoreProxy {
             request.requestId.0, request.target, request.propertyName
         );
         let (result, attachments) = operit_link::withCoreStreamCapture(
-            generated_dispatch_core_proxy_watch_snapshot_async(self, request),
+            operit_link::isolation::future(&context, generated_dispatch_core_proxy_watch_snapshot_async(self, request)),
         )
         .await;
         self.adoptCoreStreamAttachments(attachments);
@@ -348,7 +351,7 @@ impl CoreLinkSharedClient for LocalCoreProxy {
             "watch request={} object={} property={}",
             request.requestId.0, request.target, request.propertyName
         );
-        generated_dispatch_core_proxy_watch_async(self, request)
+        operit_link::isolation::future(&context, generated_dispatch_core_proxy_watch_async(self, request))
             .await
             .map_err(|mut error| {
                 error.message = format!("{} [{context}]", error.message);
@@ -421,9 +424,10 @@ impl LocalApplicationBridgeTarget for LocalCoreProxy {
 impl LocalCoreProxy {
     #[allow(non_snake_case)]
     async fn dispatchCall(&self, request: CoreCallRequest) -> Result<CoreValue, CoreLinkError> {
-        let (result, attachments) =
-            operit_link::withCoreStreamCapture(generated_dispatch_core_proxy_call(self, request))
-                .await;
+        let context = format!("Local request {}::{} [{}]", request.target, request.methodName, request.requestId.0);
+        let (result, attachments) = operit_link::withCoreStreamCapture(
+            operit_link::isolation::future(&context, generated_dispatch_core_proxy_call(self, request)),
+        ).await;
         self.adoptCoreStreamAttachments(attachments);
         result
     }
@@ -442,8 +446,9 @@ impl LocalCoreProxy {
 
     #[allow(non_snake_case)]
     fn dispatchWatchSnapshot(&self, request: CoreWatchRequest) -> Result<CoreEvent, CoreLinkError> {
+        let context = format!("Local watch snapshot {}::{} [{}]", request.target, request.propertyName, request.requestId.0);
         let (result, attachments) = operit_link::withCoreStreamCaptureSync(|| {
-            generated_dispatch_core_proxy_watch_snapshot(self, request)
+            operit_link::isolation::sync(&context, || generated_dispatch_core_proxy_watch_snapshot(self, request))
         });
         self.adoptCoreStreamAttachments(attachments);
         result
@@ -454,7 +459,8 @@ impl LocalCoreProxy {
         if request.target == operit_link::CORE_STREAM_TARGET {
             return self.openCoreStreamWatch(request);
         }
-        generated_dispatch_core_proxy_watch(self, request)
+        let context = format!("Local watch {}::{} [{}]", request.target, request.propertyName, request.requestId.0);
+        operit_link::isolation::sync(&context, || generated_dispatch_core_proxy_watch(self, request))
     }
 
     /// Transfers serialized stream sources into this proxy's owned pool.
@@ -486,9 +492,9 @@ mod tests {
     use operit_util::RuntimeStoreRoot::{setDefaultRuntimeStoreRootConfig, RuntimeStoreRootConfig};
     use std::collections::BTreeMap;
 
-    /// Verifies generated watch dispatch treats the protocol stream pool id as a stream source.
+    /// Keeps factory calls and watches independent of the application lock and stream pool.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn generated_async_watch_dispatch_opens_core_stream_pool() {
+    async fn generated_factories_ignore_application_lock_and_open_core_stream_pool() {
         let mut hostManager = HostManager::withFileSystemHost(Arc::new(PosixFileSystemHost::new()));
         let root = std::env::temp_dir().join(format!(
             "operit-proxy-local-generated-dispatch-{}",
@@ -514,25 +520,36 @@ mod tests {
             LocalCoreProxy::generatedTargetForSchema("application.packageManager")
                 .expect("package manager must be generated");
         let application_guard = proxy.application.lock().await;
-        let mut pending_watch = Box::pin(CoreLinkSharedClient::watch(
-            &proxy,
-            CoreWatchRequest::new(
-                "contended-package-watch",
-                package_manager_id,
-                "__test_missing_property",
-                CoreValue::Map(BTreeMap::new()),
-            ),
+        assert!(Arc::ptr_eq(
+            &proxy.applicationServices.packageManager(),
+            &application_guard.packageManager(),
         ));
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), &mut pending_watch)
+        let timeout = std::time::Duration::from_secs(2);
+        for (method, args) in [
+            ("getToolPkgNavigationEntries", serde_json::json!({"useEnglish": false})),
+            ("getToolPkgUiRoutes", serde_json::json!({"useEnglish": false, "runtime": "compose_dsl"})),
+        ] {
+            let request = CoreCallRequest::new(
+                method, package_manager_id, method, operit_link::toCoreValue(args).unwrap(),
+            );
+            let response = tokio::time::timeout(timeout, CoreLinkSharedClient::call(&proxy, request))
                 .await
-                .is_err(),
-            "an async factory watch must wait instead of returning Application is busy"
-        );
+                .expect("sidebar catalog calls must not wait for the application lock");
+            assert!(response.result.is_ok(), "{response:?}");
+        }
+        let watch_result = tokio::time::timeout(
+            timeout,
+            CoreLinkSharedClient::watch(
+                &proxy,
+                CoreWatchRequest::new(
+                    "contended-package-watch",
+                    package_manager_id,
+                    "__test_missing_property",
+                    CoreValue::Map(BTreeMap::new()),
+                ),
+            ),
+        ).await.expect("factory watches must not wait for the application lock");
         drop(application_guard);
-        let watch_result = tokio::time::timeout(std::time::Duration::from_secs(2), pending_watch)
-            .await
-            .expect("watch must resume after the parent lock is released");
         let error = match watch_result {
             Err(error) => error,
             Ok(_) => panic!("unknown property must fail after resolving the factory"),

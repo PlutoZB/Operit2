@@ -304,7 +304,7 @@ fn legacy_workspace_aliases_share_real_workspace_ids() {
         assert_eq!(archive.chats.len(), paths.len());
         let workspace = &archive.workspaces[0];
         assert_eq!(workspace.name, "demo");
-        assert_eq!(workspace.primaryFolder().path, "/app/workspaces/demo");
+        assert_eq!(workspace.primaryFolder().path, "/operitapp/workspaces/demo");
         workspace.validate().unwrap();
         for chat in &archive.chats[..4] {
             assert_eq!(chat.workspaceId.as_deref(), Some(workspace.id.as_str()));
@@ -313,7 +313,7 @@ fn legacy_workspace_aliases_share_real_workspace_ids() {
         assert_ne!(archive.chats[4].workspaceId, archive.chats[0].workspaceId);
         assert_eq!(
             archive.workspaces[1].primaryFolder().path,
-            "/app/workspaces/other"
+            "/operitapp/workspaces/other"
         );
     }
 }
@@ -838,6 +838,40 @@ fn memory_settings_xml_retains_declared_preferences() {
     assert_eq!(settings.cloudEmbeddingModel, "source-model");
     assert_eq!(search.scoreMode, crate::data::backup::CharacterPluginLegacyData::MemoryScoreMode::SEMANTIC_FIRST);
     assert_eq!(search.vectorWeight, 3.5);
+}
+
+/// Distinguishes real forward relations from link indexes and preserves every native ID width.
+#[test]
+fn objectbox_keys_decode_relations_without_adopting_indexes() {
+    for (key, kind, model, ids) in [
+        (vec![0x18,0,0,0x10,0,0,0,85], 6, 4, vec![85]),
+        (vec![0x18,0,0,0x11,0,0x20,0,0,0,0,0,1], 6, 4, vec![9007199254740993]),
+        (vec![8,0,0,0x1c,0,0,0,1,0,0,0,85], 2, 7, vec![1,85]),
+        (vec![8,0,0,0x20,0,0,0,1,0,0,0,85], 2, 8, vec![1,85]),
+        (vec![8,0,0,0x20,0,0,0,1,0,0x20,0,0,0,0,0,1], 2, 8, vec![1,9007199254740993]),
+        (vec![8,0,0,0x21,0,0x20,0,0,0,0,0,1,0,0,0,85], 2, 8, vec![9007199254740993,85]),
+        (vec![8,0,0,0x21,0,0x20,0,0,0,0,0,1,0x7f,0xff,0xff,0xff,0xff,0xff,0xff,0xff], 2, 8, vec![9007199254740993,i64::MAX]),
+    ] {
+        assert_eq!(decodeOperit1ObjectBoxKey(&key).unwrap(), Some((kind,model,ids)));
+        assert!(decodeOperit1ObjectBoxKey(&key[..key.len()-1]).is_err());
+    }
+    // These exact index keys previously attached link ID 85 as a tag/property ID.
+    for key in [
+        vec![0x20,0,0,0x20,0,0,0,0,0,0,0,1,0,0,0,85],
+        vec![0x20,0,0,0x24,0,0,0,0,0,0,0,1,0,0,0,85],
+        vec![8,0,0,0x22,0,0,0,85,0,0,0,1],
+        vec![8,0,0,0x23,0,0,0,0,0,0,0,85,0,0,0,1],
+        vec![], vec![1,2,3],
+    ] {
+        assert_eq!(decodeOperit1ObjectBoxKey(&key).unwrap(), None);
+    }
+    for key in [
+        vec![8,0,0,0x20,0,0,0,0,0,0,0,85],
+        vec![8,0,0,0x20,0,0,0,1,0,0,0,0],
+        vec![0x18,0,0,0x11,0x80,0,0,0,0,0,0,0],
+    ] {
+        assert!(decodeOperit1ObjectBoxKey(&key).is_err());
+    }
 }
 
 /// Tests the real binary table reader's int64 fields, encoded scalar zeros and corrupt offsets.

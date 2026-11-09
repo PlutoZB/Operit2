@@ -15,6 +15,16 @@ pub struct VisualFileSystem {
 }
 
 impl VisualFileSystem {
+    /// Binds a VFS to one runtime's storage roots and registered mounts.
+    #[allow(non_snake_case)]
+    pub fn fromContext(context: &operit_host_api::HostManager::HostManager) -> Result<Self, String> {
+        let storage = context.runtimeStorageHost.clone().ok_or("RuntimeStorageHost is required for VFS")?;
+        let runtimeRoot = storage.runtimeRootDir().ok_or("Runtime storage root is unavailable")?;
+        let workspaceRoot = storage.workspaceRootDir().ok_or("Workspace storage root is unavailable")?;
+        let host = context.fileSystemHost.clone().ok_or("FileSystemHost is required for VFS")?;
+        Ok(Self::new(host, PathMapper::new(runtimeRoot, workspaceRoot, storage)))
+    }
+
     /// Creates a VFS wrapper around a host file system and path mapper.
     pub fn new(host: Arc<dyn FileSystemHost>, mapper: PathMapper) -> Self {
         Self { host, mapper }
@@ -36,7 +46,7 @@ impl VisualFileSystem {
     pub fn listFiles(&self, path: &str) -> Result<Vec<FileEntry>, String> {
         if let Some(mut entries) = self.mapper.virtualDirectoryEntries(path)? {
             // Registered namespaces may overlay a built-in native directory
-            // (e.g. /mnt/macos/bookmarks). Keep its accessible native children.
+            // (e.g. /virtual/macos/bookmarks). Keep its accessible native children.
             if let Ok(resolved) = self.resolvePath(path) {
                 if resolved.nativePath().is_ok() {
                     if let Ok(nativeEntries) = self.host.listFiles(&resolved.physicalPath) {
@@ -294,34 +304,96 @@ mod tests {
         (vfs, root)
     }
 
+    #[test]
+    fn resource_inputs_keep_vfs_native_and_relative_compatibility() {
+        let (vfs, root) = vfs();
+        vfs.makeDirectory("/operitapp/data/uploads", true).unwrap();
+        vfs.writeFile("/operitapp/data/uploads/input.txt", "through VFS", false).unwrap();
+        for input in ["/operitapp/data/uploads/input.txt", "/app/data/uploads/input.txt", "input.txt", "./input.txt", "../uploads/input.txt"] {
+            let path = PathMapper::resolveFileResourcePath(Some("/operitapp/data/uploads"), input).unwrap();
+            assert_eq!(vfs.readFile(&path).unwrap(), "through VFS", "{input}");
+        }
+        let native = root.join("uploads/input.txt").to_string_lossy().into_owned();
+        let path = PathMapper::resolveFileResourcePath(None, &native).unwrap();
+        assert_eq!(vfs.readFile(&path).unwrap(), "through VFS");
+        assert_eq!(PathMapper::resolveFileResourcePath(None, "/").unwrap(), "/");
+        assert!(!vfs.listFiles("/").unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn both_root_mounts_share_files_and_preserve_result_paths() {
+        let (vfs, root) = vfs();
+        vfs.makeDirectory("/app/workspaces/demo", true).unwrap();
+        vfs.writeFile("/app/workspaces/demo/file.txt", "shared", false).unwrap();
+        assert_eq!(vfs.readFile("/operitapp/workspaces/demo/file.txt").unwrap(), "shared");
+        vfs.writeFile("/operitapp/workspaces/demo/file.txt", "updated", false).unwrap();
+        assert_eq!(vfs.readFile("/app/workspaces/demo/file.txt").unwrap(), "updated");
+        for base in ["/app", "/operitapp"] {
+            let path = format!("{base}/workspaces/demo/file.txt");
+            assert_eq!(vfs.fileInfo(&path).unwrap().path, path);
+            assert_eq!(vfs.fileInfo(base).unwrap().path, base);
+        }
+        let names: Vec<_> = vfs.listFiles("/").unwrap().into_iter().map(|entry| entry.name).collect();
+        assert!(names.iter().any(|name| name == "operitapp"));
+        assert!(!names.iter().any(|name| matches!(name.as_str(), "app" | "mnt" | "sdcard" | "data")));
+        assert_eq!(vfs.listFiles("/app").unwrap(), vfs.listFiles("/operitapp").unwrap());
+        let registry = super::super::MountRegistry::MountRegistry::withStorage(Arc::new(
+            NativeRuntimeStorageHost::new(root.clone(), root.join("workspaces")),
+        ));
+        // Either registry spelling must appear in both directory trees.
+        for namespace in ["/mnt/test/folders", "/virtual/test/other"] {
+            let mount = registry.register(namespace, "native", root.to_str().unwrap(), "Shared").unwrap();
+            assert!(mount.vfsPath().starts_with(namespace));
+            let names: Vec<_> = vfs.listFiles("/").unwrap().into_iter().map(|entry| entry.name).collect();
+            assert!(names.iter().any(|name| name == "virtual"));
+            assert!(!names.iter().any(|name| name == "mnt" || name == "app"));
+            let relative = super::super::MountRegistry::mountRelativePath(&mount.vfsPath()).unwrap().to_string();
+            let first = format!("/mnt/{relative}/mounted.txt");
+            let second = format!("/virtual/{relative}/mounted.txt");
+            vfs.writeFile(&first, "mounted", false).unwrap();
+            assert_eq!(vfs.readFile(&second).unwrap(), "mounted");
+            vfs.writeFile(&second, "changed", false).unwrap();
+            assert_eq!(vfs.readFile(&first).unwrap(), "changed");
+            for path in [&first, &second] {
+                assert_eq!(vfs.fileInfo(path).unwrap().path, *path);
+            }
+            assert_eq!(vfs.listFiles("/mnt/test").unwrap(), vfs.listFiles("/virtual/test").unwrap());
+            registry.remove(&format!("/virtual/{relative}")).unwrap();
+        }
+        assert_eq!(vfs.listFiles("/mnt").unwrap(), vfs.listFiles("/virtual").unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+
     /// move/copy/file_info resolve VFS paths to the workspace collection root
     /// and keep echoing VFS paths in metadata.
     #[test]
     fn moveCopyFileInfoRoundTripThroughVfsWorkspacePaths() {
         let (vfs, root) = vfs();
-        vfs.makeDirectory("/app/workspaces/ws-a", true).unwrap();
-        vfs.writeFile("/app/workspaces/ws-a/src.txt", "hello vfs", false).unwrap();
+        vfs.makeDirectory("/operitapp/workspaces/ws-a", true).unwrap();
+        vfs.writeFile("/operitapp/workspaces/ws-a/src.txt", "hello vfs", false).unwrap();
 
-        let info = vfs.fileInfo("/app/workspaces/ws-a/src.txt").unwrap();
+        let info = vfs.fileInfo("/operitapp/workspaces/ws-a/src.txt").unwrap();
         assert!(info.exists);
-        assert_eq!(info.path, "/app/workspaces/ws-a/src.txt");
+        assert_eq!(info.path, "/operitapp/workspaces/ws-a/src.txt");
         assert_eq!(info.size, "hello vfs".len() as i64);
 
-        vfs.copyFile("/app/workspaces/ws-a/src.txt", "/app/workspaces/ws-a/copy.txt", false)
+        vfs.copyFile("/operitapp/workspaces/ws-a/src.txt", "/operitapp/workspaces/ws-a/copy.txt", false)
             .unwrap();
-        assert_eq!(vfs.readFile("/app/workspaces/ws-a/copy.txt").unwrap(), "hello vfs");
+        assert_eq!(vfs.readFile("/operitapp/workspaces/ws-a/copy.txt").unwrap(), "hello vfs");
 
-        vfs.moveFile("/app/workspaces/ws-a/src.txt", "/app/workspaces/ws-a/renamed.txt")
+        vfs.moveFile("/operitapp/workspaces/ws-a/src.txt", "/operitapp/workspaces/ws-a/renamed.txt")
             .unwrap();
-        assert!(!vfs.fileExists("/app/workspaces/ws-a/src.txt").unwrap().exists);
-        assert_eq!(vfs.readFile("/app/workspaces/ws-a/renamed.txt").unwrap(), "hello vfs");
+        assert!(!vfs.fileExists("/operitapp/workspaces/ws-a/src.txt").unwrap().exists);
+        assert_eq!(vfs.readFile("/operitapp/workspaces/ws-a/renamed.txt").unwrap(), "hello vfs");
 
-        let dirInfo = vfs.fileInfo("/app/workspaces/ws-a").unwrap();
+        let dirInfo = vfs.fileInfo("/operitapp/workspaces/ws-a").unwrap();
         assert!(dirInfo.exists && dirInfo.fileType == "directory");
 
-        let virtualInfo = vfs.fileInfo("/app/workspaces").unwrap();
+        let virtualInfo = vfs.fileInfo("/operitapp/workspaces").unwrap();
         assert!(virtualInfo.exists && virtualInfo.fileType == "directory");
-        assert_eq!(virtualInfo.path, "/app/workspaces");
+        assert_eq!(virtualInfo.path, "/operitapp/workspaces");
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -331,12 +403,12 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn fileInfoResolvesThroughTheLinuxMountRoot() {
         let (vfs, root) = vfs();
-        // Address the real temp directory through the /mnt/linux mount root so
+        // Address the real temp directory through the /virtual/linux mount root so
         // the physical target stays writable regardless of the active TMPDIR.
         // Some sandboxes refuse file creation directly inside the temp root,
         // so keep the marker inside a directory the host can create.
         let marker = format!(
-            "/mnt/linux{}",
+            "/virtual/linux{}",
             std::env::temp_dir()
                 .join(format!("operit-vfs-check-{}", uuid::Uuid::new_v4()))
                 .join("marker.txt")

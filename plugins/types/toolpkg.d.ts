@@ -9,6 +9,8 @@ export namespace ToolPkg {
   export const ipc: IpcApi;
   /** Exposes the host registry WASM service. */
   export const wasm: WasmApi;
+  /** Groups runtime presentation services for plugin-owned user interfaces. */
+  export const ui: UiApi;
   /**
    * Stores localized strings keyed by language tag.
    */
@@ -2757,7 +2759,7 @@ export namespace ToolPkg {
   /**
    * Enumerates supported navigation surface values.
    */
-  export type NavigationSurface = "toolbox" | "main_sidebar_plugins" | "app_bar" | "chat_attachments" | "chat_sidebar_tabs" | "chat_input_menu" | "chat_input_menu_sections";
+  export type NavigationSurface = "toolbox" | "main_sidebar_plugins" | "app_bar" | "chat_attachments" | "chat_sidebar_tabs" | "chat_input_menu" | "chat_input_menu_sections" | "chat_message_after" | "workspace" | "workspace_home";
 
   /**
    * Describes a plugin action exposed through a host navigation surface.
@@ -2768,8 +2770,8 @@ export namespace ToolPkg {
      */
     id: string;
     /**
-     * Provides this package's registered UI route; required for chat_attachments, chat_sidebar_tabs, chat_input_menu and chat_input_menu_sections.
-     * Embedded sidebar and input-menu surfaces require one owned Compose DSL route registered before the navigation entry.
+     * Provides this package's registered UI route; required for attachment and embedded UI surfaces.
+     * Embedded surfaces require one owned Compose DSL route registered before the navigation entry.
      */
     route?: string;
     /**
@@ -2781,7 +2783,7 @@ export namespace ToolPkg {
      */
     surface: NavigationSurface;
     /**
-     * Supplies navigation callbacks on other surfaces; action is unsupported for chat_attachments, chat_sidebar_tabs, chat_input_menu and chat_input_menu_sections.
+     * Supplies navigation callbacks on other surfaces; attachment and embedded UI surfaces require routes instead.
      */
     action?: NavigationEntryActionHookHandler;
     /**
@@ -3910,11 +3912,49 @@ export namespace ToolPkg {
   }
 
   /**
+   * Owns a persistent WASM instance in the current JavaScript realm.
+   */
+  export interface WasmInstance {
+    /**
+     * Calls a declared export without crossing the host bridge; i64 results use decimal strings.
+     */
+    call(exportName: string, args?: WasmArg[]): WasmScalarValue;
+    /**
+     * Returns a live byte view; obtain a fresh view after growing WASM memory.
+     */
+    memory(memoryName?: string): Uint8Array;
+    /**
+     * Copies a bounded memory range into an independent byte array.
+     */
+    readMemory(offset: number, length: number, memoryName?: string): Uint8Array;
+    /**
+     * Copies a byte batch into bounded linear memory.
+     */
+    writeMemory(offset: number, bytes: Uint8Array, memoryName?: string): void;
+    /**
+     * Releases this handle; later calls fail explicitly.
+     */
+    close(): void;
+  }
+
+  /**
    * Represents the WASM API exposed on a ToolPkg registry.
    */
   export interface WasmApi {
     /**
-     * Calls one WASM export and resolves with its scalar result.
+     * Reads declared module bytes for a library's own WASM loader.
+     */
+    read(moduleId: string): Promise<Uint8Array>;
+    /**
+     * Creates an independent instance using a realm-cached compiled module and optional JS imports.
+     */
+    open(moduleId: string, imports?: object): Promise<WasmInstance>;
+    /**
+     * Evicts module bytes and the default scalar instance; explicit instances remain owned by their callers.
+     */
+    unload(moduleId: string): void;
+    /**
+     * Calls a declared export on the module's persistent default instance.
      */
     call(moduleId: string, exportName: string, args?: WasmArg[]): Promise<WasmScalarValue>;
   }
@@ -3948,9 +3988,149 @@ export namespace ToolPkg {
   }
 
   /**
-   * Provides IPC and registration services for the current ToolPkg package.
+   * Window geometry in logical pixels; position uses the host desktop's top-left origin.
+   */
+  export interface FloatingWindowOptions {
+    /**
+     * Sets the left coordinate, when positioning is supported.
+     */
+    x?: number;
+    /**
+     * Sets the top coordinate, when positioning is supported.
+     */
+    y?: number;
+    /**
+     * Sets content width (16 through 4096 logical pixels).
+     */
+    width?: number;
+    /**
+     * Sets content height (16 through 4096 logical pixels).
+     */
+    height?: number;
+    /**
+     * Keeps the surface above ordinary application windows; defaults to true.
+     */
+    alwaysOnTop?: boolean;
+    /**
+     * Passes pointer input through the entire surface; defaults to false.
+     */
+    clickThrough?: boolean;
+    /**
+     * Allows the surface to accept keyboard focus; defaults to false.
+     */
+    focusable?: boolean;
+    /**
+     * Moves directly in the host using pointer-down screen/window anchors; defaults to false.
+     */
+    draggable?: boolean;
+  }
+
+  /**
+   * Opens a transparent live UI surface owned by the executing plugin.
+   */
+  export interface FloatingWindowOpenOptions {
+    /**
+     * Identifies the window within this plugin; opening an existing ID fails.
+     */
+    id: string;
+    /**
+     * Selects one of this plugin's registered Compose UI routes.
+     */
+    route: string;
+    /**
+     * Supplies the UI session's initial state.
+     */
+    state?: JsonObject;
+    /**
+     * Configures geometry and interaction flags.
+     */
+    options?: FloatingWindowOptions;
+  }
+
+  /**
+   * Reports the actual presentation scope and host capabilities.
+   */
+  export interface FloatingWindowCapabilities {
+    /**
+     * "system", "application", or "unsupported". Application scope stays inside Operit.
+     */
+    scope: string;
+    systemOverlay: boolean;
+    applicationOverlay: boolean;
+    supported: boolean;
+    permissionGranted: boolean;
+    positioning: boolean;
+    alwaysOnTop: boolean;
+    clickThrough: boolean;
+    focusable: boolean;
+  }
+
+  /**
+   * Describes a live window owned by the executing plugin.
+   */
+  export interface FloatingWindowInfo {
+    id: string;
+    route: string;
+    visible: boolean;
+    options: FloatingWindowOptions;
+  }
+
+  /**
+   * Controls general floating windows independently of launcher widgets.
+   */
+  export interface FloatingWindowApi {
+    /**
+     * Queries capabilities without opening a window or displaying a permission prompt.
+     */
+    capabilities(): Promise<FloatingWindowCapabilities>;
+    /**
+     * Opens the host's overlay permission settings when required; query capabilities again afterwards.
+     */
+    requestPermission(): Promise<boolean>;
+    /**
+     * Creates a transparent live route session. IDs are local to the executing plugin.
+     */
+    open(options: FloatingWindowOpenOptions): Promise<FloatingWindowInfo>;
+    /**
+     * Applies partial window options and shallow-merges optional UI state without recreating the session.
+     */
+    update(id: string, options: FloatingWindowOptions, state?: JsonObject): Promise<FloatingWindowInfo>;
+    /**
+     * Shows an owned window without resetting its UI session.
+     */
+    show(id: string): Promise<FloatingWindowInfo>;
+    /**
+     * Hides an owned window while retaining its UI session.
+     */
+    hide(id: string): Promise<FloatingWindowInfo>;
+    /**
+     * Closes an owned window and releases its UI session and engine.
+     */
+    close(id: string): Promise<void>;
+    /**
+     * Lists only the executing plugin's live windows.
+     */
+    list(): Promise<FloatingWindowInfo[]>;
+  }
+
+  /**
+   * Groups runtime presentation services for plugin-owned user interfaces.
+   */
+  export interface UiApi {
+    /**
+     * Controls live floating windows independently of launcher widgets.
+     */
+    floatingWindows: FloatingWindowApi;
+  }
+
+  /**
+   * Provides runtime and registration services for the current ToolPkg package.
    */
   export interface Registry {
+    /**
+     * Groups runtime presentation services for plugin-owned user interfaces.
+     */
+    ui: UiApi;
     /**
      * Exposes inter-context messaging for this ToolPkg registry.
      */

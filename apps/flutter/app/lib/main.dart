@@ -4,8 +4,11 @@ import 'dart:ui' show PlatformDispatcher;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:desktop_widgets/desktop_widgets.dart';
+import 'package:floating_windows/floating_windows.dart';
+import 'package:fvp/fvp.dart' as fvp;
 import 'package:operit_keep_alive/operit_keep_alive.dart';
-import 'package:operit_ui/operit_ui.dart' show prepareLiquidGlass;
+import 'package:operit_ui/operit_ui.dart'
+    show prepareLiquidGlass, OperitDesignCaptureScope;
 
 import 'core/application/CoreApplicationService.dart';
 import 'core/bridge/PlatformCoreProxy.dart';
@@ -18,6 +21,7 @@ import 'ui/features/packages/screens/GitHubOAuthLoginCallback.dart';
 import 'ui/main/OperitApp.dart';
 import 'ui/window/DetachedChatWindowApp.dart';
 import 'ui/window/DesktopWidgetWindowApp.dart';
+import 'ui/window/FloatingWindowApp.dart';
 import 'ui/window/OperitWindowArguments.dart';
 import 'ui/window/OperitWindowPlatform.dart';
 
@@ -36,6 +40,7 @@ void main(List<String> arguments) async {
       final launch =
           await platformCoreProxy.dataRescue({'operation': 'launchMode'})
               as Map;
+      final clientOnly = launch['clientOnly'] == true;
       if (isDataRescueLaunch(
         arguments: arguments,
         route: PlatformDispatcher.instance.defaultRouteName,
@@ -43,15 +48,18 @@ void main(List<String> arguments) async {
         hostRequested: launch['rescue'] == true,
       )) {
         runApp(
-          DataRescueApp(
-            canStopNormalProcess: launch['canStopNormalProcess'] == true,
+          OperitDesignCaptureScope(
+            name: 'Operit Data Rescue',
+            child: DataRescueApp(
+              canStopNormalProcess: launch['canStopNormalProcess'] == true,
+            ),
           ),
         );
         applicationStarted = true;
         return;
       }
+      fvp.registerWith();
       await platformCoreProxy.dataRescue({'operation': 'runtimeLease'});
-      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
       consumeGitHubOAuthWebCallbackAtStartup();
       final bindingElapsedMs = bindingStopwatch.elapsedMilliseconds;
       final loggerStopwatch = Stopwatch()..start();
@@ -73,7 +81,10 @@ void main(List<String> arguments) async {
         tag: _appStartupLogTag,
         verboseLevel: VerboseLevel.level1,
       );
-      final startsDetachedChatWindow = _startsDetachedChatWindow(arguments);
+      final startsDetachedChatWindow =
+          _startsDetachedChatWindow(arguments) ||
+          FloatingWindows.parseLaunch(arguments) != null ||
+          DesktopWidgets.parseLaunch(arguments) != null;
       if (startsDetachedChatWindow) {
         ClientLogger.v(
           'skip process-owned startup for detached chat window',
@@ -103,44 +114,65 @@ void main(List<String> arguments) async {
         tag: _appStartupLogTag,
         verboseLevel: VerboseLevel.level1,
       );
-      await DesktopWidgets.run(
+      await FloatingWindows.run(
         arguments: arguments,
-        widgetBuilder: (launch) {
+        windowBuilder: (launch) {
           applicationStarted = true;
-          return DesktopWidgetWindowApp(launch: launch);
+          return FloatingWindowApp(launch: launch);
         },
         application: () async {
-          final windowStopwatch = Stopwatch()..start();
-          final windowArguments = await readOperitWindowArguments();
-          ClientLogger.v(
-            'window arguments read type=${windowArguments.runtimeType} elapsedMs=${windowStopwatch.elapsedMilliseconds}',
-            tag: _appStartupLogTag,
-            verboseLevel: VerboseLevel.level1,
-          );
-          switch (windowArguments) {
-            case MainWindowArguments():
-              await OperitKeepAlive.instance.initialize(
-                const KeepAliveOptions(
-                  applicationName: 'Operit2',
-                  androidServiceClassName: 'app.operit.OperitCoreService',
-                  openLabel: '打开 Operit2',
-                  exitLabel: '退出 Operit2',
-                  quitMessage: '退出将停止后台任务。确定退出 Operit2？',
-                ),
+          await DesktopWidgets.run(
+            arguments: arguments,
+            widgetBuilder: (launch) {
+              applicationStarted = true;
+              return OperitDesignCaptureScope(
+                name: 'Operit Desktop Widget',
+                child: DesktopWidgetWindowApp(launch: launch),
               );
-              final coreStopwatch = Stopwatch()..start();
-              CoreApplicationService.instance.initialize();
+            },
+            application: () async {
+              final windowStopwatch = Stopwatch()..start();
+              final windowArguments = await readOperitWindowArguments();
               ClientLogger.v(
-                'core application initialize dispatched elapsedMs=${coreStopwatch.elapsedMilliseconds}',
+                'window arguments read type=${windowArguments.runtimeType} elapsedMs=${windowStopwatch.elapsedMilliseconds}',
                 tag: _appStartupLogTag,
                 verboseLevel: VerboseLevel.level1,
               );
-              _runMainWindow();
-              applicationStarted = true;
-            case final DetachedChatWindowArguments detachedArguments:
-              _runDetachedChatWindow(detachedArguments);
-              applicationStarted = true;
-          }
+              switch (windowArguments) {
+                case MainWindowArguments():
+                  // Only the main window owns Android's Activity platform handler.
+                  // Overlay engines cannot complete SystemChrome requests.
+                  await SystemChrome.setEnabledSystemUIMode(
+                    SystemUiMode.edgeToEdge,
+                  );
+                  if (!clientOnly) {
+                    await OperitKeepAlive.instance.initialize(
+                      const KeepAliveOptions(
+                        applicationName: 'Operit2',
+                        androidServiceClassName: 'app.operit.OperitCoreService',
+                        openLabel: '打开 Operit2',
+                        exitLabel: '退出 Operit2',
+                        quitMessage: '退出将停止后台任务。确定退出 Operit2？',
+                      ),
+                    );
+                  }
+                  final coreStopwatch = Stopwatch()..start();
+                  CoreApplicationService.instance.initialize(
+                    ownsRuntime: !clientOnly,
+                  );
+                  ClientLogger.v(
+                    'core application initialize dispatched elapsedMs=${coreStopwatch.elapsedMilliseconds}',
+                    tag: _appStartupLogTag,
+                    verboseLevel: VerboseLevel.level1,
+                  );
+                  _runMainWindow();
+                  applicationStarted = true;
+                case final DetachedChatWindowArguments detachedArguments:
+                  _runDetachedChatWindow(detachedArguments);
+                  applicationStarted = true;
+              }
+            },
+          );
         },
       );
       ClientLogger.i(
@@ -164,7 +196,12 @@ void main(List<String> arguments) async {
           stackTrace: stackTrace,
         );
         if (!applicationStarted) {
-          runApp(const StartupErrorApplication());
+          runApp(
+            const OperitDesignCaptureScope(
+              name: 'Operit Startup Error',
+              child: StartupErrorApplication(),
+            ),
+          );
         }
       });
     },
@@ -191,7 +228,12 @@ void _runMainWindow() {
     tag: _appStartupLogTag,
     verboseLevel: VerboseLevel.level1,
   );
-  runApp(const OperitApp());
+  runApp(
+    FloatingWindowsHost(
+      windowBuilder: (launch) => FloatingWindowApp(launch: launch),
+      child: const OperitDesignCaptureScope(child: OperitApp()),
+    ),
+  );
 }
 
 /// Starts a detached chat window after runtime configuration is loaded.
@@ -201,7 +243,12 @@ void _runDetachedChatWindow(DetachedChatWindowArguments arguments) {
     tag: _appStartupLogTag,
     verboseLevel: VerboseLevel.level1,
   );
-  runApp(DetachedChatWindowApp(arguments: arguments));
+  runApp(
+    OperitDesignCaptureScope(
+      name: 'Operit Detached Chat',
+      child: DetachedChatWindowApp(arguments: arguments),
+    ),
+  );
 }
 
 /// Routes Flutter framework diagnostics through the client logger.

@@ -93,7 +93,10 @@ extension _ComposeRendererSlots on _ComposeProgramExecutorState {
   );
 
   /// Resolves slot nodes for the Compose DSL renderer.
-  List<_ComposeProgramNode> _slotNodes(String name, {bool useChildren = false}) {
+  List<_ComposeProgramNode> _slotNodes(
+    String name, {
+    bool useChildren = false,
+  }) {
     final slot = node.slots[name];
     return slot != null && slot.isNotEmpty
         ? slot
@@ -127,18 +130,17 @@ extension _ComposeRendererSlots on _ComposeProgramExecutorState {
         .toList(growable: false);
   }
 
-  /// Applies implicit text flex only to bounded rows without explicit weights.
+  /// Uses loose text flex so rows shrink-wrap unbounded axes and support intrinsic measurement.
   List<Widget> _buildRowChildren(
     List<_ComposeProgramNode> nodes, {
     required String pathPrefix,
-    required bool boundedWidth,
   }) {
     final widgets = _buildNodeWidgets(
       nodes,
       pathPrefix: pathPrefix,
       modifierScope: _ComposeDslModifierScope.row,
     );
-    if (!boundedWidth || _nodesRequireRowFlex(nodes)) {
+    if (_nodesRequireRowFlex(nodes)) {
       return widgets;
     }
     return nodes
@@ -341,11 +343,12 @@ extension _ComposeRendererSlots on _ComposeProgramExecutorState {
         source: source,
         fit: fit,
         hostContext: webViewHostContext,
+        animationKey: props['animationKey'] is String
+            ? props['animationKey'] as String
+            : null,
       );
     } else {
-      final iconName = _string(
-        props['name'] ?? props['icon'] ?? 'info',
-      );
+      final iconName = _string(props['name'] ?? props['icon'] ?? 'info');
       child = Icon(
         _iconData(iconName),
         color: _color(context, props['tint']),

@@ -1,5 +1,8 @@
 #![allow(non_snake_case)]
 
+#[cfg(feature = "app-install")]
+pub mod AppInstaller;
+
 pub mod DartPort;
 pub mod SharedBuffer;
 
@@ -18,7 +21,7 @@ mod SerialPort;
 pub use SerialPort::NativeSerialPortHost;
 
 #[cfg(feature = "fs")]
-pub use operit_host_native_filesystem::PosixFileSystemHost;
+pub use operit_host_native_filesystem::{NativeFileAppendHandle, PosixFileSystemHost};
 #[cfg(feature = "http")]
 pub use operit_host_native_http::{NativeHttpHost, NativeHttpServerHost};
 #[cfg(all(feature = "scheduler", not(target_arch = "wasm32")))]

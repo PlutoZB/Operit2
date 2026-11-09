@@ -210,7 +210,7 @@ fn generate_declaration_file(
         source: if spec.ts_file == "toolpkg.d.ts" {
             format!("{}\nimport {{ ToolPkg as ToolPkgRuntime }} from \"./toolpkg\";\ndeclare global {{ export import ToolPkg = ToolPkgRuntime; }}\n", context.emit())
         } else if spec.ts_file == "storage.d.ts" {
-            format!("{}\nexport type {{ StorageRequest, StorageTable, StorageSqlValue, StorageMergeDescriptor, StorageKind, StorageColumn, StorageColumnType, StorageMutation, StorageStatement, StorageMergeEntity, StorageMergeReference, StorageMergeTarget, StorageMergeKeyEncoding, StoragePreferencesMergeDescriptor, StoragePreferencesMergeCatalog, StoragePreferencesMergeReference, StoragePreferencesMergeKey, StoragePreferencesMergePathSegment, StoragePreferencesMergeProjection }} from \"./storage.generated\";\n", context.emit())
+            format!("{}\nexport type {{ StorageRequest, StorageTable, StorageSqlValue, StorageMergeDescriptor, StorageKind, StorageColumn, StorageColumnType, StorageMutation, StorageStatement, StorageMergeEntity, StorageMergeReference, StorageMergeTarget, StorageMergeKeyEncoding, StoragePreferencesMergeDescriptor, StoragePreferencesMergeCatalog, StoragePreferencesMergeReference, StoragePreferencesMergeKey, StoragePreferencesMergePathSegment, StoragePreferencesMergeProjection, StoragePreferencesSchema, StoragePreferencesMigrationRule }} from \"./storage.generated\";\n", context.emit())
         } else { context.emit() },
     }
 }
@@ -390,6 +390,7 @@ impl<'a> EmitContext<'a> {
         if self.current_file == "toolpkg.d.ts" && scope == ["ToolPkg"] {
             output.push_str(&format!("{indent}/** Exposes the host registry IPC service. */\n{indent}export const ipc: IpcApi;\n"));
             output.push_str(&format!("{indent}/** Exposes the host registry WASM service. */\n{indent}export const wasm: WasmApi;\n"));
+            output.push_str(&format!("{indent}/** Groups runtime presentation services for plugin-owned user interfaces. */\n{indent}export const ui: UiApi;\n"));
         }
         let mut entries = self.scope_entries(scope);
         entries.sort_by(|left, right| {

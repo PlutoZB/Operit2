@@ -7,10 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		3D2A10262D000001003D2A10 /* IshRootFilesystem.mm in Sources */ = {isa = PBXBuildFile; fileRef = 3D2A10272D000001003D2A10 /* IshRootFilesystem.mm */; };
-		D1C021260001000000000001 /* AppleTextRecognizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1C021260001000000000002 /* AppleTextRecognizer.swift */; };
-		D1C021260001000000000003 /* AppleTextRecognizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1C021260001000000000004 /* AppleTextRecognizerTests.swift */; };
-		011C84738C7022D3E34452AA /* libPods-Runner.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 16312C53B2BD4BB3A1EA8E0A /* libPods-Runner.a */; };
 		1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */ = {isa = PBXBuildFile; fileRef = 1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */; };
 		331C808B294A63AB00263BE5 /* RunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 331C807B294A618700263BE5 /* RunnerTests.swift */; };
 		3B3967161E833CAA004F5970 /* AppFrameworkInfo.plist in Resources */ = {isa = PBXBuildFile; fileRef = 3B3967151E833CAA004F5970 /* AppFrameworkInfo.plist */; };
@@ -22,14 +18,19 @@
 		3D2A100B2D000001003D2A10 /* Accelerate.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3D2A100C2D000001003D2A10 /* Accelerate.framework */; };
 		3D2A100D2D000001003D2A10 /* CoreML.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3D2A100E2D000001003D2A10 /* CoreML.framework */; };
 		3D2A10112D000001003D2A10 /* AppleSnapshotImportInputChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D2A10122D000001003D2A10 /* AppleSnapshotImportInputChannel.swift */; };
-		3D2A10222D000001003D2A10 /* ish-root.tar.gz in Resources */ = {isa = PBXBuildFile; fileRef = 3D2A10232D000001003D2A10 /* ish-root.tar.gz */; };
-		3D2A10242D000001003D2A10 /* IshTerminalBridge.mm in Sources */ = {isa = PBXBuildFile; fileRef = 3D2A10252D000001003D2A10 /* IshTerminalBridge.mm */; };
+		3D2A10222D000001003D2A10 /* arm64-rootfs.tar.gz in Resources */ = {isa = PBXBuildFile; fileRef = 3D2A10232D000001003D2A10 /* arm64-rootfs.tar.gz */; };
+		3D2A10242D000001003D2A10 /* Arm64TerminalBridge.mm in Sources */ = {isa = PBXBuildFile; fileRef = 3D2A10252D000001003D2A10 /* Arm64TerminalBridge.mm */; };
+		3D2A10262D000001003D2A10 /* Arm64RootFilesystem.mm in Sources */ = {isa = PBXBuildFile; fileRef = 3D2A10272D000001003D2A10 /* Arm64RootFilesystem.mm */; };
+		3D2A10302D000001003D2A10 /* liboperit_arm64.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3D2A10312D000001003D2A10 /* liboperit_arm64.a */; };
+		470C067298460101F1596C92 /* Pods_Runner.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1F4EE12B72FC91C330AC68F5 /* Pods_Runner.framework */; };
 		74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74858FAE1ED2DC5600515810 /* AppDelegate.swift */; };
-		AABBCC012026092600000001 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AABBCC012026092600000002 /* SceneDelegate.swift */; };
+		7AF03F1808553D653CEE0874 /* Pods_RunnerTests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 425B335CCC8EE78122E028A0 /* Pods_RunnerTests.framework */; };
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
-		B929A9638BD89384052DB091 /* libPods-RunnerTests.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A07DC44627EE4D7E3B20E2D1 /* libPods-RunnerTests.a */; };
+		AABBCC012026092600000001 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AABBCC012026092600000002 /* SceneDelegate.swift */; };
+		D1C021260001000000000001 /* AppleTextRecognizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1C021260001000000000002 /* AppleTextRecognizer.swift */; };
+		D1C021260001000000000003 /* AppleTextRecognizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1C021260001000000000004 /* AppleTextRecognizerTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -56,13 +57,9 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		3D2A10272D000001003D2A10 /* IshRootFilesystem.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = IshRootFilesystem.mm; sourceTree = "<group>"; };
-		3D2A10282D000001003D2A10 /* IshRootFilesystem.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = IshRootFilesystem.h; sourceTree = "<group>"; };
-		D1C021260001000000000002 /* AppleTextRecognizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleTextRecognizer.swift; sourceTree = "<group>"; };
-		D1C021260001000000000004 /* AppleTextRecognizerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleTextRecognizerTests.swift; sourceTree = "<group>"; };
 		1498D2321E8E86230040F4C2 /* GeneratedPluginRegistrant.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GeneratedPluginRegistrant.h; sourceTree = "<group>"; };
 		1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = GeneratedPluginRegistrant.m; sourceTree = "<group>"; };
-		16312C53B2BD4BB3A1EA8E0A /* libPods-Runner.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-Runner.a"; sourceTree = BUILT_PRODUCTS_DIR; };
+		1F4EE12B72FC91C330AC68F5 /* Pods_Runner.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_Runner.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		331C807B294A618700263BE5 /* RunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunnerTests.swift; sourceTree = "<group>"; };
 		331C8081294A63A400263BE5 /* RunnerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RunnerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3B3967151E833CAA004F5970 /* AppFrameworkInfo.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = AppFrameworkInfo.plist; path = Flutter/AppFrameworkInfo.plist; sourceTree = "<group>"; };
@@ -75,13 +72,16 @@
 		3D2A100C2D000001003D2A10 /* Accelerate.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Accelerate.framework; path = System/Library/Frameworks/Accelerate.framework; sourceTree = SDKROOT; };
 		3D2A100E2D000001003D2A10 /* CoreML.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreML.framework; path = System/Library/Frameworks/CoreML.framework; sourceTree = SDKROOT; };
 		3D2A10122D000001003D2A10 /* AppleSnapshotImportInputChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleSnapshotImportInputChannel.swift; sourceTree = "<group>"; };
-		3D2A10232D000001003D2A10 /* ish-root.tar.gz */ = {isa = PBXFileReference; lastKnownFileType = archive.gzip; path = "ish-root.tar.gz"; sourceTree = "<group>"; };
-		3D2A10252D000001003D2A10 /* IshTerminalBridge.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = IshTerminalBridge.mm; sourceTree = "<group>"; };
+		3D2A10232D000001003D2A10 /* arm64-rootfs.tar.gz */ = {isa = PBXFileReference; lastKnownFileType = archive.gzip; name = "arm64-rootfs.tar.gz"; path = "Arm64Runtime/arm64-rootfs.tar.gz"; sourceTree = DERIVED_FILE_DIR; };
+		3D2A10252D000001003D2A10 /* Arm64TerminalBridge.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Arm64TerminalBridge.mm; sourceTree = "<group>"; };
+		3D2A10272D000001003D2A10 /* Arm64RootFilesystem.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Arm64RootFilesystem.mm; sourceTree = "<group>"; };
+		3D2A10282D000001003D2A10 /* Arm64RootFilesystem.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Arm64RootFilesystem.h; sourceTree = "<group>"; };
+		3D2A10312D000001003D2A10 /* liboperit_arm64.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; name = liboperit_arm64.a; path = Arm64Runtime/liboperit_arm64.a; sourceTree = DERIVED_FILE_DIR; };
+		425B335CCC8EE78122E028A0 /* Pods_RunnerTests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_RunnerTests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		486A237437459C2D103095E9 /* Pods-Runner.profile.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.profile.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.profile.xcconfig"; sourceTree = "<group>"; };
 		5F9B2BEE378B4DD969717B88 /* Pods-RunnerTests.profile.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.profile.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.profile.xcconfig"; sourceTree = "<group>"; };
 		74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Runner-Bridging-Header.h"; sourceTree = "<group>"; };
 		74858FAE1ED2DC5600515810 /* AppDelegate.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
-		AABBCC012026092600000002 /* SceneDelegate.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
 		7AFA3C8E1D35360C0083082E /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Release.xcconfig; path = Flutter/Release.xcconfig; sourceTree = "<group>"; };
 		948BA28EC416D60DDDFCF454 /* Pods-Runner.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.debug.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.debug.xcconfig"; sourceTree = "<group>"; };
 		9740EEB21CF90195004384FC /* Debug.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; name = Debug.xcconfig; path = Flutter/Debug.xcconfig; sourceTree = "<group>"; };
@@ -91,8 +91,10 @@
 		97C146FD1CF9000F007C117D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		97C147001CF9000F007C117D /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		97C147021CF9000F007C117D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		A07DC44627EE4D7E3B20E2D1 /* libPods-RunnerTests.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-RunnerTests.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 		A6E122676BCA4AF7F2274AEF /* Pods-Runner.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.release.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig"; sourceTree = "<group>"; };
+		AABBCC012026092600000002 /* SceneDelegate.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
+		D1C021260001000000000002 /* AppleTextRecognizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleTextRecognizer.swift; sourceTree = "<group>"; };
+		D1C021260001000000000004 /* AppleTextRecognizerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleTextRecognizerTests.swift; sourceTree = "<group>"; };
 		DBAC330E18F36551D0183C22 /* Pods-RunnerTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.debug.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.debug.xcconfig"; sourceTree = "<group>"; };
 		F77821429C5D32CE647D4612 /* Pods-RunnerTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.release.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.release.xcconfig"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -102,7 +104,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				B929A9638BD89384052DB091 /* libPods-RunnerTests.a in Frameworks */,
+				7AF03F1808553D653CEE0874 /* Pods_RunnerTests.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -110,11 +112,12 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3D2A10302D000001003D2A10 /* liboperit_arm64.a in Frameworks */,
 				3D2A10072D000001003D2A10 /* sherpa-onnx.xcframework in Frameworks */,
 				3D2A10092D000001003D2A10 /* onnxruntime.xcframework in Frameworks */,
 				3D2A100B2D000001003D2A10 /* Accelerate.framework in Frameworks */,
 				3D2A100D2D000001003D2A10 /* CoreML.framework in Frameworks */,
-				011C84738C7022D3E34452AA /* libPods-Runner.a in Frameworks */,
+				470C067298460101F1596C92 /* Pods_Runner.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -133,12 +136,13 @@
 		3D2A100F2D000001003D2A10 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				3D2A10312D000001003D2A10 /* liboperit_arm64.a */,
 				3D2A10082D000001003D2A10 /* sherpa-onnx.xcframework */,
 				3D2A100A2D000001003D2A10 /* onnxruntime.xcframework */,
 				3D2A100C2D000001003D2A10 /* Accelerate.framework */,
 				3D2A100E2D000001003D2A10 /* CoreML.framework */,
-				16312C53B2BD4BB3A1EA8E0A /* libPods-Runner.a */,
-				A07DC44627EE4D7E3B20E2D1 /* libPods-RunnerTests.a */,
+				1F4EE12B72FC91C330AC68F5 /* Pods_Runner.framework */,
+				425B335CCC8EE78122E028A0 /* Pods_RunnerTests.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -191,10 +195,10 @@
 				3D2A10122D000001003D2A10 /* AppleSnapshotImportInputChannel.swift */,
 				3D2A10042D000001003D2A10 /* AppleLocalInferenceRunner.swift */,
 				3D2A10062D000001003D2A10 /* AppleLocalInferenceBridge.mm */,
-				3D2A10252D000001003D2A10 /* IshTerminalBridge.mm */,
-				3D2A10272D000001003D2A10 /* IshRootFilesystem.mm */,
-				3D2A10282D000001003D2A10 /* IshRootFilesystem.h */,
-				3D2A10232D000001003D2A10 /* ish-root.tar.gz */,
+				3D2A10252D000001003D2A10 /* Arm64TerminalBridge.mm */,
+				3D2A10272D000001003D2A10 /* Arm64RootFilesystem.mm */,
+				3D2A10282D000001003D2A10 /* Arm64RootFilesystem.h */,
+				3D2A10232D000001003D2A10 /* arm64-rootfs.tar.gz */,
 				3D2A10022D000001003D2A10 /* OperitFlutterBridge.h */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
 			);
@@ -242,14 +246,14 @@
 			buildPhases = (
 				8A724711998FD84873F7F57D /* [CP] Check Pods Manifest.lock */,
 				3D2A10102D000002003D2A10 /* Build Rust Bridge */,
-				3D2A10212D000001003D2A10 /* Build iSH Runtime */,
+				3D2A10212D000001003D2A10 /* Build ARM64 Runtime */,
 				9740EEB61CF901F6004384FC /* Run Script */,
 				97C146EA1CF9000F007C117D /* Sources */,
 				97C146EB1CF9000F007C117D /* Frameworks */,
 				97C146EC1CF9000F007C117D /* Resources */,
 				9705A1C41CF9048500538489 /* Embed Frameworks */,
 				3B06AD1E1E4923F5004D2608 /* Thin Binary */,
-				878BE72E0401C0C02F1B9DE5 /* [CP] Copy Pods Resources */,
+				908A40C0D690939D4827B85E /* [CP] Embed Pods Frameworks */,
 			);
 			buildRules = (
 			);
@@ -311,7 +315,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				3D2A10222D000001003D2A10 /* ish-root.tar.gz in Resources */,
+				3D2A10222D000001003D2A10 /* arm64-rootfs.tar.gz in Resources */,
 				97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */,
 				3B3967161E833CAA004F5970 /* AppFrameworkInfo.plist in Resources */,
 				97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */,
@@ -380,57 +384,33 @@
 			shellPath = /bin/sh;
 			shellScript = "/bin/sh \"$PROJECT_DIR/build_rust_bridge.sh\"\n";
 		};
-		3D2A10212D000001003D2A10 /* Build iSH Runtime */ = {
+		3D2A10212D000001003D2A10 /* Build ARM64 Runtime */ = {
 			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
 			files = (
 			);
 			inputFileListPaths = (
 			);
 			inputPaths = (
-				"$(PROJECT_DIR)/Runner/ish-root.tar.gz",
-				"$(PROJECT_DIR)/../../../../tools/ios-runtime/ish/build_ish_ios.sh",
-				"$(PROJECT_DIR)/../../../../tools/ios-runtime/ish/fetch_sources.py",
-				"$(PROJECT_DIR)/../../../../tools/ios-runtime/ish/patches/0001-operit-managed-runtime-mount.patch",
-				"$(PROJECT_DIR)/../../../../tools/ios-runtime/ish/patches/0002-arm64-context-registers.patch",
-				"$(PROJECT_DIR)/../../../../tools/ios-runtime/ish/patches/0003-root-preparation-lifecycle.patch",
-				"$(PROJECT_DIR)/../../../../tools/ios-runtime/ish/patches/0004-emulator-tlb-task-migration.patch",
-				"$(PROJECT_DIR)/../../../../tools/ios-runtime/ish/patches/0005-namespace-darwin-kernel-formatters.patch",
+				"$(PROJECT_DIR)/build_arm64_runtime.sh",
+				"$(PROJECT_DIR)/Runner/arm64-rootfs.tar.gz",
+				"$(PROJECT_DIR)/../../../../tools/ios-runtime/arm64/build.sh",
+				"$(PROJECT_DIR)/../../../../tools/ios-runtime/arm64/package_rootfs.py",
+				"$(PROJECT_DIR)/../../../../tools/ios-runtime/arm64/prepare_rootfs.py",
+				"$(PROJECT_DIR)/../../../../tools/ios-runtime/arm64/rootfs.json",
+				"$(PROJECT_DIR)/../../../../hosts/ios/linux-runtime/CMakeLists.txt",
 			);
-			name = "Build iSH Runtime";
+			name = "Build ARM64 Runtime";
 			outputFileListPaths = (
 			);
 			outputPaths = (
-				"$(PROJECT_DIR)/../apple/ish-build/$(CONFIGURATION)-$(PLATFORM_NAME)/liblinux.a",
-				"$(PROJECT_DIR)/../apple/ish-build/$(CONFIGURATION)-$(PLATFORM_NAME)/libiSHLinux.a",
-				"$(PROJECT_DIR)/../apple/ish-build/$(CONFIGURATION)-$(PLATFORM_NAME)/libiSHLinuxUser.a",
-				"$(PROJECT_DIR)/../apple/ish-build/$(CONFIGURATION)-$(PLATFORM_NAME)/libfakefs.a",
-				"$(PROJECT_DIR)/../apple/ish-build/$(CONFIGURATION)-$(PLATFORM_NAME)/libish_emu.a",
-				"$(PROJECT_DIR)/../apple/ish-build/$(CONFIGURATION)-$(PLATFORM_NAME)/libarchive.a",
-				"$(PROJECT_DIR)/../apple/ish-build/$(CONFIGURATION)-$(PLATFORM_NAME)/libiSHFakefs.a",
-				"$(PROJECT_DIR)/../apple/ish-build/$(CONFIGURATION)-$(PLATFORM_NAME)/libiSHFchdir.a",
-				"$(PROJECT_DIR)/../apple/ish-build/$(CONFIGURATION)-$(PLATFORM_NAME)/.operit-ish-build-complete",
+				"$(DERIVED_FILE_DIR)/Arm64Runtime/liboperit_arm64.a",
+				"$(DERIVED_FILE_DIR)/Arm64Runtime/arm64-rootfs.tar.gz",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "OPERIT_REPO_ROOT=\"$PROJECT_DIR/../../../..\"\n/bin/bash \"$OPERIT_REPO_ROOT/tools/ios-runtime/ish/build_ish_ios.sh\" \"$CONFIGURATION\" \"$SDK_NAME\" \"$PLATFORM_NAME\" \"${NATIVE_ARCH_ACTUAL:-$ARCHS}\"\n";
-		};
-		878BE72E0401C0C02F1B9DE5 /* [CP] Copy Pods Resources */ = {
-			isa = PBXShellScriptBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputFileListPaths = (
-				"${PODS_ROOT}/Target Support Files/Pods-Runner/Pods-Runner-resources-${CONFIGURATION}-input-files.xcfilelist",
-			);
-			name = "[CP] Copy Pods Resources";
-			outputFileListPaths = (
-				"${PODS_ROOT}/Target Support Files/Pods-Runner/Pods-Runner-resources-${CONFIGURATION}-output-files.xcfilelist",
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-Runner/Pods-Runner-resources.sh\"\n";
-			showEnvVarsInLog = 0;
+			shellPath = /bin/bash;
+			shellScript = "/bin/bash \"$PROJECT_DIR/build_arm64_runtime.sh\"\n";
 		};
 		8A724711998FD84873F7F57D /* [CP] Check Pods Manifest.lock */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -452,6 +432,23 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+			showEnvVarsInLog = 0;
+		};
+		908A40C0D690939D4827B85E /* [CP] Embed Pods Frameworks */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-Runner/Pods-Runner-frameworks-${CONFIGURATION}-input-files.xcfilelist",
+			);
+			name = "[CP] Embed Pods Frameworks";
+			outputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-Runner/Pods-Runner-frameworks-${CONFIGURATION}-output-files.xcfilelist",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-Runner/Pods-Runner-frameworks.sh\"\n";
 			showEnvVarsInLog = 0;
 		};
 		9740EEB61CF901F6004384FC /* Run Script */ = {
@@ -492,8 +489,8 @@
 				3D2A10112D000001003D2A10 /* AppleSnapshotImportInputChannel.swift in Sources */,
 				3D2A10032D000001003D2A10 /* AppleLocalInferenceRunner.swift in Sources */,
 				3D2A10052D000001003D2A10 /* AppleLocalInferenceBridge.mm in Sources */,
-				3D2A10242D000001003D2A10 /* IshTerminalBridge.mm in Sources */,
-				3D2A10262D000001003D2A10 /* IshRootFilesystem.mm in Sources */,
+				3D2A10242D000001003D2A10 /* Arm64TerminalBridge.mm in Sources */,
+				3D2A10262D000001003D2A10 /* Arm64RootFilesystem.mm in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -574,7 +571,7 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 16.4;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				SDKROOT = iphoneos;
-				SUPPORTED_PLATFORMS = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VALIDATE_PRODUCT = YES;
 			};
@@ -584,7 +581,9 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 7AFA3C8E1D35360C0083082E /* Release.xcconfig */;
 			buildSettings = {
+				ARCHS = arm64;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++17";
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_IDENTITY = "Apple Distribution";
 				CODE_SIGN_STYLE = Manual;
@@ -593,8 +592,7 @@
 				ENABLE_BITCODE = NO;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(PROJECT_DIR)/../../../../tools/ios-runtime/ish/sources/ish",
-					"$(PROJECT_DIR)/../../../../tools/ios-runtime/ish/sources/ish/app",
+					"$(PROJECT_DIR)/../../../../hosts/ios/linux-runtime/include",
 				);
 				INFOPLIST_FILE = Runner/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -604,25 +602,20 @@
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(PROJECT_DIR)/Flutter/ephemeral/rust/$(PLATFORM_NAME)/$(CURRENT_ARCH)",
-					"$(PROJECT_DIR)/../apple/ish-build/$(CONFIGURATION)-$(PLATFORM_NAME)",
+					"$(DERIVED_FILE_DIR)/Arm64Runtime",
 				);
 				OTHER_LDFLAGS = (
+					"-framework",
+					WebKit,
 					"$(inherited)",
 					"-loperit_flutter_bridge",
-					"-Wl,-force_load,$(PROJECT_DIR)/../apple/ish-build/$(CONFIGURATION)-$(PLATFORM_NAME)/liblinux.a",
-					"-Wl,-force_load,$(PROJECT_DIR)/../apple/ish-build/$(CONFIGURATION)-$(PLATFORM_NAME)/libiSHLinux.a",
-					"-liSHLinuxUser",
-					"-liSHFakefs",
-					"-liSHFchdir",
-					"-lfakefs",
-					"-lish_emu",
-					"-larchive",
-					"-lbz2",
-					"-liconv",
+					"-lc++",
+					"-lz",
 					"-lresolv",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = app.operit;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				VERSIONING_SYSTEM = "apple-generic";
@@ -782,7 +775,7 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 16.4;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				SDKROOT = iphoneos;
-				SUPPORTED_PLATFORMS = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -794,18 +787,19 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 9740EEB21CF90195004384FC /* Debug.xcconfig */;
 			buildSettings = {
+				ARCHS = arm64;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++17";
 				CLANG_ENABLE_MODULES = YES;
-				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
 				CLANG_LD_EXPORT_GLOBAL_SYMBOLS = NO;
+				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_BITCODE = NO;
 				ENABLE_DEBUG_DYLIB = NO;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(PROJECT_DIR)/../../../../tools/ios-runtime/ish/sources/ish",
-					"$(PROJECT_DIR)/../../../../tools/ios-runtime/ish/sources/ish/app",
+					"$(PROJECT_DIR)/../../../../hosts/ios/linux-runtime/include",
 				);
 				INFOPLIST_FILE = Runner/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -815,25 +809,20 @@
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(PROJECT_DIR)/Flutter/ephemeral/rust/$(PLATFORM_NAME)/$(CURRENT_ARCH)",
-					"$(PROJECT_DIR)/../apple/ish-build/$(CONFIGURATION)-$(PLATFORM_NAME)",
+					"$(DERIVED_FILE_DIR)/Arm64Runtime",
 				);
 				OTHER_LDFLAGS = (
+					"-framework",
+					WebKit,
 					"$(inherited)",
 					"-loperit_flutter_bridge",
-					"-Wl,-force_load,$(PROJECT_DIR)/../apple/ish-build/$(CONFIGURATION)-$(PLATFORM_NAME)/liblinux.a",
-					"-Wl,-force_load,$(PROJECT_DIR)/../apple/ish-build/$(CONFIGURATION)-$(PLATFORM_NAME)/libiSHLinux.a",
-					"-liSHLinuxUser",
-					"-liSHFakefs",
-					"-liSHFchdir",
-					"-lfakefs",
-					"-lish_emu",
-					"-larchive",
-					"-lbz2",
-					"-liconv",
+					"-lc++",
+					"-lz",
 					"-lresolv",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = app.operit;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
@@ -845,7 +834,9 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 7AFA3C8E1D35360C0083082E /* Release.xcconfig */;
 			buildSettings = {
+				ARCHS = arm64;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++17";
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_IDENTITY = "Apple Distribution";
 				CODE_SIGN_STYLE = Manual;
@@ -854,8 +845,7 @@
 				ENABLE_BITCODE = NO;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(PROJECT_DIR)/../../../../tools/ios-runtime/ish/sources/ish",
-					"$(PROJECT_DIR)/../../../../tools/ios-runtime/ish/sources/ish/app",
+					"$(PROJECT_DIR)/../../../../hosts/ios/linux-runtime/include",
 				);
 				INFOPLIST_FILE = Runner/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -865,26 +855,21 @@
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(PROJECT_DIR)/Flutter/ephemeral/rust/$(PLATFORM_NAME)/$(CURRENT_ARCH)",
-					"$(PROJECT_DIR)/../apple/ish-build/$(CONFIGURATION)-$(PLATFORM_NAME)",
+					"$(DERIVED_FILE_DIR)/Arm64Runtime",
 				);
 				OTHER_LDFLAGS = (
+					"-framework",
+					WebKit,
 					"$(inherited)",
 					"-loperit_flutter_bridge",
-					"-Wl,-force_load,$(PROJECT_DIR)/../apple/ish-build/$(CONFIGURATION)-$(PLATFORM_NAME)/liblinux.a",
-					"-Wl,-force_load,$(PROJECT_DIR)/../apple/ish-build/$(CONFIGURATION)-$(PLATFORM_NAME)/libiSHLinux.a",
-					"-liSHLinuxUser",
-					"-liSHFakefs",
-					"-liSHFchdir",
-					"-lfakefs",
-					"-lish_emu",
-					"-larchive",
-					"-lbz2",
-					"-liconv",
+					"-lc++",
+					"-lz",
 					"-lresolv",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = app.operit;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "Operit2 App Store Distribution";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				VERSIONING_SYSTEM = "apple-generic";

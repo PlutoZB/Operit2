@@ -3,23 +3,29 @@ use super::*;
 /// One TCP pairing carries both directions before and after admission, with no second carrier.
 #[tokio::test]
 async fn real_tcp_single_pairing_uses_one_bidirectional_channel() {
-    tcpAdmissionSingleChannel("127.0.0.1:0").await;
+    tcpAdmissionSingleChannel("127.0.0.1:0", false).await;
 }
 
 /// An IPv6 listener does not require a separate reverse connection.
 #[tokio::test]
 async fn real_tcp_single_channel_with_ipv6_listener() {
-    tcpAdmissionSingleChannel("[::1]:0").await;
+    tcpAdmissionSingleChannel("[::1]:0", false).await;
 }
 
 /// A wildcard listener uses the same authenticated carrier in both directions.
 #[tokio::test]
 async fn real_tcp_single_channel_with_wildcard_listener() {
-    tcpAdmissionSingleChannel("0.0.0.0:0").await;
+    tcpAdmissionSingleChannel("0.0.0.0:0", false).await;
 }
 
-/// Exercises admission, bidirectional calls and reconnection on a single authenticated carrier.
-async fn tcpAdmissionSingleChannel(macBind: &str) {
+/// The same TCP admission contract holds while HTTP and WS share its port.
+#[tokio::test]
+async fn mixed_port_preserves_tcp_pairing_and_bidirectional_admission() {
+    tcpAdmissionSingleChannel("127.0.0.1:0", true).await;
+}
+
+/// Exercises admission, bidirectional calls and reconnection on one authenticated carrier.
+async fn tcpAdmissionSingleChannel(macBind: &str, mixed: bool) {
     use crate::HostRuntimePeerService::HostRuntimePeerService;
     use crate::PeerStateStore::{PeerHostConfig, PeerHostPortMode, PeerStateStore};
     use operit_host_api::HostManager::HostManager;
@@ -35,6 +41,7 @@ async fn tcpAdmissionSingleChannel(macBind: &str) {
         Arc::new(HostManager {
             runtimeStorageHost: Some(router.localCore.runtimeStorageHost()),
             tcpHost: Some(Arc::new(NativeTcpHost)),
+            httpServerHost: mixed.then(|| Arc::new(operit_host_native_common::NativeHttpServerHost) as Arc<dyn operit_host_api::HttpServer::HttpServerHost>),
             hostRuntimeTaskSchedulerHost: Some(defaultHostRuntimeTaskSchedulerHost()),
             ..HostManager::default()
         })
@@ -82,13 +89,14 @@ async fn tcpAdmissionSingleChannel(macBind: &str) {
             .saveHostConfig(&PeerHostConfig {
                 bindAddress: bind.into(),
 
-                transports: vec![PeerTransport::Tcp],
+                transports: if mixed { vec![PeerTransport::Http, PeerTransport::WebSocket, PeerTransport::Tcp] } else { vec![PeerTransport::Tcp] },
                 discoveryEnabled: false,
                 portMode: PeerHostPortMode::Automatic,
                 updatedAt: 1,
             })
             .unwrap();
-        peer.startListening(&[PeerTransport::Tcp]).await.unwrap();
+        let transports = if mixed { vec![PeerTransport::Http, PeerTransport::WebSocket, PeerTransport::Tcp] } else { vec![PeerTransport::Tcp] };
+        peer.startListening(&transports).await.unwrap();
     }
     let address = PeerStateStore::new(iosRouter.localCore.runtimeStorageHost())
         .hostConfig()
@@ -654,6 +662,15 @@ async fn real_tcp_listener_gate_reports_revocation_to_dialer() {
 /// Exercises shared pairing with client-only Host capabilities and no TCP or listener on the initiator.
 #[tokio::test]
 async fn outbound_only_hosts_pair_over_http_and_websocket() {
+    outboundOnlyPairing(false).await;
+}
+
+#[tokio::test]
+async fn mixed_port_preserves_http_and_websocket_pairing_for_client_only_hosts() {
+    outboundOnlyPairing(true).await;
+}
+
+async fn outboundOnlyPairing(mixed: bool) {
     use crate::HostRuntimePeerService::HostRuntimePeerService;
     use crate::PeerStateStore::{PeerHostConfig, PeerHostPortMode, PeerStateStore};
     use operit_host_api::HostManager::HostManager;
@@ -684,6 +701,7 @@ async fn outbound_only_hosts_pair_over_http_and_websocket() {
         let serverHost = Arc::new(HostManager {
             runtimeStorageHost: Some(serverRouter.localCore.runtimeStorageHost()),
             httpServerHost: Some(Arc::new(NativeHttpServerHost)),
+            tcpHost: mixed.then(|| Arc::new(operit_host_native_common::NativeTcpHost) as Arc<dyn operit_host_api::TcpHost>),
             hostRuntimeTaskSchedulerHost: Some(defaultHostRuntimeTaskSchedulerHost()),
             ..HostManager::default()
         });
@@ -719,7 +737,7 @@ async fn outbound_only_hosts_pair_over_http_and_websocket() {
                 updatedAt: 1,
             })
             .unwrap();
-        server.startListening(vec![transport]).await.unwrap();
+        server.startListening(if mixed { vec![PeerTransport::Http, PeerTransport::WebSocket, PeerTransport::Tcp] } else { vec![transport] }).await.unwrap();
         let address = PeerStateStore::new(serverRouter.localCore.runtimeStorageHost())
             .hostConfig()
             .unwrap()
@@ -988,7 +1006,7 @@ async fn core_discovery_returns_only_unpaired_devices_for_all_callers() {
         .putRecord(
             RUNTIME_LINK_ACCESS_INBOUND_SESSIONS_PATH,
             "incoming-session",
-            &StoredInbound {
+            &StoredInbound { qrJoinConsent: None,
                 deviceId: "incoming".into(),
                 deviceInfo: info.clone(),
                 pairingServiceVersion: PAIRING_SERVICE_VERSION,
@@ -1130,6 +1148,9 @@ async fn automatic_default_listener_advertises_its_actual_shared_port() {
     struct Advertisement;
     impl DiscoveryAdvertisement for Advertisement {}
     impl ServiceDiscoveryHost for Discovery {
+        fn localAddresses(&self) -> HostResult<Vec<std::net::IpAddr>> {
+            Ok(vec!["192.168.1.44".parse().unwrap(), "127.0.0.1".parse().unwrap()])
+        }
         fn supportsAdvertisement(&self) -> bool {
             true
         }
@@ -1159,6 +1180,7 @@ async fn automatic_default_listener_advertises_its_actual_shared_port() {
     let host = Arc::new(HostManager {
         runtimeStorageHost: Some(router.localCore.runtimeStorageHost()),
         httpServerHost: Some(Arc::new(NativeHttpServerHost)),
+        tcpHost: Some(Arc::new(operit_host_native_common::NativeTcpHost)),
         serviceDiscoveryHost: Some(discovery.clone()),
         hostRuntimeTaskSchedulerHost: Some(defaultHostRuntimeTaskSchedulerHost()),
         ..HostManager::default()
@@ -1187,5 +1209,136 @@ async fn automatic_default_listener_advertises_its_actual_shared_port() {
     assert_eq!(records[0].port, address.port());
     assert_eq!(records[0].properties["transports"], "http,ws");
     assert!(std::net::TcpListener::bind(address).is_err());
+    let expected = format!("http://192.168.1.44:{}", address.port());
+    assert!(peer.pairingAddresses().await.unwrap().contains(&expected));
+    peer.startListening(&[PeerTransport::Tcp]).await.unwrap();
+    assert_eq!(store.hostConfig().unwrap().unwrap().bindAddress, bound.bindAddress);
+    let records = discovery.0.lock().unwrap().clone();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[1].port, address.port());
+    assert_eq!(records[1].properties["transports"], "http,ws,tcp");
     peer.stop().await.unwrap();
+    assert!(peer.pairingAddresses().await.is_err(), "stopped listeners cannot produce a code");
+    let mut config = store.hostConfig().unwrap().unwrap();
+    config.discoveryEnabled = false;
+    config.transports = vec![PeerTransport::Http, PeerTransport::WebSocket, PeerTransport::Tcp];
+    store.saveHostConfig(&config).unwrap();
+    peer.startListening(&config.transports).await.unwrap();
+    let current: std::net::SocketAddr = store.hostConfig().unwrap().unwrap().bindAddress.parse().unwrap();
+    let info = crate::NodeServices::PeerConnectionInfo {
+        version: crate::PeerConnectionCode::VERSION, nodeId: router.localNodeId(),
+        displayName: "CLI".into(), addresses: peer.pairingAddresses().await.unwrap(),
+    };
+    let (invitationId, secret) = peer.pairingInvitation(&router.spaceStore.initialize().unwrap().spaceId).unwrap();
+    let code = crate::PeerConnectionCode::encode(&crate::PeerConnectionCode::ConnectionInvitation { info, invitationId, secret }).unwrap();
+    let decoded = crate::PeerConnectionCode::decode(&code, "scanner").unwrap();
+    assert!(decoded.info.addresses.contains(&format!("http://192.168.1.44:{}", current.port())));
+    assert_eq!(discovery.0.lock().unwrap().len(), 2, "QR generation does not advertise or browse");
+    peer.stop().await.unwrap();
+}
+
+/// QR pairing authenticates the advertised identity and secret without manual prompts;
+/// an authorized scanned gateway approves the resulting join immediately.
+#[tokio::test]
+async fn qr_pairing_authenticates_invitation_and_auto_approves_on_admin() {
+    use base64::Engine;
+    use crate::HostRuntimePeerService::HostRuntimePeerService;
+    use crate::PeerConnectionCode;
+    use crate::PeerStateStore::{PeerHostConfig, PeerHostPortMode, PeerStateStore};
+    use operit_host_api::{HostManager::HostManager, HostResult, TcpConnection, TcpHost, TcpListener};
+    use operit_host_native_common::NativeTcpHost;
+    use operit_link::protocol::LinkDeviceInfo;
+
+    struct QrTcpHost {
+        destination: String,
+        attempts: StdMutex<Vec<String>>,
+    }
+    #[async_trait]
+    impl TcpHost for QrTcpHost {
+        async fn connect(&self, address: &str) -> HostResult<Arc<dyn TcpConnection>> {
+            self.attempts.lock().unwrap().push(address.into());
+            if address.starts_with("192.0.2.1:") { panic!("one QR endpoint panicked"); }
+            if address.starts_with("192.0.2.2:") { return std::future::pending().await; }
+            if address.starts_with("192.0.2.3:") { return Err(operit_host_api::HostError::new("unreachable endpoint")); }
+            NativeTcpHost.connect(&self.destination).await
+        }
+        async fn bind(&self, address: &str) -> HostResult<Arc<dyn TcpListener>> {
+            NativeTcpHost.bind(address).await
+        }
+    }
+
+    let _guard = routeTestGlobalLock().lock().await;
+    installTestRuntimeScheduler();
+    let (serverRouter, server) = approvalService("qr-server");
+    let (clientRouter, client) = approvalService("qr-client");
+    let serverHost = Arc::new(HostManager {
+        runtimeStorageHost: Some(serverRouter.localCore.runtimeStorageHost()),
+        tcpHost: Some(Arc::new(NativeTcpHost)),
+        hostRuntimeTaskSchedulerHost: Some(defaultHostRuntimeTaskSchedulerHost()),
+        ..HostManager::default()
+    });
+    let info = LinkDeviceInfo { platform: "test".into(), model: "qr".into(), pairingIncarnation: None };
+    let serverOwner = Arc::new(serverRouter.clone());
+    let serverPeer = HostRuntimePeerService::new(serverHost, &serverOwner, info.clone()).unwrap();
+    serverRouter.installNodeServices(NodeServices::new(serverPeer.clone())).unwrap();
+    PeerStateStore::new(serverRouter.localCore.runtimeStorageHost()).saveHostConfig(&PeerHostConfig {
+        bindAddress: "127.0.0.1:0".into(), transports: vec![PeerTransport::Tcp],
+        discoveryEnabled: false, portMode: PeerHostPortMode::Automatic, updatedAt: 1,
+    }).unwrap();
+    server.startListening(vec![PeerTransport::Tcp]).await.unwrap();
+    let destination = PeerStateStore::new(serverRouter.localCore.runtimeStorageHost())
+        .hostConfig().unwrap().unwrap().bindAddress;
+    let mappedHost = Arc::new(QrTcpHost { destination, attempts: StdMutex::new(Vec::new()) });
+    let clientHost = Arc::new(HostManager {
+        runtimeStorageHost: Some(clientRouter.localCore.runtimeStorageHost()),
+        tcpHost: Some(mappedHost.clone()),
+        hostRuntimeTaskSchedulerHost: Some(defaultHostRuntimeTaskSchedulerHost()),
+        ..HostManager::default()
+    });
+    let clientOwner = Arc::new(clientRouter.clone());
+    let clientPeer = HostRuntimePeerService::new(clientHost, &clientOwner, info).unwrap();
+    clientRouter.installNodeServices(NodeServices::new(clientPeer.clone())).unwrap();
+    let connectionInfo = crate::NodeServices::PeerConnectionInfo {
+        version: PeerConnectionCode::VERSION, nodeId: serverRouter.localNodeId(), displayName: "QR server".into(),
+        addresses: (1..=4).map(|i| format!("tcp://192.0.2.{i}:7777")).collect(),
+    };
+    let spaceId = serverRouter.spaceStore.initialize().unwrap().spaceId;
+    let (invitationId, secret) = serverPeer.pairingInvitation(&spaceId).unwrap();
+    let codeFor = |info| PeerConnectionCode::encode(&PeerConnectionCode::ConnectionInvitation {
+        info, invitationId: invitationId.clone(), secret: secret.clone(),
+    }).unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(25), async {
+        let mut wrongIdentity = connectionInfo.clone();
+        wrongIdentity.nodeId = "wrong-device".into();
+        wrongIdentity.addresses = vec![connectionInfo.addresses[3].clone()];
+        assert!(client.startPairingFromCode(codeFor(wrongIdentity)).await.is_err());
+        assert!(server.pairingPrompts().unwrap().is_empty());
+        mappedHost.attempts.lock().unwrap().clear();
+
+        let mut direct = connectionInfo.clone();
+        direct.addresses = vec![connectionInfo.addresses[3].clone()];
+        let invalidSecret = PeerConnectionCode::encode(&PeerConnectionCode::ConnectionInvitation {
+            info: direct.clone(), invitationId: invitationId.clone(),
+            secret: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0; 32]),
+        }).unwrap();
+        assert!(client.startPairingFromCode(invalidSecret).await.is_err());
+        assert!(clientPeer.pairedPeers().unwrap().is_empty());
+        assert!(serverPeer.pairedPeers().unwrap().is_empty());
+        assert!(server.pairingPrompts().unwrap().is_empty());
+        mappedHost.attempts.lock().unwrap().clear();
+
+        let paired = client.startPairingFromCode(codeFor(connectionInfo.clone())).await.unwrap();
+        assert_eq!(mappedHost.attempts.lock().unwrap().len(), 5);
+        assert_eq!(paired.nodeId, serverRouter.localNodeId());
+        assert!(paired.outbound);
+        assert!(serverPeer.pairedPeers().unwrap()[0].inbound);
+        assert!(server.pairingPrompts().unwrap().is_empty());
+        let joined = client.requestDeviceSpaceJoin(serverRouter.localNodeId()).await.unwrap();
+        assert_eq!(joined.status, SpaceJoinStatus::Joined);
+        assert_eq!(client.deviceSpace().unwrap().spaceId, spaceId);
+        assert!(server.incomingDeviceSpaceJoins().await.unwrap().is_empty());
+    }).await;
+    clientPeer.stop().await.unwrap();
+    serverPeer.stop().await.unwrap();
+    result.unwrap();
 }

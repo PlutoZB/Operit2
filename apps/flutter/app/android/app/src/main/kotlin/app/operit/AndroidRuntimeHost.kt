@@ -1,6 +1,8 @@
 package app.operit
 
 import android.content.Context
+import android.content.pm.PackageManager
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -34,9 +36,25 @@ class AndroidRuntimeHost(context: Context) {
     private var runtimeStartupMessage = "正在准备本地运行时"
 
     private val documentFileSystem by lazy { AndroidDocumentFileSystem(applicationContext) }
+    private val terminalPrivileges by lazy { AndroidTerminalPrivileges(applicationContext) }
+
+    /** Serves native terminal privilege probes and remote PTY lifecycle operations. */
+    fun terminalPrivilegeOperation(request: String): String = terminalPrivileges.execute(request)
 
     /** JNI worker entry point for capability-backed filesystem resources. */
     fun fileSystemResourceOperation(request: String): String = documentFileSystem.execute(request)
+
+    /** Keeps Wi-Fi multicast reception enabled for the native discovery daemon's lifetime. */
+    fun acquireDiscoveryMulticastLock(): WifiManager.MulticastLock? {
+        if (!applicationContext.packageManager.hasSystemFeature(PackageManager.FEATURE_WIFI)) {
+            return null
+        }
+        val manager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        return manager.createMulticastLock("operit-service-discovery").apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+    }
 
     /** Installs storage roots and accepts repeated identical configuration. */
     fun setStorageRoots(runtimePath: String?, workspacePath: String?) {
@@ -89,6 +107,7 @@ class AndroidRuntimeHost(context: Context) {
 
     /** Serializes native creation without blocking main-thread storage and lifecycle callbacks. */
     fun ensureRuntimeHandle(): Long {
+        check(!BuildConfig.OPERIT_EXTERNAL_RUNTIME) { "The module UI does not own an application Core" }
         synchronized(runtimeLock) {
             if (runtimeHandle != 0L) {
                 return runtimeHandle

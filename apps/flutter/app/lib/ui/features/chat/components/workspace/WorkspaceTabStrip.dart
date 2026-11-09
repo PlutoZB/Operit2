@@ -1,8 +1,6 @@
 // ignore_for_file: file_names
 
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 
 import '../../../../../l10n/generated/app_localizations.dart';
 import '../../../../theme/OperitGlassSurface.dart';
@@ -11,172 +9,232 @@ import '../../../../main/layout/SidebarDockController.dart';
 import 'WorkspaceLayoutMetrics.dart';
 import 'WorkspaceTabModels.dart';
 
-/// Caps a single tab's width so long titles ellipsize instead of pushing the
-/// following tabs and the close button outside the strip's viewport.
-const double _workspaceTabMaxWidth = 220;
-
-class WorkspaceTabStrip extends StatefulWidget {
+class WorkspaceTabStrip extends StatelessWidget {
   const WorkspaceTabStrip({
     super.key,
     required this.tabs,
     required this.selectedIndex,
     required this.onSelected,
     required this.onClosed,
+    required this.onCloseTabs,
   });
 
   final List<WorkspaceTab> tabs;
   final int selectedIndex;
   final ValueChanged<int> onSelected;
   final ValueChanged<int> onClosed;
+  final Future<void> Function(List<WorkspaceTab>) onCloseTabs;
 
   /// Builds a horizontally scrollable strip sized for the available width.
   @override
-  State<WorkspaceTabStrip> createState() => _WorkspaceTabStripState();
-}
-
-class _WorkspaceTabStripState extends State<WorkspaceTabStrip> {
-  final ScrollController _scrollController = ScrollController();
-  final Map<int, GlobalKey> _tabKeys = <int, GlobalKey>{};
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _revealTab(widget.selectedIndex);
-    });
-  }
-
-  @override
-  void didUpdateWidget(WorkspaceTabStrip oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.selectedIndex != widget.selectedIndex ||
-        oldWidget.tabs.length != widget.tabs.length) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _revealTab(widget.selectedIndex);
-      });
-    }
-  }
-
-  @override
-  void dispose() {
-    _scrollController.dispose();
-    super.dispose();
-  }
-
-  /// Scrolls just far enough to bring the selected tab on screen, so its
-  /// title and close button stay reachable when the strip overflows.
-  void _revealTab(int index) {
-    if (!mounted || !_scrollController.hasClients) {
-      return;
-    }
-    final RenderObject? renderObject = _tabKeys[index]?.currentContext
-        ?.findRenderObject();
-    if (renderObject is! RenderBox) {
-      return;
-    }
-    final RenderAbstractViewport? viewport = RenderAbstractViewport.maybeOf(
-      renderObject,
-    );
-    if (viewport == null) {
-      return;
-    }
-    final ScrollPosition position = _scrollController.position;
-    final double startOffset = viewport
-        .getOffsetToReveal(renderObject, 0.0)
-        .offset
-        .clamp(position.minScrollExtent, position.maxScrollExtent)
-        .toDouble();
-    final double endOffset = viewport
-        .getOffsetToReveal(renderObject, 1.0)
-        .offset
-        .clamp(position.minScrollExtent, position.maxScrollExtent)
-        .toDouble();
-    final double current = position.pixels;
-    double target = current;
-    if (startOffset < current) {
-      target = startOffset;
-    } else if (endOffset > current) {
-      target = endOffset;
-    }
-    if ((target - current).abs() < 0.5) {
-      return;
-    }
-    _scrollController.animateTo(
-      target,
-      duration: const Duration(milliseconds: 160),
-      curve: Curves.easeOutCubic,
-    );
-  }
-
-  GlobalKey _tabKeyFor(int index) => _tabKeys.putIfAbsent(index, GlobalKey.new);
-
-  @override
   Widget build(BuildContext context) {
-    _tabKeys.removeWhere((index, _) => index >= widget.tabs.length);
+    final theme = Theme.of(context);
     final l10n = AppLocalizations.of(context)!;
     final useTermuxTabs =
         MediaQuery.sizeOf(context).width < workspaceTabletBreakpoint;
-    return useTermuxTabs
-        ? _buildTermuxStrip(context)
-        : _buildDesktopStrip(context, l10n);
-  }
+    if (useTermuxTabs) {
+      return _TermuxWorkspaceTabStrip(
+        tabs: tabs,
+        selectedIndex: selectedIndex,
+        onSelected: onSelected,
+        onClosed: onClosed,
+        tabTitle: (tab) => _tabTitle(l10n, tab),
+        wrapTab: _wrapTab,
+      );
+    }
+    final isDark = theme.brightness == Brightness.dark;
+    final dividerColor = isDark
+        ? const Color(0xFF262626)
+        : theme.colorScheme.outlineVariant.withValues(alpha: 0.35);
 
-  Widget _buildDesktopStrip(BuildContext context, AppLocalizations l10n) {
-    final theme = Theme.of(context);
-    final transparentSurface = OperitTheme.of(
-      context,
-    ).themePreferenceSnapshot.transparentSurfaceEnabled;
-    return OperitGlassSurface(
-      color: transparentSurface
-          ? theme.colorScheme.surface.withValues(alpha: 0.04)
-          : theme.colorScheme.surface,
-      layer: OperitGlassSurfaceLayer.panel,
-      transparentAlpha: 0.03,
-      borderRadius: BorderRadius.zero,
-      clip: false,
-      child: SizedBox(
-        height: 42,
-        child: Stack(
-          children: <Widget>[
-            PositionedDirectional(
-              start: 0,
-              end: 0,
-              bottom: 0,
-              child: Divider(
-                height: 1,
-                thickness: 1,
-                color: theme.colorScheme.outlineVariant.withValues(alpha: 0.45),
+    return SizedBox(
+      height: 38,
+      child: Stack(
+        children: <Widget>[
+          PositionedDirectional(
+            start: 0,
+            end: 0,
+            bottom: 0,
+            child: Divider(height: 1, thickness: 1, color: dividerColor),
+          ),
+          Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: SizedBox(
+              width: double.infinity,
+              height: 28,
+              child: _WorkspaceTabScroller(
+                tabs: tabs,
+                selectedIndex: selectedIndex,
+                padding: const EdgeInsetsDirectional.symmetric(horizontal: 10),
+                spacing: 4,
+                itemBuilder: (context, index) {
+                  final tab = tabs[index];
+                  final selected = index == selectedIndex;
+                  final button = _WorkspaceTabButton(
+                    tab: tab,
+                    title: _tabTitle(l10n, tab),
+                    selected: selected,
+                    onTap: () {
+                      onSelected(index);
+                    },
+                    onClose: tab.closable
+                        ? () {
+                            onClosed(index);
+                          }
+                        : null,
+                  );
+                  return _wrapTab(context, tab, button);
+                },
               ),
             ),
-            _scrollableStrip(
-              padding: const EdgeInsetsDirectional.fromSTEB(10, 5, 10, 0),
-              separatorExtent: 4,
-              buildTab: (context, tab, index) {
-                final button = _WorkspaceTabButton(
-                  tab: tab,
-                  title: _tabTitle(l10n, tab),
-                  selected: index == widget.selectedIndex,
-                  onTap: () {
-                    widget.onSelected(index);
-                  },
-                  onClose: tab.closable
-                      ? () {
-                          widget.onClosed(index);
-                        }
-                      : null,
-                );
-                return _buildTabDragSource(context, tab, button);
-              },
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
 
-  Widget _buildTermuxStrip(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
+  Widget _wrapTab(BuildContext context, WorkspaceTab tab, Widget child) {
+    return Tooltip(
+      message: _tabTitle(AppLocalizations.of(context)!, tab),
+      child: GestureDetector(
+        onSecondaryTapUp: (details) =>
+            _showTabMenu(context, tab, details.globalPosition),
+        child: _buildTabDragSource(context, tab, child),
+      ),
+    );
+  }
+
+  Future<void> _showTabMenu(
+    BuildContext context,
+    WorkspaceTab tab,
+    Offset position,
+  ) async {
+    final index = tabs.indexOf(tab);
+    if (index < 0) return;
     final l10n = AppLocalizations.of(context)!;
+    // Capture objects before opening the menu: tab indices can change meanwhile.
+    final targets = <List<WorkspaceTab>>[
+      if (tab.closable) [tab] else [],
+      tabs.where((other) => other != tab && other.closable).toList(),
+      tabs.skip(index + 1).where((other) => other.closable).toList(),
+      tabs.where((other) => other.closable).toList(),
+    ];
+    final labels = [
+      l10n.close,
+      l10n.workspaceCloseOtherTabs,
+      l10n.workspaceCloseTabsToRight,
+      l10n.workspaceCloseAllTabs,
+    ];
+    // Use the overlay that owns the menu route; a pane may have its own overlay.
+    final overlay =
+        Navigator.of(context).overlay!.context.findRenderObject()! as RenderBox;
+    final localPosition = overlay.globalToLocal(position);
+    final action = await showMenu<int>(
+      context: context,
+      position: RelativeRect.fromSize(
+        Rect.fromLTWH(localPosition.dx, localPosition.dy, 0, 0),
+        overlay.size,
+      ),
+      items: [
+        for (var action = 0; action < targets.length; action++)
+          PopupMenuItem<int>(
+            value: action,
+            enabled: targets[action].isNotEmpty,
+            child: Text(labels[action]),
+          ),
+      ],
+    );
+    if (action != null && context.mounted) {
+      await onCloseTabs(targets[action]);
+    }
+  }
+}
+
+/// Keeps the active tab reachable when navigation selects an offscreen tab.
+class _WorkspaceTabScroller extends StatefulWidget {
+  const _WorkspaceTabScroller({
+    required this.tabs,
+    required this.selectedIndex,
+    required this.padding,
+    required this.spacing,
+    required this.itemBuilder,
+  });
+
+  final List<WorkspaceTab> tabs;
+  final int selectedIndex;
+  final EdgeInsetsGeometry padding;
+  final double spacing;
+  final IndexedWidgetBuilder itemBuilder;
+
+  @override
+  State<_WorkspaceTabScroller> createState() => _WorkspaceTabScrollerState();
+}
+
+class _WorkspaceTabScrollerState extends State<_WorkspaceTabScroller> {
+  final _controller = ScrollController();
+  final _tabKeys = <WorkspaceTab, GlobalKey>{};
+  WorkspaceTab? _selectedTab;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    _tabKeys.removeWhere((tab, _) => !widget.tabs.contains(tab));
+    final selected = widget.tabs.elementAtOrNull(widget.selectedIndex);
+    if (selected != _selectedTab) {
+      _selectedTab = selected;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_controller.hasClients) return;
+        final target = _tabKeys[_selectedTab]?.currentContext
+            ?.findRenderObject();
+        if (target != null) {
+          _controller.position.ensureVisible(target, alignment: 0.5);
+        }
+      });
+    }
+    return SingleChildScrollView(
+      controller: _controller,
+      scrollDirection: Axis.horizontal,
+      padding: widget.padding,
+      child: Row(
+        children: [
+          for (var index = 0; index < widget.tabs.length; index++) ...[
+            if (index > 0) SizedBox(width: widget.spacing),
+            KeyedSubtree(
+              key: _tabKeys.putIfAbsent(widget.tabs[index], () => GlobalKey()),
+              child: widget.itemBuilder(context, index),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _TermuxWorkspaceTabStrip extends StatelessWidget {
+  const _TermuxWorkspaceTabStrip({
+    required this.tabs,
+    required this.selectedIndex,
+    required this.onSelected,
+    required this.onClosed,
+    required this.tabTitle,
+    required this.wrapTab,
+  });
+
+  final List<WorkspaceTab> tabs;
+  final int selectedIndex;
+  final ValueChanged<int> onSelected;
+  final ValueChanged<int> onClosed;
+  final String Function(WorkspaceTab tab) tabTitle;
+  final Widget Function(BuildContext, WorkspaceTab, Widget) wrapTab;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
     final transparentSurface = OperitTheme.of(
       context,
     ).themePreferenceSnapshot.transparentSurfaceEnabled;
@@ -196,6 +254,7 @@ class _WorkspaceTabStripState extends State<WorkspaceTabStrip> {
       borderRadius: BorderRadius.zero,
       clip: false,
       child: SizedBox(
+        width: double.infinity,
         height: 44,
         child: DecoratedBox(
           decoration: BoxDecoration(
@@ -205,13 +264,17 @@ class _WorkspaceTabStripState extends State<WorkspaceTabStrip> {
               ),
             ),
           ),
-          child: _scrollableStrip(
+          child: _WorkspaceTabScroller(
+            tabs: tabs,
+            selectedIndex: selectedIndex,
             padding: const EdgeInsetsDirectional.fromSTEB(8, 5, 8, 5),
-            separatorExtent: 6,
-            buildTab: (context, tab, index) {
+            spacing: 6,
+            itemBuilder: (context, index) {
+              final tab = tabs[index];
+              final selected = index == selectedIndex;
               final button = _TermuxWorkspaceTabButton(
-                title: _tabTitle(l10n, tab),
-                selected: index == widget.selectedIndex,
+                title: tabTitle(tab),
+                selected: selected,
                 closable: tab.closable,
                 backgroundColor: Colors.transparent,
                 selectedBackgroundColor: selectedBackgroundColor,
@@ -219,68 +282,14 @@ class _WorkspaceTabStripState extends State<WorkspaceTabStrip> {
                 primaryTextColor: colorScheme.onSurface,
                 secondaryTextColor: colorScheme.onSurfaceVariant,
                 onTap: () {
-                  widget.onSelected(index);
+                  onSelected(index);
                 },
                 onClose: () {
-                  widget.onClosed(index);
+                  onClosed(index);
                 },
               );
-              return _buildTabDragSource(context, tab, button);
+              return wrapTab(context, tab, button);
             },
-          ),
-        ),
-      ),
-    );
-  }
-
-  /// Horizontal strip with mouse dragging and a scrollbar so tabs pushed past
-  /// the viewport stay reachable; all tabs stay mounted for [_revealTab].
-  Widget _scrollableStrip({
-    required EdgeInsetsDirectional padding,
-    required double separatorExtent,
-    required Widget Function(BuildContext context, WorkspaceTab tab, int index)
-    buildTab,
-  }) {
-    final children = <Widget>[];
-    for (var index = 0; index < widget.tabs.length; index++) {
-      if (children.isNotEmpty) {
-        children.add(SizedBox(width: separatorExtent));
-      }
-      final tab = widget.tabs[index];
-      children.add(
-        KeyedSubtree(
-          key: _tabKeyFor(index),
-          child: buildTab(context, tab, index),
-        ),
-      );
-    }
-    // SingleChildScrollView shrink-wraps under loose constraints, which the
-    // hosting Column centers; force the viewport to span the strip's width.
-    return SizedBox(
-      width: double.infinity,
-      child: ScrollConfiguration(
-        behavior: ScrollConfiguration.of(context).copyWith(
-          dragDevices: const <PointerDeviceKind>{
-            PointerDeviceKind.touch,
-            PointerDeviceKind.mouse,
-            PointerDeviceKind.trackpad,
-            PointerDeviceKind.stylus,
-          },
-        ),
-        child: Scrollbar(
-          controller: _scrollController,
-          thumbVisibility: false,
-          thickness: 6,
-          radius: const Radius.circular(999),
-          child: SingleChildScrollView(
-            controller: _scrollController,
-            scrollDirection: Axis.horizontal,
-            padding: padding,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: children,
-            ),
           ),
         ),
       ),
@@ -430,88 +439,69 @@ class _WorkspaceTabButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
     final backgroundColor = selected
-        ? OperitTheme.of(
-                context,
-              ).themePreferenceSnapshot.transparentSurfaceEnabled
-              ? theme.colorScheme.surface.withValues(alpha: 0.18)
-              : theme.colorScheme.surface
+        ? (isDark ? const Color(0xFF282828) : const Color(0xFFE8E8E8))
         : Colors.transparent;
     final contentColor = selected
         ? theme.colorScheme.onSurface
-        : theme.colorScheme.onSurfaceVariant;
+        : theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.75);
+    final borderColor = selected
+        ? (isDark ? const Color(0xFF383838) : theme.colorScheme.outlineVariant)
+        : Colors.transparent;
+
     return Material(
       color: backgroundColor,
-      borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
+      borderRadius: BorderRadius.circular(5),
       child: InkWell(
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
+        borderRadius: BorderRadius.circular(5),
         onTap: onTap,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: _workspaceTabMaxWidth),
-          child: Container(
-            height: 36,
-            padding: const EdgeInsetsDirectional.only(start: 10, end: 6),
-            decoration: selected
-                ? BoxDecoration(
-                    color: backgroundColor,
-                    borderRadius: const BorderRadius.vertical(
-                      top: Radius.circular(8),
-                    ),
-                    border: Border(
-                      top: BorderSide(
-                        color: theme.colorScheme.outlineVariant.withValues(
-                          alpha: 0.45,
-                        ),
-                      ),
-                      left: BorderSide(
-                        color: theme.colorScheme.outlineVariant.withValues(
-                          alpha: 0.45,
-                        ),
-                      ),
-                      right: BorderSide(
-                        color: theme.colorScheme.outlineVariant.withValues(
-                          alpha: 0.45,
-                        ),
-                      ),
-                    ),
-                  )
-                : null,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                Icon(tab.icon, size: 17, color: contentColor),
-                const SizedBox(width: 6),
-                Flexible(
-                  child: Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.labelMedium?.copyWith(
-                      color: contentColor,
-                      fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                    ),
+        child: Container(
+          height: 26,
+          constraints: const BoxConstraints(maxWidth: 180),
+          padding: EdgeInsetsDirectional.only(
+            start: 8,
+            end: onClose == null ? 8 : 4,
+          ),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(5),
+            border: Border.all(color: borderColor, width: 0.8),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Icon(tab.icon, size: 14, color: contentColor),
+              const SizedBox(width: 5),
+              Flexible(
+                child: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    color: contentColor,
+                    fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                    fontSize: 11.5,
                   ),
                 ),
-                if (onClose == null)
-                  const SizedBox(width: 8)
-                else ...<Widget>[
-                  const SizedBox(width: 4),
-                  SizedBox(
-                    width: 22,
-                    height: 22,
-                    child: IconButton(
-                      padding: EdgeInsets.zero,
-                      iconSize: 15,
-                      tooltip: MaterialLocalizations.of(
-                        context,
-                      ).closeButtonTooltip,
-                      onPressed: onClose,
-                      icon: Icon(Icons.close, color: contentColor),
-                    ),
+              ),
+              if (onClose == null)
+                const SizedBox(width: 2)
+              else ...<Widget>[
+                const SizedBox(width: 3),
+                SizedBox.square(
+                  dimension: 18,
+                  child: IconButton(
+                    padding: EdgeInsets.zero,
+                    iconSize: 12,
+                    tooltip: MaterialLocalizations.of(
+                      context,
+                    ).closeButtonTooltip,
+                    onPressed: onClose,
+                    icon: Icon(Icons.close, color: contentColor),
                   ),
-                ],
+                ),
               ],
-            ),
+            ],
           ),
         ),
       ),

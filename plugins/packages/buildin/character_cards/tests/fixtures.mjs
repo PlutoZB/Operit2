@@ -2,6 +2,7 @@
 export function fixture() {
   const base = { description: "", characterSetting: "你是一位可靠、温和的助手。", openingStatement: "你好，有什么可以帮你的？", otherContentChat: "", otherContentVoice: "", avatarUri: null, attachedTagIds: ["tag-persona"], advancedCustomPrompt: "", marks: "", chatModelBindingMode: "FOLLOW_GLOBAL", chatModelId: null, chatProviderId: null, ttsConfigId: null, themeConfigId: null, memoryBindingMode: "CHARACTER", sharedMemoryId: null, sharedMemoryMounts: [], toolAccessConfig: { enabled: false, allowedBuiltinTools: [], allowedPackages: [], allowedSkills: [], allowedMcpServers: [] }, createdAt: 1, updatedAt: 1 };
   const snapshot = {
+    memoryOwnerKeys: ["character:operit", "character:travel", "shared:shared-main"],
     memoryPreferences: { userDescriptionEnabled: true, autoUpdateEnabled: true },
     cards: [
       { ...base, id: "operit", name: "Operit", description: "默认角色卡" },
@@ -129,6 +130,7 @@ export function installBrowserFixture(data) {
     async avatarImage() { return "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a3ioAAAAASUVORK5CYII="; },
     async openEntity(mode, entity, id) { window.testCalls.push({ action: "openEntity", mode, entity, id }); },
     /** Models the host-selected destination independently from the suggested file name. */
+    async readImportFile() { window.testCalls.push({ action: "readImportFile" }); return { cancelled: true }; },
     async exportFile(name, content) { window.testCalls.push({ action: "exportFile", name, content }); return { cancelled: false, path: "/selected/" + name }; },
   };
 }

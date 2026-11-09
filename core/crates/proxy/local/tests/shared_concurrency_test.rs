@@ -23,7 +23,7 @@ use operit_model::ChatMessage::ChatMessage;
 use operit_proxy_local::LocalCoreProxy;
 use operit_runtime::core::application::OperitApplication::OperitApplication;
 use operit_runtime::services::RuntimeHostInteractionService::{
-    requestOwnerBrowserSession, RuntimeHostInteractionBrowserSessionPayload,
+    requestOwnerBrowserSessionAsync, RuntimeHostInteractionBrowserSessionPayload,
 };
 use operit_util::MarkdownRenderStream::MarkdownStreamEvent;
 use operit_util::RuntimeStorageLayout::{RUNTIME_ROOT_DIR_PATH, WORKSPACE_DIR_PATH};
@@ -51,10 +51,20 @@ impl TestRuntimeStorageHost {
 }
 
 impl RuntimeStorageHost for TestRuntimeStorageHost {
+    /// Uses the real transaction journal required by preference initialization.
+    fn openTransactionDatabase(&self, path: &str) -> HostResult<Box<dyn RuntimeSqliteConnection>> {
+        self.inner.openTransactionDatabase(path)
+    }
+
     /// Delegates durability to the real storage host without rewriting the file.
     fn flushFile(&self, path: &str) -> operit_host_api::HostResult<()> {
         self.inner.flushFile(path)
     }
+
+    /// Reads native file metadata.
+    fn modifiedAt(&self, path: &str) -> HostResult<i64> { self.inner.modifiedAt(path) }
+    /// Preserves remote modification times.
+    fn setModifiedAt(&self, path: &str, time: i64) -> HostResult<()> { self.inner.setModifiedAt(path, time) }
 
     /// Returns the physical test runtime root.
     fn runtimeRootDir(&self) -> Option<std::path::PathBuf> {
@@ -69,6 +79,11 @@ impl RuntimeStorageHost for TestRuntimeStorageHost {
     /// Reads bytes from the mapped test path.
     fn readBytes(&self, path: &str) -> HostResult<Vec<u8>> {
         self.inner.readBytes(path)
+    }
+
+    /// Preserves the native bounded-read capability used by persistent chat directories.
+    fn readBytesRange(&self, path: &str, offset: u64, length: usize) -> HostResult<Vec<u8>> {
+        self.inner.readBytesRange(path, offset, length)
     }
 
     /// Atomically publishes one complete in-memory test entry.
@@ -139,10 +154,11 @@ impl HostSecretStore for TestSecretStore {
     }
 }
 
+#[async_trait::async_trait(?Send)]
 impl BrowserSessionHost for OwnerInteractionBrowserHost {
     /// Lists sessions by requesting the runtime owner app through Core interaction.
-    fn listBrowserSessions(&self) -> HostResult<Vec<BrowserSessionInfo>> {
-        let response = requestOwnerBrowserSession(
+    async fn listBrowserSessions(&self) -> HostResult<Vec<BrowserSessionInfo>> {
+        let response = requestOwnerBrowserSessionAsync(
             RuntimeHostInteractionBrowserSessionPayload {
                 commandJson: json!({
                     "action": "list",
@@ -157,6 +173,7 @@ impl BrowserSessionHost for OwnerInteractionBrowserHost {
             },
             Duration::from_secs(2),
         )
+        .await
         .expect("owner browser response must arrive");
         let result: BrowserSessionCommandResult =
             serde_json::from_str(&response.resultJson).expect("browser result must decode");
@@ -164,7 +181,7 @@ impl BrowserSessionHost for OwnerInteractionBrowserHost {
     }
 
     /// Rejects session creation because this test only exercises listing.
-    fn createBrowserSession(
+    async fn createBrowserSession(
         &self,
         _initialUrl: &str,
         _userAgent: Option<&str>,
@@ -174,7 +191,7 @@ impl BrowserSessionHost for OwnerInteractionBrowserHost {
     }
 
     /// Rejects session updates because this test only exercises listing.
-    fn updateBrowserSession(
+    async fn updateBrowserSession(
         &self,
         _sessionId: &str,
         _userAgent: Option<&str>,
@@ -184,7 +201,7 @@ impl BrowserSessionHost for OwnerInteractionBrowserHost {
     }
 
     /// Rejects semantic commands because this test only exercises listing.
-    fn submitBrowserCommand(
+    async fn submitBrowserCommand(
         &self,
         _command: BrowserSessionCommand,
     ) -> HostResult<BrowserSessionCommandResult> {
@@ -192,12 +209,18 @@ impl BrowserSessionHost for OwnerInteractionBrowserHost {
     }
 
     /// Rejects snapshots because this test only exercises listing.
-    fn getBrowserSessionSnapshot(&self, _sessionId: &str) -> HostResult<BrowserSessionSnapshot> {
+    async fn getBrowserSessionSnapshot(
+        &self,
+        _sessionId: &str,
+    ) -> HostResult<BrowserSessionSnapshot> {
         panic!("getBrowserSessionSnapshot is not used by this test")
     }
 
     /// Rejects session closing because this test only exercises listing.
-    fn closeBrowserSession(&self, _sessionId: &str) -> HostResult<BrowserSessionCommandResult> {
+    async fn closeBrowserSession(
+        &self,
+        _sessionId: &str,
+    ) -> HostResult<BrowserSessionCommandResult> {
         panic!("closeBrowserSession is not used by this test")
     }
 }
@@ -302,6 +325,173 @@ async fn receive_proxy_test_event(stream: &mut CoreEventStream) -> CoreEvent {
         .await
         .expect("proxy test event must arrive")
         .expect("proxy test stream must stay open")
+}
+
+/// Exercises the generated RPC route, including independent per-blob failures.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn generated_proxy_blob_presence_preserves_batch_results() {
+    let _test_guard = SHARED_CONCURRENCY_TEST_LOCK.lock().await;
+    tokio::task::LocalSet::new().run_until(async {
+        use operit_store::RuntimeFileSyncStore::{RuntimeFileSyncReference, RuntimeFileSyncStore};
+        use operit_util::RuntimeStorageLayout::RUNTIME_SYNC_DIR_PATH;
+
+        let storage = register_test_runtime_roots();
+        let store = RuntimeFileSyncStore::new(storage.clone(), RUNTIME_SYNC_DIR_PATH);
+        let present = store.storeBlob(b"sync blob route regression").unwrap();
+        let missing = RuntimeFileSyncReference { contentHash: "0".repeat(64), size: 0 };
+        let invalid = RuntimeFileSyncReference { contentHash: "invalid".into(), size: 0 };
+        let wrong_size = RuntimeFileSyncReference { size: present.size + 1, ..present.clone() };
+
+        let mut hosts = HostManager::withFileSystemHost(Arc::new(PosixFileSystemHost::new()));
+        hosts.runtimeStorageHost = Some(storage.clone());
+        hosts.runtimeSqliteHost = Some(storage);
+        hosts.hostSecretStore = Some(Arc::new(TestSecretStore::default()));
+        hosts.hostJavaScriptRuntimeHost = Some(Arc::new(NativeHostJavaScriptRuntimeHost::new()));
+        hosts.hostRuntimeTaskSchedulerHost = Some(Arc::new(NativeHostRuntimeTaskSchedulerHost::new()));
+        let proxy = LocalCoreProxy::new(OperitApplication::newWithContext(hosts));
+
+        let response = CoreLinkSharedClient::call(&proxy, CoreCallRequest::new(
+            "blob-presence", "core/application", "syncBlobExists",
+            toCoreValue(json!({"references": [present, missing, invalid, wrong_size]})).unwrap(),
+        )).await;
+        let presence: Vec<Result<bool, String>> = fromCoreValue(
+            response.result.expect("blob presence must be available through generated dispatch"),
+        ).unwrap();
+        assert_eq!(presence.len(), 4);
+        assert_eq!(presence[0], Ok(true));
+        assert_eq!(presence[1], Ok(false));
+        assert!(presence[2].as_ref().unwrap_err().contains("SHA-256"));
+        assert_eq!(presence[3], Ok(true));
+
+        let empty = CoreLinkSharedClient::call(&proxy, CoreCallRequest::new(
+            "empty-blob-presence", "core/application", "syncBlobExists",
+            toCoreValue(json!({"references": []})).unwrap(),
+        )).await;
+        let presence: Vec<Result<bool, String>> = fromCoreValue(empty.result.unwrap()).unwrap();
+        assert!(presence.is_empty());
+
+        let malformed = CoreLinkSharedClient::call(&proxy, CoreCallRequest::new(
+            "invalid-blob-presence", "core/application", "syncBlobExists",
+            toCoreValue(json!({"references": {"invalid": true}})).unwrap(),
+        )).await;
+        assert!(malformed.result.is_err(), "invalid batches must fail without hiding per-blob errors");
+    }).await;
+}
+
+/// Resets real plugin databases through the application and replays their complete baselines.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reset_transactions_preserves_plugin_definitions_and_replay() {
+    let _guard = SHARED_CONCURRENCY_TEST_LOCK.lock().await;
+    tokio::task::LocalSet::new().run_until(async {
+        use operit_store::{PluginStorage::{self, PluginStorageSession}, SyncOperationStore::SyncClock};
+        let peer = register_test_runtime_roots();
+        let storage = register_test_runtime_roots();
+        let mut hosts = HostManager::withFileSystemHost(Arc::new(PosixFileSystemHost::new()));
+        hosts.runtimeStorageHost = Some(storage.clone());
+        hosts.runtimeSqliteHost = Some(storage.clone());
+        hosts.hostSecretStore = Some(Arc::new(TestSecretStore::default()));
+        hosts.hostJavaScriptRuntimeHost = Some(Arc::new(NativeHostJavaScriptRuntimeHost::new()));
+        hosts.hostRuntimeTaskSchedulerHost = Some(Arc::new(NativeHostRuntimeTaskSchedulerHost::new()));
+        let app = OperitApplication::newWithContext(hosts);
+        let session = PluginStorageSession::default();
+        let call = |request: Value| {
+            serde_json::to_value(session.request(storage.clone(), storage.clone(),
+                serde_json::from_value(request).unwrap(), "reset-source").unwrap()).unwrap()
+        };
+        let mut captured = Vec::new();
+        for kind in ["objects", "sqlite"] {
+            let path = format!("runtime/plugin_data/space/reset_test/{kind}.sqlite");
+            let handle = call(json!({"op":"open","path":path,"kind":kind}))["handle"].as_str().unwrap().to_owned();
+            if kind == "objects" {
+                call(json!({"op":"commit","handle":handle,"mutations":[{
+                    "collection":"keys","key":"one","value":{"name":"preserved"},
+                    "deleted":false,"checkVersion":false,"expectedVersion":null
+                }]}));
+            } else {
+                call(json!({"op":"define_table","handle":handle,"table":{
+                    "name":"records","primaryKey":"id","columns":[
+                        {"name":"id","affinity":"text","nullable":false},
+                        {"name":"value","affinity":"integer","nullable":false}
+                    ]
+                }}));
+                call(json!({"op":"execute","handle":handle,"statement":{
+                    "sql":"INSERT INTO records VALUES('one',42)","params":[]
+                }}));
+            }
+            captured.push((path.clone(),
+                PluginStorage::syncSnapshot(storage.clone(), &path, "reset-source").unwrap().data,
+                PluginStorage::snapshotDefinition(storage.clone(), &path).unwrap()));
+        }
+        for _ in 0..2 {
+            let result = app.syncResetTransactions().expect("plugin database definitions must accompany reset baselines");
+            assert!(result["owners"].as_u64().unwrap() >= 2);
+            let exported = PluginStorage::operationsSince(storage.clone(), &SyncClock::empty(), &[], 100).unwrap();
+            assert_eq!(exported.len(), captured.len());
+            for operation in &exported {
+                let initialization = operit_store::Transaction::compaction::Initialization::decode(operation).unwrap().unwrap();
+                let (_, data, definition) = captured.iter().find(|(path,_,_)|path == &initialization.data.owner.path).unwrap();
+                assert_eq!(&initialization.data, data);
+                assert_eq!(initialization.definition.as_ref(), Some(definition));
+                PluginStorage::applyOperation(peer.clone(), peer.clone(), operation, &BTreeMap::new()).unwrap();
+            }
+            for (path, data, definition) in &captured {
+                assert_eq!(&PluginStorage::syncSnapshot(storage.clone(), path, "reset-source").unwrap().data, data);
+                assert_eq!(&PluginStorage::syncSnapshot(peer.clone(), path, "reset-peer").unwrap().data, data);
+                assert_eq!(&PluginStorage::snapshotDefinition(peer.clone(), path).unwrap(), definition);
+            }
+        }
+    }).await;
+}
+
+/// Skipped full files retry the winner, retaining failures until its blob exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn skipped_file_states_recover_without_structured_initialization() {
+    let _guard = SHARED_CONCURRENCY_TEST_LOCK.lock().await;
+    tokio::task::LocalSet::new().run_until(async {
+        use operit_store::{RuntimeFileSyncStore::RuntimeFileSyncStore, SyncOperationStore::SyncOperationStore};
+        let source = register_test_runtime_roots();
+        let path = "workspaces/project/recovery.txt";
+        let files = RuntimeFileSyncStore::new(source.clone(), "runtime/sync");
+        files.writeBytes(path, b"superseded").unwrap();
+        files.writeBytes(path, b"second").unwrap();
+        let source_journal = SyncOperationStore::new(source.clone(), "runtime/sync");
+        source.openTransactionDatabase("runtime/sync/transactions.sqlite").unwrap()
+            .executeBatch("UPDATE originals SET pending=2 WHERE domain='runtime_file'").unwrap();
+        let originals = source_journal.skippedOperations().unwrap();
+        assert_eq!(originals.len(), 2);
+        let target = register_test_runtime_roots();
+        let journal = SyncOperationStore::new(target.clone(), "runtime/sync");
+        journal.receiveOperations(&originals).unwrap();
+        target.openTransactionDatabase("runtime/sync/transactions.sqlite").unwrap()
+            .executeBatch("UPDATE originals SET pending=2 WHERE domain='runtime_file'").unwrap();
+        let mut hosts = HostManager::withFileSystemHost(Arc::new(PosixFileSystemHost::new()));
+        hosts.runtimeStorageHost = Some(target.clone());
+        hosts.runtimeSqliteHost = Some(target.clone());
+        hosts.hostSecretStore = Some(Arc::new(TestSecretStore::default()));
+        hosts.hostJavaScriptRuntimeHost = Some(Arc::new(NativeHostJavaScriptRuntimeHost::new()));
+        hosts.hostRuntimeTaskSchedulerHost = Some(Arc::new(NativeHostRuntimeTaskSchedulerHost::new()));
+        let app = OperitApplication::newWithContext(hosts);
+        let clock = app.syncClock().unwrap();
+        assert_eq!(clock["pending"], 2);
+        assert_eq!(clock["pendingBlobs"].as_array().unwrap().len(), 1);
+        assert_eq!(app.syncApplyOperations(json!([])).unwrap()["pending"], 2);
+        assert_eq!(journal.skippedOperations().unwrap().len(), 2);
+        // A newer complete state must supersede missing older blobs without a blocked recovery intent.
+        files.writeBytes(path, b"winner").unwrap();
+        let winner = source_journal.operationsSince(&journal.receipt().unwrap(), &[], 100).unwrap().pop().unwrap();
+        journal.receiveOperations(std::slice::from_ref(&winner)).unwrap();
+        assert_eq!(app.syncClock().unwrap()["pendingBlobs"].as_array().unwrap().len(), 1);
+        assert_eq!(journal.skippedOperations().unwrap().len(), 2, "preference preparation must not skip a healthy file operation");
+        let reference = RuntimeFileSyncStore::requiredBlob(&winner).unwrap().unwrap();
+        RuntimeFileSyncStore::new(target.clone(), "runtime/sync").writeBlob(&reference, &files.readBlob(&reference).unwrap()).unwrap();
+        assert_eq!(app.syncApplyOperations(json!([winner])).unwrap()["pending"], 0);
+        assert!(journal.skippedOperations().unwrap().is_empty());
+        assert_eq!(target.readBytes(path).unwrap(), b"winner");
+        assert_eq!(source.modifiedAt(path).unwrap(), target.modifiedAt(path).unwrap());
+        assert_eq!(app.syncApplyOperations(json!([])).unwrap()["applied"], 0);
+        assert_eq!(app.syncClock().unwrap()["pending"], 0);
+        assert!(app.syncConsistency().unwrap()["skipped"].as_object().unwrap().is_empty());
+    }).await;
 }
 
 /// Verifies unrelated generated watches never wait for a resolved holder lock.
@@ -534,12 +724,12 @@ async fn child_chat_creation_preserves_parent_without_cloning_history() {
         let mut holder = holder.lock().await;
         let target = LocalCoreProxy::generatedTargetForSchema("chatRuntimeHolderMain").unwrap();
         let core = holder.coreForTarget(target).unwrap();
-        let parent = core.createNewChat(true, None, None, None).await.unwrap();
+        let parent = core.createNewChat(true, None, None, None, None).await.unwrap();
         core.chatHistoryDelegate.addMessageToChat(
             ChatMessage::new_with_markdown("user".into(), "parent history must stay in its conversation".into()),
             Some(parent.clone()),
         );
-        let child = core.createNewChat(false, Some(parent.clone()), Some(parent.clone()), None).await.unwrap();
+        let child = core.createNewChat(false, Some(parent.clone()), Some(parent.clone()), None, None).await.unwrap();
         assert_ne!(child, parent);
         assert_eq!(core.currentChatIdFlow().await.unwrap().value(), Some(parent.clone()));
         let stored = core.chatHistoryDelegate.chatHistoryManager.loadChatHistory(child.clone()).unwrap().unwrap();
@@ -548,11 +738,11 @@ async fn child_chat_creation_preserves_parent_without_cloning_history() {
         let summaries = core.chatHistoryListItemsFlow().value();
         assert_eq!(summaries.iter().find(|chat| chat.id == child).unwrap().parentChatId, Some(parent.clone()));
         let before = summaries.len();
-        let error = core.createNewChat(false, Some(parent), Some("absent-parent".into()), None).await.unwrap_err();
+        let error = core.createNewChat(false, Some(parent), Some("absent-parent".into()), None, None).await.unwrap_err();
         assert_eq!(error, "Parent chat does not exist: absent-parent");
         assert_eq!(core.chatHistoryListItemsFlow().value().len(), before);
-        let empty = core.createNewChat(true, None, None, None).await.unwrap();
-        let selectedChild = core.createNewChat(true, Some(empty.clone()), Some(empty.clone()), None).await.unwrap();
+        let empty = core.createNewChat(true, None, None, None, None).await.unwrap();
+        let selectedChild = core.createNewChat(true, Some(empty.clone()), Some(empty.clone()), None, None).await.unwrap();
         assert_ne!(selectedChild, empty, "An explicit child cannot reuse its empty source");
         let selected = core.chatHistoryDelegate.chatHistoryManager.loadChatHistory(selectedChild).unwrap().unwrap();
         assert_eq!(selected.parentChatId, Some(empty));
@@ -587,7 +777,7 @@ async fn generated_proxy_chat_instance_uses_detached_runtime_slot() {
                     .coreForTarget(chat_object_id)
                     .expect("chat runtime holder main core must exist");
                 main_core
-                    .createNewChat(true, None, None, None)
+                    .createNewChat(true, None, None, None, None)
                     .await
                     .expect("test chat creation must succeed");
                 let main_chat_id = main_core
@@ -604,7 +794,7 @@ async fn generated_proxy_chat_instance_uses_detached_runtime_slot() {
                     .coreForInstanceId(detached_slot_id.to_string())
                     .expect("detached runtime core must exist");
                 detached_core
-                    .createNewChat(true, None, None, None)
+                    .createNewChat(true, None, None, None, None)
                     .await
                     .expect("test chat creation must succeed");
                 let detached_chat_id = detached_core
@@ -693,7 +883,7 @@ async fn local_chat_messages_flow_update_opens_embedded_stream() {
                 let core = holder
                     .coreForTarget(chat_object_id)
                     .expect("chat runtime holder main core must exist");
-                core.createNewChat(true, None, None, None)
+                core.createNewChat(true, None, None, None, None)
                     .await
                     .expect("test chat creation must succeed");
                 core.chatHistoryDelegate
@@ -851,7 +1041,7 @@ async fn local_chat_messages_flow_update_inside_async_capture_opens_embedded_str
                 let core = holder
                     .coreForTarget(chat_object_id)
                     .expect("chat runtime holder main core must exist");
-                core.createNewChat(true, None, None, None)
+                core.createNewChat(true, None, None, None, None)
                     .await
                     .expect("test chat creation must succeed");
                 core.chatHistoryDelegate
@@ -929,9 +1119,9 @@ async fn local_chat_messages_flow_update_inside_async_capture_opens_embedded_str
         .await;
 }
 
-/// Verifies concurrent Application child calls wait for the shared application lock.
+/// Verifies concurrent Application child calls use the same shared services.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn shared_core_serializes_application_child_access() {
+async fn shared_core_handles_concurrent_application_child_access() {
     let _testGuard = SHARED_CONCURRENCY_TEST_LOCK.lock().await;
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -1287,3 +1477,6 @@ mod ui_resource_tests;
 
 #[path = "support/failed_package_tests.rs"]
 mod failed_package_tests;
+
+#[path = "support/relative_terminal_tests.rs"]
+mod relative_terminal_tests;

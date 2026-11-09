@@ -92,6 +92,19 @@ pub const SUMMARY_PROMPT_EN: &str = r#"You are an AI assistant responsible for g
 5. Goal: the summary must be self-contained so that even if the AI forgets the original conversation, it can fully reconstruct context, current status, progress, and next actions.
 6. Recency: focus first on the most recent part of the conversation (about the last 30% of input), then review earlier content. If new messages conflict with old content, use the latest messages and explain the differences."#;
 
+/// Wrapper text prepended to a persisted compact-boundary message when it is
+/// replayed into the active context as the opening user turn.
+pub const BOUNDARY_WRAPPER_CN: &str = "本会话延续自一段超出上下文限制的先前对话。以下检查点覆盖了先前对话中已被压缩的部分。";
+pub const BOUNDARY_WRAPPER_EN: &str = "This session is being continued from a previous conversation that ran out of context. The checkpoint below covers the earlier portion of the conversation.";
+
+/// Statement appended when preserved recent messages follow the boundary.
+pub const BOUNDARY_PRESERVED_NOTE_CN: &str = "检查点之后的消息是压缩前保留的最近原文，检查点撰写时未看到它们；检查点中所述「尚未发生」的事可能已在其后发生。";
+pub const BOUNDARY_PRESERVED_NOTE_EN: &str = "The messages after this checkpoint are the most recent messages from before compaction, kept verbatim. The checkpoint was written without seeing them, so something it says has not happened yet may already have happened in them.";
+
+/// Continuation instruction appended for auto/handoff-triggered compaction.
+pub const BOUNDARY_CONTINUE_CN: &str = "从上次中断处继续对话，不要向用户追问。直接续接——不要确认收到检查点、不要复述发生了什么、不要以「我继续」之类的话开场，就当这次中断没有发生过。";
+pub const BOUNDARY_CONTINUE_EN: &str = "Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the checkpoint, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.";
+
 pub const FILE_BINDING_MERGE_PROMPT: &str = r#"You are an expert programmer. Your task is to create the final, complete content of a file by merging the 'Original File Content' with the 'Intended Changes'.
 
 The 'Intended Changes' block uses a special placeholder, `// ... existing code ...`, which you MUST replace with the complete and verbatim 'Original File Content'.
@@ -118,17 +131,6 @@ pub const FILE_BINDING_MERGE_PROMPT_CN: &str = r#"你是一位资深程序员。
 “预期修改”为：`// ... existing code ...\nnew line 3`
 那么你的最终输出必须是：`line 1\nline 2\nnew line 3`"#;
 
-pub const SUMMARY_MARKER_CN: &str = "==========对话摘要==========";
-pub const SUMMARY_MARKER_EN: &str = "==========Conversation Summary==========";
-pub const SUMMARY_SECTION_CORE_TASK_CN: &str = "【核心任务状态】";
-pub const SUMMARY_SECTION_INTERACTION_CN: &str = "【互动情节与设定】";
-pub const SUMMARY_SECTION_PROGRESS_CN: &str = "【对话历程与概要】";
-pub const SUMMARY_SECTION_KEY_INFO_CN: &str = "【关键信息与上下文】";
-pub const SUMMARY_SECTION_CORE_TASK_EN: &str = "[Core Task Status]";
-pub const SUMMARY_SECTION_INTERACTION_EN: &str = "[Interaction & Scenario]";
-pub const SUMMARY_SECTION_PROGRESS_EN: &str = "[Conversation Progress & Overview]";
-pub const SUMMARY_SECTION_KEY_INFO_EN: &str = "[Key Information & Context]";
-
 pub const UI_CONTROLLER_PROMPT: &str = r#"You are a UI controller. Analyze the current UI state and decide the next action. Output only the action required by the controller schema."#;
 pub const UI_CONTROLLER_PROMPT_CN: &str =
     r#"你是 UI 控制器。请分析当前界面状态并决定下一步动作。只输出控制器格式要求的动作。"#;
@@ -152,25 +154,57 @@ impl FunctionalPrompts {
         }
     }
 
+    /// Builds the summary prompt and includes the previous summary, matching the Kotlin implementation.
     #[allow(non_snake_case)]
-    pub fn buildSummarySystemPrompt(previous_summary: Option<&str>, use_english: bool) -> String {
+    pub fn buildSummarySystemPrompt(
+        previous_summary: Option<&str>,
+        use_english: bool,
+    ) -> String {
         let mut prompt = Self::summaryPrompt(use_english).trim().to_string();
-        if let Some(previous_summary) = previous_summary {
-            if !previous_summary.trim().is_empty() {
-                if use_english {
-                    prompt.push_str(&format!(
-                        "\n\nPrevious Summary (to inherit context):\n{}\nPlease merge the key information from the previous summary with the new conversation and generate a brand-new, more complete summary.",
-                        previous_summary.trim()
-                    ));
-                } else {
-                    prompt.push_str(&format!(
-                        "\n\n上一次的摘要（用于继承上下文）：\n{}\n请将以上摘要中的关键信息，与本次新的对话内容相融合，生成一份全新的、更完整的摘要。",
-                        previous_summary.trim()
-                    ));
-                }
+        if let Some(previous) = previous_summary.map(str::trim).filter(|summary| !summary.is_empty()) {
+            prompt.push_str("\n\n");
+            if use_english {
+                prompt.push_str("Previous Summary (to inherit context):\n");
+                prompt.push_str(previous);
+                prompt.push_str("\nPlease merge the key information from the previous summary with the new conversation and generate a brand-new, more complete summary.");
+            } else {
+                prompt.push_str("上一次的摘要（用于继承上下文）：\n");
+                prompt.push_str(previous);
+                prompt.push_str("\n请将以上摘要中的关键信息，与本次新的对话内容相融合，生成一份全新的、更完整的摘要。");
             }
         }
         prompt
+    }
+
+    /// Wrapper text that frames a persisted boundary message as historical
+    /// context when it is replayed into the active conversation.
+    #[allow(non_snake_case)]
+    pub fn boundaryWrapper(use_english: bool) -> &'static str {
+        if use_english {
+            BOUNDARY_WRAPPER_EN
+        } else {
+            BOUNDARY_WRAPPER_CN
+        }
+    }
+
+    /// Statement marking preserved recent messages that follow a boundary.
+    #[allow(non_snake_case)]
+    pub fn boundaryPreservedNote(use_english: bool) -> &'static str {
+        if use_english {
+            BOUNDARY_PRESERVED_NOTE_EN
+        } else {
+            BOUNDARY_PRESERVED_NOTE_CN
+        }
+    }
+
+    /// Continuation instruction for auto/handoff-triggered boundaries.
+    #[allow(non_snake_case)]
+    pub fn boundaryContinue(use_english: bool) -> &'static str {
+        if use_english {
+            BOUNDARY_CONTINUE_EN
+        } else {
+            BOUNDARY_CONTINUE_CN
+        }
     }
 
     #[allow(non_snake_case)]

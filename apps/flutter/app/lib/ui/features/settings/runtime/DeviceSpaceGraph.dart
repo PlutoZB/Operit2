@@ -6,10 +6,10 @@ import 'package:flutter/material.dart';
 
 import '../../../../core/proxy/generated/CoreProxyModels.g.dart' as generated;
 import '../../../../l10n/generated/app_localizations.dart';
+import '../../../common/device/DeviceSphere.dart';
 
 part 'DeviceSpaceGraphLayout.dart';
 part 'DeviceSpaceGraphPainter.dart';
-part 'DeviceSpaceGraphSphere.dart';
 
 /// One continuous scene: space membership unfolds into recorded connections.
 class DeviceSpaceGraph extends StatefulWidget {
@@ -635,9 +635,9 @@ class _GraphDeviceNodeState extends State<_GraphDeviceNode>
                 child: Stack(
                   clipBehavior: Clip.none,
                   children: <Widget>[
-                    _GraphDeviceSphere(
+                    DeviceSphere(
                       diameter: diameter,
-                      icon: _deviceIcon(widget.device.platform),
+                      icon: devicePlatformIcon(widget.device.platform),
                       iconSize: current
                           ? metrics.currentIcon
                           : metrics.remoteIcon,
@@ -645,7 +645,7 @@ class _GraphDeviceNodeState extends State<_GraphDeviceNode>
                       online: widget.device.online,
                       motion: widget.motion,
                       elevation: _elevation,
-                      frame: widget.frame,
+                      pose: widget.frame,
                     ),
                     if (current)
                       Positioned(
@@ -863,7 +863,7 @@ class _GraphDeviceDetails extends StatelessWidget {
           Row(
             children: <Widget>[
               Icon(
-                _deviceIcon(device.platform),
+                devicePlatformIcon(device.platform),
                 color: scheme.primary,
                 size: 22,
               ),
@@ -891,6 +891,8 @@ class _GraphDeviceDetails extends StatelessWidget {
                               : l10n.deviceSpaceRelayHops(device.relayHops!),
                         device.platform,
                         if (device.coreVersion != null) device.coreVersion!,
+                        if (device.protocolVersion != null)
+                          '${Localizations.localeOf(context).languageCode == "zh" ? "协议" : "Protocol"} v${device.protocolVersion}',
                       ].join(' · '),
                       style: Theme.of(context).textTheme.labelSmall?.copyWith(
                         color: scheme.onSurfaceVariant,
@@ -1006,24 +1008,12 @@ class _GraphCopy {
     generated.RuntimeDeviceSpaceConnectionStatus.offline =>
       zh ? '离线' : 'Offline',
     generated.RuntimeDeviceSpaceConnectionStatus.versionMismatch =>
-      zh ? 'Core 版本不匹配' : 'Core version mismatch',
+      zh ? '通信协议不匹配' : 'Peer protocol mismatch',
     generated.RuntimeDeviceSpaceConnectionStatus.announced =>
       zh ? '已宣告' : 'Announced',
     generated.RuntimeDeviceSpaceConnectionStatus.unknown =>
       zh ? '状态未知' : 'Unknown',
   };
-}
-
-IconData _deviceIcon(String platform) {
-  final name = platform.trim().toLowerCase();
-  if (name.contains('android')) return Icons.android_rounded;
-  if (name.contains('windows')) return Icons.laptop_windows_rounded;
-  if (name.contains('mac') || name.contains('darwin')) {
-    return Icons.laptop_mac_rounded;
-  }
-  if (name.contains('linux')) return Icons.dns_outlined;
-  if (name.contains('ios')) return Icons.phone_iphone_rounded;
-  return Icons.devices_other_rounded;
 }
 
 Color _connectionColor(

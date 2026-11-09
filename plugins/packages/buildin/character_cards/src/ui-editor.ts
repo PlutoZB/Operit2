@@ -6,6 +6,7 @@ import { parseScreenResult, type ScreenBootstrap } from "./presentation";
 import { record } from "./domain";
 import { createUiScreenSession } from "./ui-contributions";
 import type { UiScreenSession, UiPresentation } from "./ui-contributions";
+import { initializationRecoveryUi } from "./ui-initialization-recovery";
 
 /** Decodes the WebView controller's documented nested argument-array contract. */
 function webArguments(value: readonly unknown[], expected: number): unknown[] {
@@ -18,6 +19,7 @@ export function renderScreen(ctx: ComposeDslContext, definition: Definition, req
   const controller = ctx.createWebViewController("character-memory-web");
   const [path, setPath] = ctx.useState("character-memory-html", "");
   const [error, setError] = ctx.useState("character-memory-error", "");
+  const recovery = initializationRecoveryUi(ctx, () => { dispose(); setPath(""); });
   const ready = ctx.useRef("character-memory-ready", false);
   const unsubscribe = ctx.useRef<(() => void) | null>("character-memory-theme-subscription", null);
   const [presentation] = ctx.useState<UiPresentation | null>("presentation", null);
@@ -49,9 +51,14 @@ export function renderScreen(ctx: ComposeDslContext, definition: Definition, req
           const current = screenSession.currentScreen();
           const screen = current.input.mode === "manage" && managementView === "memory"
             ? { ...current, input: { mode: "manage" as const, view: "memory" as const } } : current;
-          const snapshot = await ToolPkg.ipc.call<{ action: "snapshot" }, Snapshot>("character-memory.request", { action: "snapshot" }, { targetRuntime: "main" });
-          ready.current = true;
-          return { theme: ctx.Theme.getCurrent(), screen, snapshot };
+          try {
+            const snapshot = await ToolPkg.ipc.call<{ action: "snapshot" }, Snapshot>("character-memory.request", { action: "snapshot" }, { targetRuntime: "main" });
+            ready.current = true;
+            return { theme: ctx.Theme.getCurrent(), screen, snapshot };
+          } catch (failure) {
+            if (screen.input.mode === "manage" && managementView === "characters") recovery.reportFailure(failure);
+            throw failure;
+          }
         },
         /** Routes all editing operations through this package's main runtime. */
         request: async (...args: unknown[]) => {
@@ -87,6 +94,17 @@ export function renderScreen(ctx: ComposeDslContext, definition: Definition, req
           managedLive.current = request; setManaged(request);
           return null;
         },
+        /** Reads the selected document through its host-provided VFS resource. */
+        readImportFile: async (...args: unknown[]) => {
+          webArguments(args, 0);
+          const selected = await ctx.openFilePicker({ picker: "document", allowMultiple: false, mimeTypes: ["application/json"] });
+          if (selected.cancelled) return { cancelled: true };
+          if (selected.files.length !== 1) throw new Error("请选择一个 JSON 文件");
+          const file = await Tools.Files.read(selected.files[0].path);
+          const content = file.content.replace(/^\uFEFF/, "");
+          if (content.trim() === "") throw new Error("所选 JSON 文件为空");
+          return { cancelled: false, content };
+        },
         /** Saves an export through the same host boundary used for file selection. */
         exportFile: async (...args: unknown[]) => {
           const [name, content] = webArguments(args, 2);
@@ -104,7 +122,8 @@ export function renderScreen(ctx: ComposeDslContext, definition: Definition, req
     ready.current = false;
     if (unsubscribe.current !== null) { unsubscribe.current(); unsubscribe.current = null; }
   }
-  return ctx.UI.Box({ fillMaxSize: true, onLoad: initialize }, [path === "" ? ctx.UI.Text({ text: error === "" ? `正在加载${managementView === "memory" ? "记忆" : definition.title}…` : error }) : ctx.UI.WebView({
+  if (recovery.panel !== null) return recovery.panel;
+  return ctx.UI.Box({ key: "character-memory-editor", fillMaxSize: true, onLoad: initialize }, [path === "" ? ctx.UI.Text({ text: error === "" ? `正在加载${managementView === "memory" ? "记忆" : definition.title}…` : error }) : ctx.UI.WebView({
     key: "character-memory-web", controller, fillMaxSize: true, url: origin,
     javaScriptEnabled: true, domStorageEnabled: true, supportZoom: false, useWideViewPort: true,
     /** Restricts top-level navigation to the package document. */

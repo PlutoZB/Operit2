@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "toolpkg_id": "com.operit.change_review",
+  "version": "0.1.0",
+  "api_version": "2.0.0",
+  "main": "dist/main.js",
+  "display_name": { "zh": "变更审阅", "en": "Change review" },
+  "description": {
+    "zh": "回复下方列出 AI 改过的文件，可一键撤销，也能在工作区里逐行对比。",
+    "en": "Lists the files the AI changed under each reply; undo them in one step or review every line."
+  },
+  "logo": "package_logo",
+  "enabled_by_default": true,
+  "resources": [
+    {
+      "key": "package_logo",
+      "path": "resources/logo.svg",
+      "mime": "image/svg+xml"
+    }
+  ],
+  "installation_scope": "space"
+}

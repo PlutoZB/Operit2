@@ -6,7 +6,7 @@ use std::sync::Arc;
 use operit_link::protocol::LinkDeviceInfo;
 use operit_core_application::{CoreApplication, CoreApplicationConfig};
 use operit_host_api::HostManager::HostManager;
-use operit_host_api::{HostResult, ToastHost};
+use operit_host_api::{ClipboardHost, HostError, HostResult, ToastHost};
 #[cfg(target_os = "linux")]
 use operit_host_linux_native::{
     LinuxAudioPlaybackHost as NativeAudioPlaybackHost, LinuxBluetoothHost as NativeBluetoothHost,
@@ -18,6 +18,7 @@ use operit_host_linux_native::{
     LinuxHttpHost as NativeHttpHost, LinuxManagedRuntimeHost as NativeManagedRuntimeHost,
     LinuxPluginSdkIpcHost as NativePluginSdkIpcHost,
     LinuxRuntimeStorageHost as NativeRuntimeStorageHost,
+    LinuxServiceDiscoveryHost as NativeServiceDiscoveryHost,
     LinuxSystemOperationHost as NativeSystemOperationHost, LinuxTerminalHost as NativeTerminalHost,
     LinuxWebVisitHost as NativeWebVisitHost,
 };
@@ -31,6 +32,7 @@ use operit_host_macos_native::{
     MacosHttpHost as NativeHttpHost, MacosManagedRuntimeHost as NativeManagedRuntimeHost,
     MacosPluginSdkIpcHost as NativePluginSdkIpcHost,
     MacosRuntimeStorageHost as NativeRuntimeStorageHost,
+    MacosServiceDiscoveryHost as NativeServiceDiscoveryHost,
     MacosSystemOperationHost as NativeSystemOperationHost, MacosTerminalHost as NativeTerminalHost,
     MacosWebVisitHost as NativeWebVisitHost,
 };
@@ -47,6 +49,7 @@ use operit_host_windows_native::{
     WindowsHttpHost as NativeHttpHost, WindowsManagedRuntimeHost as NativeManagedRuntimeHost,
     WindowsPluginSdkIpcHost as NativePluginSdkIpcHost,
     WindowsRuntimeStorageHost as NativeRuntimeStorageHost,
+    WindowsServiceDiscoveryHost as NativeServiceDiscoveryHost,
     WindowsSystemOperationHost as NativeSystemOperationHost,
     WindowsTerminalHost as NativeTerminalHost, WindowsWebVisitHost as NativeWebVisitHost,
 };
@@ -61,6 +64,7 @@ compile_error!("operit2 CLI host is implemented for Windows, Linux, and macOS.")
 /// Creates the CLI host manager with the configured runtime and workspace roots.
 pub(crate) fn create_cli_host_manager() -> HostManager {
     create_cli_host_manager_with_toast_host(Arc::new(console_toast))
+        .withClipboardHost(Arc::new(console_clipboard))
 }
 
 /// Returns the OS host name so CLI Cores on different machines stay distinguishable.
@@ -79,6 +83,16 @@ fn cliDeviceInfo(role: &str) -> LinkDeviceInfo {
 fn console_toast(message: &str) -> HostResult<()> {
     eprintln!("{message}");
     Ok(())
+}
+
+/// Writes one non-TUI clipboard text request to the desktop clipboard.
+fn console_clipboard(text: &str) -> HostResult<String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|error| HostError::new(error.to_string()))?;
+    clipboard
+        .set_text(text.to_string())
+        .map_err(|error| HostError::new(error.to_string()))?;
+    Ok(text.to_string())
 }
 
 /// Isolates explicit CLI profiles across all native IPC carriers, and gives
@@ -162,7 +176,7 @@ fn create_cli_host_manager_with_toast_host(toastHost: Arc<dyn ToastHost>) -> Hos
     .withArchiveStagingHost(archiveStagingHost)
     .withRuntimeStorageWriteHost(runtimeStorageWriteHost)
     .withServiceDiscoveryHost(Arc::new(
-        operit_host_native_common::ServiceDiscovery::ServiceDiscoveryProvider::default(),
+        NativeServiceDiscoveryHost::default(),
     ));
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     {

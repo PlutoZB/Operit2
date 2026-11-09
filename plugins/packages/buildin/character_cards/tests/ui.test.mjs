@@ -16,7 +16,7 @@ import { importedCallCount } from "./runtime.mjs";
 import { keyedNode, mountRegisteredSelector, mountRegisteredComposeRoute } from "./selector-render.mjs";
 import { createNativeChatHost } from "./native-chat-host.mjs";
 import { createSelectionSettingsFixture } from "./selection-settings-fixture.mjs";
-const require = createRequire(new URL("../../workflow/package.json", import.meta.url));
+const require = createRequire(import.meta.url);
 const browserType = require("playwright")[process.env.CHARACTER_CARDS_UI_BROWSER ?? "chromium"];
 assert.ok(browserType?.launch, "Unknown CHARACTER_CARDS_UI_BROWSER");
 const html = await createHtmlDocument();
@@ -138,6 +138,12 @@ test("Material graph keeps the canvas prominent and secondary actions in overflo
       assert.ok(search.y > title.y + title.height);
       assert.ok(fab.x >= tools.x + tools.width + 8, `Canvas controls overlap at ${width}px`);
       assert.ok(fab.x + fab.width <= canvas.x + canvas.width);
+      assert.ok(fab.height <= 36, `Create button is oversized at ${width}px`);
+      assert.ok(search.height <= 40, `Search field is oversized at ${width}px`);
+      for (const control of await graph.locator(".icon-button").all()) {
+        const box = await control.boundingBox();
+        assert.ok(box.width <= 32 && box.height <= 32, `Icon control is oversized at ${width}px`);
+      }
       assert.ok(await graph.evaluate(
         /** Rejects horizontal overflow in the graph workspace. */
         element => element.scrollWidth <= element.clientWidth,
@@ -146,7 +152,12 @@ test("Material graph keeps the canvas prominent and secondary actions in overflo
       await ui.page.screenshot({ path: output + `memory-graph-material-${width}.png` });
     }
     await ui.page.setViewportSize({ width: 390, height: 844 });
+    await graph.locator('.memory-item[data-id="memory-one"]').click();
+    await graph.getByRole("button", { name: "展开", exact: true }).click();
+    await ui.page.screenshot({ path: output + "memory-graph-material-detail.png" });
     await applyDarkHostTheme(ui.page);
+    await ui.page.screenshot({ path: output + "memory-graph-material-detail-dark.png" });
+    await graph.getByRole("button", { name: "收起", exact: true }).click();
     await ui.page.screenshot({ path: output + "memory-graph-material-dark.png" });
     const more = graph.getByRole("button", { name: "更多操作", exact: true });
     await more.click();
@@ -177,6 +188,42 @@ test("Material graph keeps the canvas prominent and secondary actions in overflo
     assert.equal(await graph.isVisible(), true);
     assert.equal(await graph.getByRole("button", { name: "导出记忆 JSON", exact: true }).isVisible(), false);
   } finally { await ui.context.close(); }
+});
+
+/** Keeps mobile inspection usable with many memories, long content and a short viewport. */
+test("mobile graph inspector expands and keeps selected details ahead of the memory list", async () => {
+  const data = fixture();
+  data.graph.items[0].content = "需要完整查看的记忆内容。".repeat(150);
+  for (let index = 0; index < 24; index++) {
+    const item = { ...data.graph.items[1], id: "extra-" + index, uuid: "extra-" + index, title: "额外记忆 " + index };
+    data.graph.items.push(item);
+    data.graph.graph.nodes.push({ id: item.uuid, label: item.title, color: 0, metadata: {} });
+  }
+  for (const [width, height] of [[320, 568], [390, 844], [600, 700]]) {
+    const ui = await page(width, height, data, true);
+    try {
+      const graph = await openCharacterGraph(ui.page), panel = graph.getByLabel("记忆列表与详情", { exact: true });
+      await panel.getByRole("button", { name: "展开", exact: true }).click();
+      const layout = await graph.locator(".graph-layout").boundingBox(), expanded = await panel.boundingBox();
+      assert.ok(expanded.height >= layout.height - 2, `Expanded panel is cramped at ${width}×${height}`);
+      await panel.locator('[data-id="memory-one"]').click();
+      assert.equal(await panel.locator(".graph-detail h3").innerText(), "喜欢安静的旅行");
+      assert.equal(await panel.locator(".graph-inspector").evaluate(element => element.firstElementChild.classList.contains("graph-detail")), true);
+      await panel.getByRole("button", { name: "编辑", exact: true }).scrollIntoViewIfNeeded();
+      await ui.page.screenshot({ path: output + `memory-graph-inspector-${width}.png` });
+      await panel.getByRole("button", { name: "编辑", exact: true }).click();
+      const editor = ui.page.getByRole("dialog", { name: "编辑记忆", exact: true });
+      await editor.waitFor();
+      await editor.locator(".dialog-header").getByRole("button", { name: "关闭", exact: true }).click();
+      await panel.locator(".memory-item").last().click();
+      assert.equal(await panel.locator(".graph-detail h3").innerText(), "额外记忆 23");
+      assert.equal(await panel.locator(".graph-inspector").evaluate(element => element.scrollTop), 0);
+      await panel.getByRole("button", { name: "收起", exact: true }).click();
+      assert.ok((await panel.boundingBox()).height < layout.height / 2);
+      assert.ok((await graph.locator("[data-graph-surface]").boundingBox()).height > 0);
+      assert.equal(await graph.evaluate(element => element.scrollWidth <= element.clientWidth), true);
+    } finally { await ui.context.close(); }
+  }
 });
 
 /** Verifies shared-bound memory operations retain the card's actual owner identity. */
@@ -447,11 +494,11 @@ test("graph wheel zoom preserves the cursor anchor and survives selection", asyn
       scale => document.querySelector("[data-graph-surface] > g").transform.baseVal.consolidate().matrix.a < scale, Math.max(1, after.scale),
     );
     const camera = await graphCamera(graph);
-    await graph.locator(".graph-sidebar").hover({ position: { x: 15, y: 15 } });
+    await graph.locator(".graph-inspector").hover({ position: { x: 15, y: 15 } });
     await ui.page.mouse.wheel(0, 240);
     await ui.page.waitForFunction(
       /** Requires ordinary inspector scrolling outside the graph's wheel scope. */
-      () => document.querySelector("dialog[open] .graph-sidebar").scrollTop > 0,
+      () => document.querySelector("dialog[open] .graph-inspector").scrollTop > 0,
     );
     assert.deepEqual(await graphCamera(graph), camera);
   } finally { await ui.context.close(); }
@@ -674,6 +721,28 @@ test("isolated UI import delegates untouched input and renders the declared snap
   await ui.context.close();
 });
 
+/** Exercises the memory import controls and picker cancellation in the embedded browser. */
+test("memory import selects a JSON file without a paste field and retains options when cancelled", async () => {
+  const ui = await page(390, 844);
+  try {
+    const graph = await openCharacterGraph(ui.page);
+    await graph.getByRole("button", { name: "更多操作", exact: true }).click();
+    await graph.getByRole("button", { name: "导入记忆 JSON", exact: true }).click();
+    const dialog = ui.page.getByRole("dialog", { name: "导入记忆 JSON", exact: true });
+    assert.equal(await dialog.locator("textarea").count(), 0);
+    await dialog.getByLabel("相同 UUID 记忆处理", { exact: true }).selectOption("CREATE_NEW");
+    await dialog.getByRole("button", { name: "选择 JSON 文件并导入", exact: true }).click();
+    await ui.page.waitForFunction(() => window.testCalls.some(call => call.action === "readImportFile"));
+    await dialog.locator(".busy-bar").waitFor({ state: "hidden" });
+    assert.equal(await dialog.count(), 1);
+    assert.equal(await dialog.getByLabel("相同 UUID 记忆处理", { exact: true }).inputValue(), "CREATE_NEW");
+    const calls = await ui.page.evaluate(() => window.testCalls);
+    assert.equal(calls.some(call => call.action === "importMemory"), false);
+    await dialog.getByRole("button", { name: "取消", exact: true }).click();
+    await graph.waitFor();
+  } finally { await ui.context.close(); }
+});
+
 /** Verifies graph read failures never expose a guessed empty library or write controls. */
 test("failed graph read reports the host failure and prevents memory writes", async () => {
   const ui = await page();
@@ -692,7 +761,7 @@ function plain(value) { return JSON.parse(JSON.stringify(value)); }
 /** Runs the current main bundle with native file IO and explicit readonly directory fixtures, never fixture storage. */
 async function fileBackedPlugin(t, bundle, uiScripts = undefined, settings = null) {
   const disk = await createDiskHarness(t, { legacyIdentity: "default" }), readonly = fixture(), native = createNativeChatHost(new Map([["chat-dom", { extension: null }]])), hostCalls = native.calls, records = native.records;
-  const apis = new Map(), channels = new Map(), commands = new Map(), routes = [], navigation = [], appHooks = [], messageHooks = [], hostHooks = [], chatLifecycleHooks = [], chatViewHooks = [], toolLifecycleHooks = [], toolPromptHooks = [], promptFinalizeHooks = [];
+  const apis = new Map(), channels = new Map(), commands = new Map(), routes = [], navigation = [], appHooks = [], messageHooks = [], hostHooks = [], chatLifecycleHooks = [], chatViewHooks = [], toolLifecycleHooks = [], toolPromptHooks = [], promptInputHooks = [], promptFinalizeHooks = [];
   const tools = { Files: disk.files, Storage: disk.storage, Models: {
     /** Supplies only the explicitly labelled readonly model directory required by the actual service. */
     async listSummaries() { return { models: plain(readonly.snapshot.models) }; }
@@ -742,7 +811,9 @@ async function fileBackedPlugin(t, bundle, uiScripts = undefined, settings = nul
     registerToolLifecycleHook(value) { toolLifecycleHooks.push(value); },
     /** Captures the real model-visible-tool policy without synthesizing descriptors or responses. */
     registerToolPromptComposeHook(value) { toolPromptHooks.push(value); },
-    /** Captures the actual memory recall hook without running a model request during registration. */
+    /** Captures the actual persisted recall hook without processing input during registration. */
+    registerPromptInputHook(value) { promptInputHooks.push(value); },
+    /** Records transient hooks to ensure recall is not injected again during finalization. */
     registerPromptFinalizeHook(value) { promptFinalizeHooks.push(value); },
     /** Resolves only a real manifest-declared resource, including the native selector's packaged default avatar. */
     async readResource(key, name) {
@@ -784,8 +855,9 @@ async function fileBackedPlugin(t, bundle, uiScripts = undefined, settings = nul
   assert.equal(toolLifecycleHooks[0].function, module.exports.toolCallPolicy);
   assert.equal(toolPromptHooks.length, 1); assert.equal(toolPromptHooks[0].id, "participant-tool-visibility");
   assert.equal(toolPromptHooks[0].function, module.exports.toolPromptPolicy);
-  assert.equal(promptFinalizeHooks.length, 1); assert.equal(promptFinalizeHooks[0].id, "character-memory-recall");
-  assert.equal(promptFinalizeHooks[0].function, module.exports.onMemoryRecallPromptFinalize);
+  assert.equal(promptInputHooks.length, 1); assert.equal(promptInputHooks[0].id, "character-memory-recall");
+  assert.equal(promptInputHooks[0].function, module.exports.onMemoryRecallPromptInput);
+  assert.equal(promptFinalizeHooks.length, 0);
   return { disk, readonly, routes, navigation, main: module.exports,
     /** Gives each page its own runtime, retaining only the explicit main IPC transport. */
     openComposeRoute(id) {
@@ -886,6 +958,7 @@ async function registeredPage(t, plugin, routeId, presentation, documentUrl) {
       /** Delegates explicit cancellation without an identity mutation. */
       cancelScreen: () => window.invokeActualCharacterBridge("cancelScreen", []),
       /** Delegates requested export IO to the actual existing host method. */
+      readImportFile: () => window.invokeActualCharacterBridge("readImportFile", []),
       exportFile: (file, content) => window.invokeActualCharacterBridge("exportFile", [file, content]),
       avatarImage: uri => window.invokeActualCharacterBridge("avatarImage", [uri]),
       openEntity: async (mode, entity, id) => { const result = await window.invokeActualCharacterBridge("openEntity", [mode, entity, id]); window.__entityRequestSent = true; return result; },

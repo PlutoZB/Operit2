@@ -74,11 +74,24 @@ pub struct JsEngine {
 
 #[derive(Clone)]
 struct JsEngineWorker {
+    owner: Arc<JsEngineOwner>,
+    executionHost: Option<Arc<dyn JsExecutionHost>>,
+}
+
+struct JsEngineOwner {
     lifetimeInterrupt: HostJavaScriptExecutionInterrupt,
     runtimeHost: Arc<dyn HostJavaScriptRuntimeHost>,
     stateHandle: HostJavaScriptRuntimeStateHandle,
     alive: Arc<AtomicBool>,
-    executionHost: Option<Arc<dyn JsExecutionHost>>,
+}
+
+impl std::ops::Deref for JsEngineWorker {
+    type Target = JsEngineOwner;
+    fn deref(&self) -> &Self::Target { &self.owner }
+}
+
+impl Drop for JsEngineOwner {
+    fn drop(&mut self) { self.destroy(); }
 }
 
 enum JsAsyncCallback {
@@ -90,8 +103,7 @@ enum JsAsyncCallback {
     },
     Promise {
         requestId: u64,
-        result: Value,
-        reject: bool,
+        result: Result<Value, String>,
     },
     CancelScope {
         scope: String,
@@ -277,7 +289,6 @@ struct JsEngineState {
     detachedCallContexts: BTreeMap<String, JsCallContext>,
     pendingScriptExecutions: BTreeMap<String, JsPendingScriptExecution>,
     registeredScriptSources: BTreeMap<String, String>,
-    jsEnvironmentInitialized: bool,
     packageBinding: Arc<OnceLock<JsPackageBinding>>,
 }
 
@@ -324,7 +335,7 @@ impl JsEngineWorker {
         let requested = Arc::new(AtomicBool::new(false));
         let alive = Arc::new(AtomicBool::new(true));
         let wakeRuntimeHost = runtimeHost.clone();
-        let wakeSlot = backgroundWake.clone();
+        let wakeSlot = Arc::downgrade(&backgroundWake);
         let wakeAlive = alive.clone();
         let wake: JsBackgroundWake = Arc::new(move || {
             if !wakeAlive.load(Ordering::Acquire) {
@@ -334,7 +345,6 @@ impl JsEngineWorker {
             if scheduled.swap(true, Ordering::AcqRel) {
                 return;
             }
-            let taskRuntimeHost = wakeRuntimeHost.clone();
             let taskScheduled = scheduled.clone();
             let taskRequested = requested.clone();
             let taskWakeSlot = wakeSlot.clone();
@@ -355,15 +365,15 @@ impl JsEngineWorker {
                 }
                 taskScheduled.store(false, Ordering::Release);
                 if taskRequested.swap(false, Ordering::AcqRel) {
-                    if let Some(wake) = taskWakeSlot.lock()
-                        .expect("background wake mutex poisoned").clone()
+                    if let Some(wake) = taskWakeSlot.upgrade().and_then(|slot|
+                        slot.lock().expect("background wake mutex poisoned").clone())
                     {
                         wake();
                     }
                 }
                 Ok(Box::new(()))
             });
-            if let Err(error) = taskRuntimeHost.enqueueHostJavaScriptRuntimeStateTask(
+            if let Err(error) = wakeRuntimeHost.enqueueHostJavaScriptRuntimeStateTask(
                 stateHandle, HostJavaScriptExecutionInterrupt::unlimited(), task,
             ) {
                 scheduled.store(false, Ordering::Release);
@@ -377,10 +387,7 @@ impl JsEngineWorker {
             .lock()
             .expect("background wake mutex poisoned") = Some(wake);
         Ok(Self {
-            lifetimeInterrupt,
-            runtimeHost,
-            stateHandle,
-            alive,
+            owner: Arc::new(JsEngineOwner { lifetimeInterrupt, runtimeHost, stateHandle, alive }),
             executionHost: workerExecutionHost,
         })
     }
@@ -598,21 +605,21 @@ impl JsEngineWorker {
                 }
             }),
         );
-        match result {
-            Ok(output) => downcastJavaScriptStateOutput(output),
-            Err(error) => Err(javaScriptExecutionErrorFromHost(error)),
-        }
+        result.map_err(javaScriptExecutionErrorFromHost).and_then(downcastJavaScriptStateOutput)
     }
 
-    /// Destroys the host-owned JavaScript runtime state.
+}
+
+impl JsEngineOwner {
+    /// Releases the Host state once, including when its last caller disappears.
     fn destroy(&self) {
         self.lifetimeInterrupt.interrupt();
         if !self.alive.swap(false, Ordering::AcqRel) {
             return;
         }
-        self.runtimeHost
-            .destroyHostJavaScriptRuntimeState(self.stateHandle)
-            .expect("JavaScript runtime state must be destroyed by the Host");
+        if let Err(error) = self.runtimeHost.destroyHostJavaScriptRuntimeState(self.stateHandle) {
+            AppLogger::e(TAG, &format!("JavaScript runtime cleanup failed: {error}"));
+        }
     }
 }
 
@@ -662,7 +669,7 @@ fn remainingScriptRequestMillis(deadline: u128) -> JsExecutionResult<u64> {
 fn javaScriptExecutionErrorFromHost(error: HostError) -> JsExecutionError {
     match error.kind {
         HostErrorKind::Timeout => JsExecutionError::timeout(error.message),
-        HostErrorKind::General => JsExecutionError::worker_unavailable(error.message),
+        HostErrorKind::General | HostErrorKind::PermissionDenied => JsExecutionError::worker_unavailable(error.message),
     }
 }
 
@@ -773,7 +780,7 @@ fn executeWithInterrupt<T>(
 
 /// Owns a pristine initialized engine until binding succeeds or its request is cancelled.
 pub(crate) struct PreparedJsEngine {
-    engine: Option<JsEngine>,
+    engine: JsEngine,
 }
 
 impl PreparedJsEngine {
@@ -781,7 +788,7 @@ impl PreparedJsEngine {
     pub(crate) fn new() -> Result<Self, String> {
         let worker = JsEngineWorker::new(None, None).map_err(|error| error.to_string())?;
         Ok(Self {
-            engine: Some(JsEngine { worker }),
+            engine: JsEngine { worker },
         })
     }
 
@@ -793,10 +800,7 @@ impl PreparedJsEngine {
     ) -> Result<JsEngine, String> {
         context.validate()?;
         let host = executionHost.for_toolpkg_execution_context(&context)?;
-        let engine = self
-            .engine
-            .as_mut()
-            .expect("Prepared engine must be owned until binding completes");
+        let engine = &mut self.engine;
         let boundHost = host.clone();
         engine
             .worker
@@ -809,11 +813,6 @@ impl PreparedJsEngine {
                         let state = state.downcast_mut::<JsEngineState>().ok_or_else(|| {
                             HostError::new("JavaScript runtime state type does not match")
                         })?;
-                        if state.executionHost.is_some() || state.toolPkgContext.is_some() {
-                            return Err(HostError::new(
-                                "Prepared engine already has an execution owner",
-                            ));
-                        }
                         state
                             .packageBinding
                             .set(JsPackageBinding {
@@ -832,21 +831,10 @@ impl PreparedJsEngine {
             .await
             .map_err(|error| error.to_string())?;
         engine.worker.executionHost = Some(host);
-        Ok(self
-            .engine
-            .take()
-            .expect("Bound engine must still be owned"))
+        Ok(self.engine)
     }
 }
 
-impl Drop for PreparedJsEngine {
-    /// Destroys unused, rejected or cancelled prepared engines through their Host.
-    fn drop(&mut self) {
-        if let Some(engine) = self.engine.take() {
-            engine.worker.destroy();
-        }
-    }
-}
 
 impl JsEngine {
     /// Creates a JavaScript execution engine backed by a caller-supplied execution host.
@@ -1084,13 +1072,13 @@ impl JsEngineState {
             detachedCallContexts: BTreeMap::new(),
             pendingScriptExecutions: BTreeMap::new(),
             registeredScriptSources: BTreeMap::new(),
-            jsEnvironmentInitialized: false,
             packageBinding,
         };
         state.registerHostBindings()?;
         // Trusted SDK initialization belongs to runtime creation, not a caller's
         // script deadline. An interrupted partial bootstrap cannot be retried safely.
-        state.initJavaScriptEnvironment()?;
+        state.runtime.evaluateHostJavaScriptBootstrap(buildRuntimeBootstrapScript())
+            .map_err(|error| error.to_string())?;
         Ok(state)
     }
 
@@ -1232,8 +1220,6 @@ impl JsEngineState {
                 .insert(callId.clone(), context.clone())
         });
         let started = (|| {
-            self.initJavaScriptEnvironment()
-                .map_err(JsExecutionError::initialization)?;
             let mut effectiveParams = params;
             bindEnvironmentOwner(&mut effectiveParams, context.environmentOwner.as_ref());
             // Async Compose renders and actions need the same API contract as synchronous calls.
@@ -1242,6 +1228,7 @@ impl JsEngineState {
                 None => operit_plugin_sdk::toolpkg::ToolPkgApiVersion::CURRENT_TOOLPKG_API_VERSION
                     .to_string(),
             };
+            bindCallerContext(&mut effectiveParams, context.executionHost.as_deref());
             effectiveParams.insert(
                 "__operit_toolpkg_api_version".to_string(),
                 Value::String(apiVersion),
@@ -1318,34 +1305,26 @@ impl JsEngineState {
         timeoutSec: u64,
         executionListener: Option<JsExecutionListenerRef>,
     ) -> JsExecutionResult<Option<String>> {
-        if let Err(error) = self.initJavaScriptEnvironment() {
-            return Err(JsExecutionError::initialization(error));
-        }
-        CURRENT_EXECUTION_HOST.with(|host| {
-            *host.borrow_mut() = self.executionHost.clone();
-        });
-        CURRENT_INTERMEDIATE_CALLBACK.with(|callback| {
-            *callback.borrow_mut() = textIntermediateCallback(on_intermediate_result);
-        });
-        CURRENT_EXECUTION_LISTENER.with(|listener| {
-            *listener.borrow_mut() = executionListener;
-        });
-        CURRENT_ENV_OVERRIDES.with(|overrides| {
-            *overrides.borrow_mut() = envOverrides.clone();
-        });
-        CURRENT_TEXT_RESOURCE_SOURCE.with(|source| {
-            *source.borrow_mut() = Some(textResourceSource.clone());
-        });
-
-        let environmentOwner = environmentOwner(self.toolPkgContext.as_ref(), params, false)?;
+        let context = JsCallContext {
+            interrupt: HostJavaScriptExecutionInterrupt::unlimited(),
+            executionHost: self.executionHost.clone(),
+            intermediateCallback: textIntermediateCallback(on_intermediate_result),
+            executionListener,
+            envOverrides: Arc::new(Mutex::new(envOverrides.clone())),
+            environmentOwner: environmentOwner(self.toolPkgContext.as_ref(), params, false)?,
+            textResourceSource,
+            ipcTiming: None,
+        };
+        installThreadLocalCallContext(&context);
         let mut effectiveParams = params.clone();
-        bindEnvironmentOwner(&mut effectiveParams, environmentOwner.as_ref());
+        bindEnvironmentOwner(&mut effectiveParams, context.environmentOwner.as_ref());
         // Standalone scripts use the current SDK contract; ToolPkg engines retain their manifest contract.
         let apiVersion = match self.toolPkgContext.as_ref() {
             Some(context) => context.api_version.clone(),
             None => operit_plugin_sdk::toolpkg::ToolPkgApiVersion::CURRENT_TOOLPKG_API_VERSION
                 .to_string(),
         };
+        bindCallerContext(&mut effectiveParams, context.executionHost.as_deref());
         effectiveParams.insert(
             "__operit_toolpkg_api_version".to_string(),
             Value::String(apiVersion),
@@ -1372,21 +1351,7 @@ impl JsEngineState {
             Uuid::new_v4().to_string().replace('-', "")
         );
         CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| {
-            contexts.borrow_mut().insert(
-                callId.clone(),
-                JsCallContext {
-                    interrupt: HostJavaScriptExecutionInterrupt::unlimited(),
-                    executionHost: self.executionHost.clone(),
-                    intermediateCallback: CURRENT_INTERMEDIATE_CALLBACK
-                        .with(|value| value.borrow().clone()),
-                    executionListener: CURRENT_EXECUTION_LISTENER
-                        .with(|value| value.borrow().clone()),
-                    envOverrides: Arc::new(Mutex::new(envOverrides.clone())),
-                    environmentOwner,
-                    textResourceSource,
-                    ipcTiming: None,
-                },
-            );
+            contexts.borrow_mut().insert(callId.clone(), context);
         });
         clearNativeExecutionSession(&callId);
         let output = match self.invokeExecutionFunction(
@@ -1435,8 +1400,6 @@ impl JsEngineState {
         params: &BTreeMap<String, Value>,
         textResources: Option<Arc<ToolPkgTextResources>>,
     ) -> JsExecutionResult<ToolPkgMainRegistrationCapture> {
-        self.initJavaScriptEnvironment()
-            .map_err(JsExecutionError::initialization)?;
         let apiRuntime = buildToolPkgApiRuntimeScript();
         self.evalJavaScriptVoid(&apiRuntime)
             .map_err(JsExecutionError::runtime)?;
@@ -1837,7 +1800,11 @@ impl JsEngineState {
     #[allow(non_snake_case)]
     fn deliverAsyncCallback(&mut self, callback: JsAsyncCallback) -> Result<(), String> {
         match callback {
-            JsAsyncCallback::Promise { requestId, result, reject } => {
+            JsAsyncCallback::Promise { requestId, result } => {
+                let (result, reject) = match result {
+                    Ok(value) => (value, false),
+                    Err(error) => (Value::String(error), true),
+                };
                 self.runtime.settleHostJavaScriptPromise(requestId, result, reject)
             }
             JsAsyncCallback::ProfiledToolResult { requestId, result, timing, successful } => {
@@ -1889,6 +1856,24 @@ impl JsEngineState {
             )
             .map(|_| ())
             .map_err(|error| error.to_string())
+    }
+
+    /// Captures the calling realm's owner and lifetime before routing work off its JS worker.
+    #[allow(non_snake_case)]
+    fn registerCoreRoute<const N: usize>(
+        &mut self,
+        name: &'static str,
+        sink: JsAsyncCallbackSink,
+        prepare: impl Fn(Arc<dyn JsExecutionHost>, [Value; N]) -> HostResult<CoreRouteCompletion> + Send + Sync + 'static,
+    ) -> Result<(), String> {
+        let lifetime = self.routeLifetime.subscribe();
+        self.runtime.registerHostJavaScriptAsyncJsonFunction(name, Arc::new(move |requestId, arguments| {
+            let arguments = exactHostJavaScriptJsonArguments(name, arguments)?;
+            let host = currentExecutionHost().map_err(HostError::new)?;
+            let completion = prepare(host, arguments)?;
+            dispatchCoreRouteAsync(sink.clone(), lifetime.clone(), requestId, completion);
+            Ok(())
+        })).map_err(|error| error.to_string())
     }
 
     /// Installs the single structured host transport for synchronous and Promise-backed operations.
@@ -1946,6 +1931,18 @@ impl JsEngineState {
                 .map_err(|error| error.to_string())?;
         }
 
+        self.runtime.registerHostJavaScriptBinaryFunction(
+            "__operitNativeLoadToolPkgWasm",
+            Arc::new(|arguments| {
+                let [package, module] = exactHostJavaScriptJsonArguments("__operitNativeLoadToolPkgWasm", arguments)?;
+                let package = hostJavaScriptStringArgument(package)?;
+                let module = hostJavaScriptStringArgument(module)?;
+                let loaded = currentExecutionHost().and_then(|host| host.load_toolpkg_wasm(&package, &module))
+                    .map_err(HostError::new)?;
+                Ok((serde_json::json!({"exports": loaded.exports}), loaded.bytes))
+            }),
+        ).map_err(|error| error.to_string())?;
+
         let detachedWake = self.backgroundWake.clone();
         self.runtime.registerHostJavaScriptFunction(
             "__operitNativeNotifyDetachedCall",
@@ -1973,32 +1970,36 @@ impl JsEngineState {
                 wake();
             }
         });
+        let windowSink = asyncCallbackSink.clone();
         let toolSink = asyncCallbackSink.clone();
         let timerSink = asyncCallbackSink.clone();
         let ipcBinding = self.packageBinding.clone();
         let ipcSink = asyncCallbackSink.clone();
         let dependencyBinding = self.packageBinding.clone();
         let dependencySink = asyncCallbackSink.clone();
-        let callRouteSink = asyncCallbackSink.clone();
-        let openRouteWatchSink = asyncCallbackSink.clone();
-        let nextRouteWatchSink = asyncCallbackSink.clone();
-        let storageRecordSink = asyncCallbackSink.clone();
-        let storageRecordLifetime = self.routeLifetime.subscribe();
-        let callRouteLifetime = self.routeLifetime.subscribe();
-        let openRouteWatchLifetime = self.routeLifetime.subscribe();
-        let nextRouteWatchLifetime = self.routeLifetime.subscribe();
-        let openRoutePushLifetime = self.routeLifetime.subscribe();
-        let sendRoutePushLifetime = self.routeLifetime.subscribe();
-        let closeRoutePushLifetime = self.routeLifetime.subscribe();
-        let openRoutePushSink = asyncCallbackSink.clone();
-        let sendRoutePushSink = asyncCallbackSink.clone();
-        let closeRoutePushSink = asyncCallbackSink.clone();
         let asyncFunctions: Vec<(&str, HostJavaScriptAsyncJsonCallback)> = vec![
+            (
+                "__operitNativeFloatingWindowCommand",
+                Arc::new(move |requestId, arguments| {
+                    let [payload] = exactHostJavaScriptJsonArguments("__operitNativeFloatingWindowCommand", arguments)?;
+                    requireHostObject(&payload)?;
+                    let host = currentExecutionHost().map_err(HostError::new)?;
+                    let sink = windowSink.clone();
+                    // A new surface must be able to acquire its own JS session
+                    // while this caller awaits the host's startup acknowledgement.
+                    defaultHostRuntimeTaskSchedulerHost().scheduleHostRuntimeTask(
+                        "operit-floating-window",
+                        Box::new(move || {
+                            sink(JsAsyncCallback::Promise { requestId, result: host.floating_window_command(&payload) });
+                        }),
+                    )?;
+                    Ok(())
+                }),
+            ),
             (
                 "__operitNativeCallToolStructured",
                 Arc::new(move |requestId, arguments| {
                     dispatchStructuredToolCall(
-                        CURRENT_EXECUTION_HOST.with(|host| host.borrow().clone()),
                         toolSink.clone(),
                         requestId,
                         arguments,
@@ -2081,132 +2082,48 @@ impl JsEngineState {
                     Ok(())
                 }),
             ),
-            (
-                "__operitNativeCallCoreRoute",
-                Arc::new(move |requestId, arguments| {
-                    let [target, method, args] = exactHostJavaScriptJsonArguments(
-                        "__operitNativeCallCoreRoute",
-                        arguments,
-                    )?;
-                    let host = CURRENT_EXECUTION_HOST.with(|value| value.borrow().clone());
-                    let Some(host) = host else {
-                        return Err(HostError::new("JavaScript execution host is unavailable"));
-                    };
-                    let target = hostJavaScriptStringArgument(target)?;
-                    let method = hostJavaScriptStringArgument(method)?;
-                    dispatchCoreRouteAsync(
-                        Some(host.clone()),
-                        callRouteSink.clone(),
-                        callRouteLifetime.clone(),
-                        requestId,
-                        Box::new(move || host.call_core_route(target, method, args)),
-                    );
-                    Ok(())
-                }),
-            ),
-            (
-                "__operitNativeOpenCoreRouteWatch",
-                Arc::new(move |requestId, arguments| {
-                    let [target, property, args] = exactHostJavaScriptJsonArguments(
-                        "__operitNativeOpenCoreRouteWatch",
-                        arguments,
-                    )?;
-                    let host = CURRENT_EXECUTION_HOST.with(|value| value.borrow().clone());
-                    let Some(host) = host else {
-                        return Err(HostError::new("JavaScript execution host is unavailable"));
-                    };
-                    let target = hostJavaScriptStringArgument(target)?;
-                    let property = hostJavaScriptStringArgument(property)?;
-                    dispatchCoreRouteAsync(
-                        Some(host.clone()),
-                        openRouteWatchSink.clone(),
-                        openRouteWatchLifetime.clone(),
-                        requestId,
-                        Box::new(move || host.open_core_route_watch(target, property, args)),
-                    );
-                    Ok(())
-                }),
-            ),
-            (
-                "__operitNativeNextCoreRouteWatch",
-                Arc::new(move |requestId, arguments| {
-                    let [subscription] = exactHostJavaScriptJsonArguments(
-                        "__operitNativeNextCoreRouteWatch",
-                        arguments,
-                    )?;
-                    let host = CURRENT_EXECUTION_HOST.with(|value| value.borrow().clone());
-                    let Some(host) = host else {
-                        return Err(HostError::new("JavaScript execution host is unavailable"));
-                    };
-                    let subscription = hostJavaScriptStringArgument(subscription)?;
-                    dispatchCoreRouteAsync(
-                        Some(host.clone()),
-                        nextRouteWatchSink.clone(),
-                        nextRouteWatchLifetime.clone(),
-                        requestId,
-                        Box::new(move || host.next_core_route_watch(subscription)),
-                    );
-                    Ok(())
-                }),
-            ),
-            (
-                "__operitNativeOpenToolPkgRoutePush",
-                Arc::new(move |requestId, arguments| {
-                    let [method, args] = exactHostJavaScriptJsonArguments("__operitNativeOpenToolPkgRoutePush", arguments)?;
-                    let host = currentExecutionHost().map_err(HostError::new)?;
-                    let method = hostJavaScriptStringArgument(method)?;
-                    dispatchCoreRouteAsync(Some(host.clone()), openRoutePushSink.clone(), openRoutePushLifetime.clone(), requestId,
-                        Box::new(move || host.open_toolpkg_route_push(method, args)));
-                    Ok(())
-                }),
-            ),
-            (
-                "__operitNativeSendToolPkgRoutePush",
-                Arc::new(move |requestId, arguments| {
-                    let [id, value] = exactHostJavaScriptJsonArguments("__operitNativeSendToolPkgRoutePush", arguments)?;
-                    let host = currentExecutionHost().map_err(HostError::new)?;
-                    let id = hostJavaScriptStringArgument(id)?;
-                    dispatchCoreRouteAsync(Some(host.clone()), sendRoutePushSink.clone(), sendRoutePushLifetime.clone(), requestId,
-                        Box::new(move || host.send_toolpkg_route_push(id, value)));
-                    Ok(())
-                }),
-            ),
-            (
-                "__operitNativeCloseToolPkgRoutePush",
-                Arc::new(move |requestId, arguments| {
-                    let [id, abort] = exactHostJavaScriptJsonArguments("__operitNativeCloseToolPkgRoutePush", arguments)?;
-                    let host = currentExecutionHost().map_err(HostError::new)?;
-                    let id = hostJavaScriptStringArgument(id)?;
-                    let abort = abort.as_bool().ok_or_else(|| HostError::new("Push abort flag must be a boolean"))?;
-                    dispatchCoreRouteAsync(Some(host.clone()), closeRoutePushSink.clone(), closeRoutePushLifetime.clone(), requestId,
-                        Box::new(move || host.close_toolpkg_route_push(id, abort)));
-                    Ok(())
-                }),
-            ),
-            (
-                "__operitNativeWaitPluginStorageRecord",
-                Arc::new(move |requestId, arguments| {
-                    let [handle, collection, key, after] = exactHostJavaScriptJsonArguments(
-                        "__operitNativeWaitPluginStorageRecord", arguments,
-                    )?;
-                    let host = currentExecutionHost().map_err(HostError::new)?;
-                    let handle = hostJavaScriptStringArgument(handle)?;
-                    let collection = hostJavaScriptStringArgument(collection)?;
-                    let key = hostJavaScriptStringArgument(key)?;
-                    let after = serde_json::from_value(after.clone())
-                        .map_err(|error| HostError::new(format!("Invalid record watch state: {error}")))?;
-                    dispatchCoreRouteAsync(Some(host.clone()), storageRecordSink.clone(),
-                        storageRecordLifetime.clone(), requestId,
-                        Box::new(move || host.wait_plugin_storage_record(handle, collection, key, after)));
-                    Ok(())
-                }),
-            ),
+
         ];
         for (name, callback) in asyncFunctions {
             self.runtime
                 .registerHostJavaScriptAsyncJsonFunction(name, callback)
                 .map_err(|error| error.to_string())?;
         }
+        self.registerCoreRoute("__operitNativeCallCoreRoute", asyncCallbackSink.clone(), |host, [target, method, args]| {
+            let target = hostJavaScriptStringArgument(target)?;
+            let method = hostJavaScriptStringArgument(method)?;
+            Ok(Box::new(move || host.call_core_route(target, method, args)))
+        })?;
+        self.registerCoreRoute("__operitNativeOpenCoreRouteWatch", asyncCallbackSink.clone(), |host, [target, property, args]| {
+            let target = hostJavaScriptStringArgument(target)?;
+            let property = hostJavaScriptStringArgument(property)?;
+            Ok(Box::new(move || host.open_core_route_watch(target, property, args)))
+        })?;
+        self.registerCoreRoute("__operitNativeNextCoreRouteWatch", asyncCallbackSink.clone(), |host, [subscription]| {
+            let subscription = hostJavaScriptStringArgument(subscription)?;
+            Ok(Box::new(move || host.next_core_route_watch(subscription)))
+        })?;
+        self.registerCoreRoute("__operitNativeOpenToolPkgRoutePush", asyncCallbackSink.clone(), |host, [method, args]| {
+            let method = hostJavaScriptStringArgument(method)?;
+            Ok(Box::new(move || host.open_toolpkg_route_push(method, args)))
+        })?;
+        self.registerCoreRoute("__operitNativeSendToolPkgRoutePush", asyncCallbackSink.clone(), |host, [id, value]| {
+            let id = hostJavaScriptStringArgument(id)?;
+            Ok(Box::new(move || host.send_toolpkg_route_push(id, value)))
+        })?;
+        self.registerCoreRoute("__operitNativeCloseToolPkgRoutePush", asyncCallbackSink.clone(), |host, [id, abort]| {
+            let id = hostJavaScriptStringArgument(id)?;
+            let abort = abort.as_bool().ok_or_else(|| HostError::new("Push abort flag must be a boolean"))?;
+            Ok(Box::new(move || host.close_toolpkg_route_push(id, abort)))
+        })?;
+        self.registerCoreRoute("__operitNativeWaitPluginStorageRecord", asyncCallbackSink.clone(), |host, [handle, collection, key, after]| {
+            let handle = hostJavaScriptStringArgument(handle)?;
+            let collection = hostJavaScriptStringArgument(collection)?;
+            let key = hostJavaScriptStringArgument(key)?;
+            let after = serde_json::from_value(after)
+                .map_err(|error| HostError::new(format!("Invalid record watch state: {error}")))?;
+            Ok(Box::new(move || host.wait_plugin_storage_record(handle, collection, key, after)))
+        })?;
         let asyncNames = [
             "__operitNativeReadToolPkgResource",
             "__operitNativeCallToolPkgWasm",
@@ -2227,14 +2144,8 @@ impl JsEngineState {
                 .registerHostJavaScriptAsyncJsonFunction(
                     name,
                     Arc::new(move |requestId, arguments| {
-                        let (result, reject) = match executeHostOperation(name, arguments) {
-                            Ok(result) => (result, false),
-                            Err(error) => (Value::String(error.to_string()), true),
-                        };
                         sink(JsAsyncCallback::Promise {
-                            requestId,
-                            result,
-                            reject,
+                            requestId, result: executeHostOperation(name, arguments).map_err(|error| error.to_string()),
                         });
                         Ok(())
                     }),
@@ -2259,17 +2170,7 @@ impl JsEngineState {
             .map_err(|error| error.to_string())?;
         Ok(())
     }
-    #[allow(non_snake_case)]
-    fn initJavaScriptEnvironment(&mut self) -> Result<(), String> {
-        if self.jsEnvironmentInitialized {
-            return Ok(());
-        }
-        let bootstrap = buildRuntimeBootstrapScript();
-        self.runtime.evaluateHostJavaScriptBootstrap(bootstrap)
-            .map_err(|error| error.to_string())?;
-        self.jsEnvironmentInitialized = true;
-        Ok(())
-    }
+
 }
 
 /// Validates the exact argument count of a structured host binding.
@@ -2294,12 +2195,13 @@ fn hostJavaScriptStringArgument(value: Value) -> HostResult<String> {
     }
 }
 
+type CoreRouteCompletion = Box<dyn FnOnce() -> JsExecutionFuture<Result<Value, String>> + Send>;
+
 /// Executes a validated structured request; only owned Rust values cross task boundaries.
 /// Tools retain the ordinary executor: they may block or use exclusive TLS.
 /// Only the JS continuation wake uses the cooperative reusable executor.
 #[allow(non_snake_case)]
 fn dispatchStructuredToolCall(
-    executionHost: Option<Arc<dyn JsExecutionHost>>,
     callbackSink: JsAsyncCallbackSink,
     requestId: u64,
     arguments: Vec<Value>,
@@ -2307,8 +2209,7 @@ fn dispatchStructuredToolCall(
     let fail = |message: String| {
         callbackSink(JsAsyncCallback::Promise {
             requestId,
-            result: serde_json::json!({"success": false, "message": message}),
-            reject: false,
+            result: Ok(serde_json::json!({"success": false, "message": message})),
         })
     };
     let mut arguments = arguments;
@@ -2356,7 +2257,9 @@ fn dispatchStructuredToolCall(
             Err(error) => { fail(error); return; }
         }
     }
-    let Some(executionHost) = executionHost else {
+    // Promise continuations may run under the engine's default TLS context.
+    // The owning call retains the exact native turn, including its file directory.
+    let Some(executionHost) = context.executionHost.clone() else {
         fail("JavaScript execution host is unavailable".to_string());
         return;
     };
@@ -2392,7 +2295,7 @@ fn dispatchStructuredToolCall(
                     Some(timing) => JsAsyncCallback::ProfiledToolResult {
                         requestId, result: value, timing, successful,
                     },
-                    None => JsAsyncCallback::Promise { requestId, result: value, reject: false },
+                    None => JsAsyncCallback::Promise { requestId, result: Ok(value) },
                 };
                 sink(callback);
             })
@@ -2417,8 +2320,7 @@ fn dispatchJavaScriptTimer(
             Box::new(move || {
                 callbackSink(JsAsyncCallback::Promise {
                     requestId,
-                    result: Value::Null,
-                    reject: false,
+                    result: Ok(Value::Null),
                 });
             }),
         )
@@ -2442,8 +2344,7 @@ fn dispatchToolPkgIpcAsync(
     let Some(executionHost) = executionHost else {
         callbackSink(JsAsyncCallback::Promise {
             requestId,
-            result: buildToolPkgIpcFailure("JavaScript execution host is unavailable"),
-            reject: false,
+            result: Ok(buildToolPkgIpcFailure("JavaScript execution host is unavailable")),
         });
         return;
     };
@@ -2457,16 +2358,14 @@ fn dispatchToolPkgIpcAsync(
             };
             completionSink(JsAsyncCallback::Promise {
                 requestId,
-                result,
-                reject: false,
+                result: Ok(result),
             });
         }),
     );
     if let Err(error) = submitted {
         callbackSink(JsAsyncCallback::Promise {
             requestId,
-            result: buildToolPkgIpcFailure(&format!("ToolPkg.ipc async dispatch failed: {error}")),
-            reject: false,
+            result: Ok(buildToolPkgIpcFailure(&format!("ToolPkg.ipc async dispatch failed: {error}"))),
         });
     }
 }
@@ -2474,20 +2373,11 @@ fn dispatchToolPkgIpcAsync(
 /// Schedules one Core route Promise and settles it on the owning JavaScript runtime.
 #[allow(non_snake_case)]
 fn dispatchCoreRouteAsync(
-    executionHost: Option<Arc<dyn JsExecutionHost>>,
     callbackSink: JsAsyncCallbackSink,
     mut lifetime: tokio::sync::watch::Receiver<()>,
     requestId: u64,
-    completion: Box<dyn FnOnce() -> operit_plugin_sdk::javascript::JsExecutionFuture<Result<Value, String>> + Send>,
+    completion: CoreRouteCompletion,
 ) {
-    let Some(_executionHost) = executionHost else {
-        callbackSink(JsAsyncCallback::Promise {
-            requestId,
-            result: Value::String("JavaScript execution host is unavailable".to_string()),
-            reject: true,
-        });
-        return;
-    };
     let sink = callbackSink.clone();
     let scheduled = defaultHostRuntimeTaskSchedulerHost().scheduleHostRuntimeAsyncTask(
         "operit-core-route",
@@ -2498,26 +2388,14 @@ fn dispatchCoreRouteAsync(
                     _ = lifetime.changed() => return,
                     result = completion() => result,
                 };
-                match result {
-                    Ok(value) => sink(JsAsyncCallback::Promise {
-                        requestId,
-                        result: value,
-                        reject: false,
-                    }),
-                    Err(error) => sink(JsAsyncCallback::Promise {
-                        requestId,
-                        result: Value::String(error),
-                        reject: true,
-                    }),
-                }
+                sink(JsAsyncCallback::Promise { requestId, result });
             })
         }),
     );
     if let Err(error) = scheduled {
         callbackSink(JsAsyncCallback::Promise {
             requestId,
-            result: Value::String(error.to_string()),
-            reject: true,
+            result: Err(error.to_string()),
         });
     }
 }
@@ -3474,6 +3352,32 @@ fn bindEnvironmentOwner(params: &mut BTreeMap<String, Value>, owner: Option<&JsE
             "__operit_environment_owner".into(),
             Value::String(owner.package_name().into()),
         );
+    }
+}
+
+/// Binds neutral native identity for all SDK versions; only the v1 adapter interprets card IDs.
+#[allow(non_snake_case)]
+fn bindCallerContext(params: &mut BTreeMap<String, Value>, host: Option<&dyn JsExecutionHost>) {
+    let Some(context) = host.and_then(JsExecutionHost::toolpkg_caller_context) else {
+        return;
+    };
+    for (field, key) in [
+        ("participantId", "__operit_package_caller_participant_id"),
+        ("extensionOwner", "__operit_package_caller_owner"),
+        ("chatId", "__operit_package_chat_id"),
+    ] {
+        // UI events can identify a target chat without being an AI turn. Keep that existing transport.
+        if field == "chatId" && context.get(field).is_none() {
+            continue;
+        }
+        params.remove(key);
+        if let Some(value) = context
+            .get(field)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            params.insert(key.into(), Value::String(value.into()));
+        }
     }
 }
 

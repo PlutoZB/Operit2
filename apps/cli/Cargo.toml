@@ -1,6 +1,6 @@
 [package]
 name = "operit-cli"
-version = "2.0.0-preview.22"
+version = "2.0.0-preview.30"
 edition = "2021"
 license = "MIT"
 publish = false
@@ -26,7 +26,7 @@ gethostname = "1.1"
 hmac = "0.12"
 image = { version = "0.25", default-features = false, features = ["png"] }
 mdns-sd = "0.12"
-operit-proxy-edge = { path = "../../core/crates/proxy/edge" }
+operit-proxy-edge = { path = "../../edge/sdk/proxy" }
 operit-proxy-local = { path = "../../core/crates/proxy/local" }
 operit-node-runtime = { path = "../../core/crates/node/runtime" }
 operit-core-application = { path = "../../core/crates/application/core" }
@@ -40,6 +40,7 @@ operit-runtime = { path = "../../core/crates/runtime/application" }
 operit-store = { path = "../../core/crates/persistence/store" }
 operit-tools = { path = "../../core/crates/tool/services" }
 operit-util = { path = "../../core/crates/foundation/util" }
+qrcode = { version = "0.14", default-features = false }
 ratatui = "0.28"
 unicode-width = "0.1"
 rand_core = { version = "0.6", features = ["getrandom"] }

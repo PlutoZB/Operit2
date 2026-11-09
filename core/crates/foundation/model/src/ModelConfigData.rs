@@ -1,60 +1,9 @@
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use super::ApiKeyInfo::ApiKeyInfo;
 use super::BillingMode::BillingMode;
 use super::ModelParameter::ModelParameter;
-
-#[path = "../collects/ThinkingConfigurations.rs"]
-mod ThinkingConfigurationRows;
-
-/// Provides the declarative thinking rules persisted by every new model profile.
-pub const DEFAULT_THINKING_CONFIGURATIONS: &str =
-    ThinkingConfigurationRows::THINKING_CONFIGURATIONS;
-
-/// Builds the initial persisted thinking rule set for new model profiles.
-fn defaultThinkingConfigurations(providerTypeId: &str) -> String {
-    thinkingConfigurationsForProvider(providerTypeId)
-}
-
-/// Builds the persisted thinking rule set owned by one provider type.
-#[allow(non_snake_case)]
-pub fn thinkingConfigurationsForProvider(providerTypeId: &str) -> String {
-    let provider = providerTypeId.trim().to_ascii_uppercase();
-    let rules = serde_json::from_str::<Vec<Value>>(DEFAULT_THINKING_CONFIGURATIONS)
-        .expect("built-in thinking configurations must be valid JSON")
-        .into_iter()
-        .filter(|rule| thinkingRuleTargetsProvider(rule, &provider))
-        .map(removeThinkingRuleProviderTargets)
-        .collect::<Vec<_>>();
-    serde_json::to_string(&rules).expect("provider thinking configurations must encode")
-}
-
-/// Returns whether one declarative thinking rule belongs to a provider type.
-#[allow(non_snake_case)]
-fn thinkingRuleTargetsProvider(rule: &Value, providerTypeId: &str) -> bool {
-    ["providers", "providerTypeIds"].iter().any(|key| {
-        rule.get(key)
-            .and_then(Value::as_array)
-            .is_some_and(|providers| {
-                providers.iter().any(|candidate| {
-                    candidate
-                        .as_str()
-                        .is_some_and(|value| value.eq_ignore_ascii_case(providerTypeId))
-                })
-            })
-    })
-}
-
-/// Removes catalog-only provider selectors from one provider-owned thinking rule.
-#[allow(non_snake_case)]
-fn removeThinkingRuleProviderTargets(mut rule: Value) -> Value {
-    if let Value::Object(object) = &mut rule {
-        object.remove("providers");
-        object.remove("providerTypeIds");
-    }
-    rule
-}
+use crate::ModelThinking::{ModelThinkingSpec, ThinkingLevel};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(non_camel_case_types)]
@@ -195,10 +144,8 @@ pub struct ModelConfigDefaults;
 
 impl ModelConfigDefaults {
     pub const DEFAULT_MAX_CONTEXT_LENGTH: f32 = 200.0;
-    pub const DEFAULT_SUMMARY_TOKEN_THRESHOLD: f32 = 0.70;
+    pub const DEFAULT_SUMMARY_TOKEN_THRESHOLD: f32 = 0.85;
     pub const DEFAULT_ENABLE_SUMMARY: bool = true;
-    pub const DEFAULT_ENABLE_SUMMARY_BY_MESSAGE_COUNT: bool = true;
-    pub const DEFAULT_SUMMARY_MESSAGE_COUNT_THRESHOLD: i32 = 16;
     pub const DEFAULT_DEEPSEEK_ENDPOINT: &'static str =
         "https://api.deepseek.com/v1/chat/completions";
     pub const DEFAULT_DEEPSEEK_MODEL: &'static str = "deepseek-v4-flash";
@@ -269,6 +216,31 @@ impl Default for ModelCapabilities {
             directVideo: false,
             toolCall: false,
         }
+    }
+}
+
+/// Capability values the user set for one model; `None` takes what the model catalog says.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(non_snake_case)]
+pub struct ModelCapabilityOverrides {
+    #[serde(default)]
+    pub directImage: Option<bool>,
+    #[serde(default)]
+    pub directAudio: Option<bool>,
+    #[serde(default)]
+    pub directVideo: Option<bool>,
+    #[serde(default)]
+    pub toolCall: Option<bool>,
+}
+
+impl ModelCapabilityOverrides {
+    /// Returns whether the user set none of the capabilities.
+    #[allow(non_snake_case)]
+    pub fn isEmpty(&self) -> bool {
+        self.directImage.is_none()
+            && self.directAudio.is_none()
+            && self.directVideo.is_none()
+            && self.toolCall.is_none()
     }
 }
 
@@ -348,8 +320,6 @@ impl ModelContextSpec {
 pub struct ModelSummarySettings {
     pub enableSummary: bool,
     pub summaryTokenThreshold: f32,
-    pub enableSummaryByMessageCount: bool,
-    pub summaryMessageCountThreshold: i32,
 }
 
 impl Default for ModelSummarySettings {
@@ -357,10 +327,6 @@ impl Default for ModelSummarySettings {
         Self {
             enableSummary: ModelConfigDefaults::DEFAULT_ENABLE_SUMMARY,
             summaryTokenThreshold: ModelConfigDefaults::DEFAULT_SUMMARY_TOKEN_THRESHOLD,
-            enableSummaryByMessageCount:
-                ModelConfigDefaults::DEFAULT_ENABLE_SUMMARY_BY_MESSAGE_COUNT,
-            summaryMessageCountThreshold:
-                ModelConfigDefaults::DEFAULT_SUMMARY_MESSAGE_COUNT_THRESHOLD,
         }
     }
 }
@@ -432,6 +398,16 @@ impl Default for ModelRequestSpec {
             enableClaude1hPromptCache: false,
         }
     }
+}
+
+/// Request settings the user set for one model; `None` takes the catalog's value or the default.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(non_snake_case)]
+pub struct ModelRequestOverrides {
+    #[serde(default)]
+    pub supportsStructuredTools: Option<bool>,
+    #[serde(default)]
+    pub enableClaude1hPromptCache: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -510,16 +486,35 @@ impl AvailableProviderModelSource {
     }
 }
 
+/// What a provider's own model list said of one model.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[allow(non_snake_case)]
+pub struct ModelListedSpec {
+    pub pricing: Option<ModelPricing>,
+    pub context: Option<ModelContextSpec>,
+    pub capabilities: Option<ModelCapabilities>,
+    pub supportsStructuredTools: Option<bool>,
+}
+
+/// One model a provider offers, described as it would be once added.
+///
+/// `pricing`, `context`, `capabilities` and `request` are `None` where neither the model
+/// catalog nor the provider's list says. `catalogModelId` names the catalog model it was
+/// recognized as, and `listed` keeps what the provider's list itself said.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[allow(non_snake_case)]
 pub struct AvailableProviderModel {
     pub modelId: String,
     pub source: AvailableProviderModelSource,
+    #[serde(default)]
+    pub catalogModelId: Option<String>,
     pub pricing: Option<ModelPricing>,
     pub context: Option<ModelContextSpec>,
     pub capabilities: Option<ModelCapabilities>,
     pub builtinTools: Vec<ModelBuiltinTool>,
     pub request: Option<ModelRequestSpec>,
+    #[serde(default)]
+    pub listed: Option<ModelListedSpec>,
 }
 
 impl AvailableProviderModel {
@@ -529,15 +524,32 @@ impl AvailableProviderModel {
     }
 }
 
+/// One configured model.
+///
+/// The `*Override` fields hold only what the user set. Every field left unset takes what
+/// the model catalog says of the model `id` names, then what the provider's list said in
+/// `listed`, then the defaults.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[allow(non_snake_case)]
 pub struct ModelProfile {
     pub id: String,
     pub pricingOverride: Option<ModelPricing>,
     pub contextOverride: Option<ModelContextSpec>,
-    pub capabilitiesOverride: Option<ModelCapabilities>,
+    #[serde(default)]
+    pub capabilitiesOverride: ModelCapabilityOverrides,
     pub builtinToolsOverride: Option<Vec<ModelBuiltinTool>>,
-    pub requestOverride: Option<ModelRequestSpec>,
+    #[serde(default)]
+    pub requestOverride: ModelRequestOverrides,
+    /// What the provider's model list said of the model when it was added.
+    #[serde(default)]
+    pub listed: Option<ModelListedSpec>,
+    /// The thinking controls the user described the model with, replacing the catalog's.
+    #[serde(default)]
+    pub thinkingOverride: Option<ModelThinkingSpec>,
+    /// The thinking level the user set on this model; `None` carries over the level last set
+    /// on any model.
+    #[serde(default)]
+    pub thinkingLevel: Option<ThinkingLevel>,
     pub parameters: Vec<ModelParameter<serde_json::Value>>,
     pub summary: ModelSummarySettings,
     pub localRuntime: LocalModelRuntimeSettings,
@@ -549,14 +561,38 @@ impl ModelProfile {
             id,
             pricingOverride: None,
             contextOverride: None,
-            capabilitiesOverride: None,
+            capabilitiesOverride: ModelCapabilityOverrides::default(),
             builtinToolsOverride: None,
-            requestOverride: None,
+            requestOverride: ModelRequestOverrides::default(),
+            listed: None,
+            thinkingOverride: None,
+            thinkingLevel: None,
             parameters: Vec::new(),
             summary: ModelSummarySettings::default(),
             localRuntime: LocalModelRuntimeSettings::default(),
         }
     }
+
+    /// Returns whether the user set any pricing, context, capability, tool-format or
+    /// thinking-control value.
+    #[allow(non_snake_case)]
+    pub fn hasSpecOverrides(&self) -> bool {
+        self.pricingOverride.is_some()
+            || self.contextOverride.is_some()
+            || !self.capabilitiesOverride.isEmpty()
+            || self.requestOverride.supportsStructuredTools.is_some()
+            || self.thinkingOverride.is_some()
+    }
+}
+
+/// Freshness of the model catalog downloaded on this device.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(non_snake_case)]
+pub struct ModelCatalogStatus {
+    /// When the catalog in use was downloaded, in Unix milliseconds; `None` before the first download.
+    pub updatedAt: Option<i64>,
+    /// Why the last download failed, when it did.
+    pub lastError: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -575,19 +611,16 @@ pub struct ProviderProfile {
     pub customHeaders: String,
     pub requestLimitPerMinute: i32,
     pub maxConcurrentRequests: i32,
-    pub thinkingConfigurations: String,
-    pub thinkingOptionId: String,
     pub models: Vec<ModelProfile>,
 }
 
 impl ProviderProfile {
-    /// Creates a provider profile with provider-scoped thinking configuration.
+    /// Creates a provider profile with no models.
     pub fn new(id: String, name: String, providerType: ApiProviderType, endpoint: String) -> Self {
-        let providerTypeName = providerType.name().to_string();
         Self {
             id,
             name,
-            providerTypeId: providerTypeName.clone(),
+            providerTypeId: providerType.name().to_string(),
             providerType,
             endpoint,
             apiKey: String::new(),
@@ -598,8 +631,6 @@ impl ProviderProfile {
             customHeaders: "{}".to_string(),
             requestLimitPerMinute: 0,
             maxConcurrentRequests: 0,
-            thinkingConfigurations: defaultThinkingConfigurations(&providerTypeName),
-            thinkingOptionId: String::new(),
             models: Vec::new(),
         }
     }
@@ -628,8 +659,11 @@ pub struct ResolvedModelConfig {
     pub builtinTools: Vec<ModelBuiltinTool>,
     pub request: ModelRequestSpec,
     pub parameters: Vec<ModelParameter<serde_json::Value>>,
-    pub thinkingConfigurations: String,
-    pub thinkingOptionId: String,
+    /// The thinking controls the model accepts.
+    pub thinking: ModelThinkingSpec,
+    /// The thinking level requests ask for; `None` when requests cannot change how the
+    /// model thinks.
+    pub thinkingLevel: Option<ThinkingLevel>,
     pub summary: ModelSummarySettings,
     pub localRuntime: LocalModelRuntimeSettings,
 }
@@ -649,7 +683,10 @@ pub struct ProviderModelSummary {
     pub endpoint: String,
     pub modelId: String,
     pub capabilities: ModelCapabilities,
+    pub context: ModelContextSpec,
     pub pricing: Option<ModelPricing>,
+    /// The thinking controls the model accepts.
+    pub thinking: ModelThinkingSpec,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -671,28 +708,14 @@ pub fn default_deepseek_provider() -> ProviderProfile {
     provider
 }
 
-/// Builds the fixed provider profile backed by installed local models.
-pub fn local_model_provider() -> ProviderProfile {
-    ProviderProfile::new(
-        ApiProviderType::LOCAL_MODEL.name().to_string(),
-        "Local Models".to_string(),
-        ApiProviderType::LOCAL_MODEL,
-        String::new(),
-    )
-}
-
 /// Builds the default DeepSeek model profile with optional Responses search.
+///
+/// Tool calling is set up front so the first chat can call tools before the model
+/// catalog has been downloaded; the rest follows the catalog.
 pub fn default_deepseek_model() -> ModelProfile {
     let mut model = ModelProfile::new(ModelConfigDefaults::DEFAULT_MODEL_ID.to_string());
-    model.contextOverride = Some(ModelContextSpec::default());
-    model.capabilitiesOverride = Some(ModelCapabilities {
-        toolCall: true,
-        ..ModelCapabilities::default()
-    });
-    model.requestOverride = Some(ModelRequestSpec {
-        supportsStructuredTools: true,
-        ..ModelRequestSpec::default()
-    });
+    model.capabilitiesOverride.toolCall = Some(true);
+    model.requestOverride.supportsStructuredTools = Some(true);
     model.builtinToolsOverride = Some(vec![ModelBuiltinTool::disabled(
         BuiltinToolType::WebSearch,
         "内置联网搜索".to_string(),

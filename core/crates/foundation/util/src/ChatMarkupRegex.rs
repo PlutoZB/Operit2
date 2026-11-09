@@ -142,6 +142,19 @@ impl ChatMarkupRegex {
         last
     }
 
+    /// Removes hidden protocol metadata, including its payload, from summary text.
+    pub fn remove_meta_tags(content: &str) -> String {
+        let mut output = String::new();
+        let mut cursor = 0;
+        for (start, end) in tag_ranges(content, "meta") {
+            output.push_str(&content[cursor..start]);
+            output.push(' ');
+            cursor = end;
+        }
+        output.push_str(&content[cursor..]);
+        output
+    }
+
     /// Removes Gemini thought-signature metadata tags from content.
     pub fn remove_gemini_thought_signature_meta(content: &str) -> String {
         let mut out = String::new();
@@ -203,10 +216,7 @@ impl ChatMarkupRegex {
 
     /// Returns ranges for attachment markup blocks.
     pub fn attachment_ranges(content: &str) -> Vec<(usize, usize)> {
-        let mut ranges = tag_ranges(content, "attachment");
-        ranges.extend(self_closing_tag_ranges(content, "attachment"));
-        ranges.sort_by_key(|range| range.0);
-        ranges
+        tag_ranges(content, "attachment")
     }
 
     /// Returns ranges for workspace attachment markup blocks.
@@ -302,6 +312,14 @@ pub fn tag_ranges(content: &str, tag_name: &str) -> Vec<(usize, usize)> {
             .map(|byte| is_tag_boundary(*byte))
             .unwrap_or(false)
         {
+            if let Some(open_end) = lower[after_name..].find('>') {
+                let end = after_name + open_end + 1;
+                if lower[start..end].trim_end_matches('>').trim_end().ends_with('/') {
+                    ranges.push((start, end));
+                    cursor = end;
+                    continue;
+                }
+            }
             if let Some(relative_close) = lower[after_name..].find(&close) {
                 let end = after_name + relative_close + close.len();
                 ranges.push((start, end));
@@ -312,25 +330,6 @@ pub fn tag_ranges(content: &str, tag_name: &str) -> Vec<(usize, usize)> {
             break;
         }
         cursor = after_name;
-    }
-    ranges
-}
-
-/// Returns byte ranges for self-closing XML-like tags with the requested name.
-pub fn self_closing_tag_ranges(content: &str, tag_name: &str) -> Vec<(usize, usize)> {
-    let mut ranges = Vec::new();
-    let mut cursor = 0;
-    let lower = content.to_ascii_lowercase();
-    let open_prefix = format!("<{}", tag_name.to_ascii_lowercase());
-    while let Some(relative_start) = lower[cursor..].find(&open_prefix) {
-        let start = cursor + relative_start;
-        if let Some(relative_end) = lower[start..].find("/>") {
-            let end = start + relative_end + 2;
-            ranges.push((start, end));
-            cursor = end;
-        } else {
-            break;
-        }
     }
     ranges
 }
@@ -410,7 +409,34 @@ fn is_attr_name_byte(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{attr_value, tag_body};
+    use super::{attr_value, tag_body, ChatMarkupRegex};
+
+    #[test]
+    fn summary_meta_cleanup_removes_all_providers_without_touching_other_tags() {
+        let text = r#"正文<meta provider="gemini:thought_signature">SECRET_A</meta><META provider="openai:reasoning">SECRET_B</META><meta provider="other"/>后文<metadata>keep</metadata>"#;
+        assert_eq!(
+            ChatMarkupRegex::remove_meta_tags(text),
+            "正文   后文<metadata>keep</metadata>"
+        );
+        assert_eq!(ChatMarkupRegex::remove_meta_tags("plain text"), "plain text");
+    }
+
+    #[test]
+    fn summary_meta_cleanup_discards_interrupted_payloads() {
+        assert_eq!(
+            ChatMarkupRegex::remove_meta_tags(r#"正文<meta provider="openai:reasoning">SECRET"#),
+            "正文 "
+        );
+    }
+
+    #[test]
+    fn attachment_ranges_keep_adjacent_self_closing_and_paired_tags_separate() {
+        let markup = r#"prefix <attachment id="a"/> between <attachment id="b">body</attachment> suffix <attachment id="c"/> end"#;
+        let ranges = ChatMarkupRegex::attachment_ranges(markup);
+        let blocks = ranges.iter().map(|(start, end)| &markup[*start..*end]).collect::<Vec<_>>();
+        assert_eq!(blocks, [r#"<attachment id="a"/>"#, r#"<attachment id="b">body</attachment>"#, r#"<attachment id="c"/>"#]);
+    }
+
 
     /// Verifies malformed parameter markup cannot produce an invalid slice range.
     #[test]

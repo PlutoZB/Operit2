@@ -25,7 +25,7 @@ function mount(current, data, adapters = {}) {
       assert.equal(name, 'character-memory.domain');
       if (adapters.domain) return adapters.domain(request);
       throw new Error('No labelled domain adapter supplied'); } },
-    readResource: async (key, path) => { calls.push({ resource: key, path }); return adapters.readResource ? adapters.readResource(key, path) : '/app/data/cache/toolpkg_resource_exports/operit-avatar.png'; },
+    readResource: async (key, path) => { calls.push({ resource: key, path }); return adapters.readResource ? adapters.readResource(key, path) : '/operitapp/data/cache/toolpkg_resource_exports/operit-avatar.png'; },
   } };
   globals.Tools = { Files: { readBinary: adapters.readBinary ?? (async path => ({ path, size: 12, contentBase64: 'iVBORw0KGgo=' })) }, ...(adapters.chat ? { Chat: adapters.chat } : {}) };
   const compiledModules = { ...modules };
@@ -73,7 +73,7 @@ test('native role sidebar restores rounded nested legacy layout without timestam
   assert.equal(keyedNode(tree, 'sidebar-create-bar').props.height, 34);
   assert.equal(keyedNode(tree, 'sidebar-create-bar').props.shape.type, 'pill');
   assert.equal(keyedNode(tree, 'sidebar-avatar-card:travel').props.width, 22);
-  assert.equal(keyedNode(tree, 'sidebar-avatar-card:travel').props.uri, '/app/data/cache/toolpkg_resource_exports/operit-avatar.png');
+  assert.equal(keyedNode(tree, 'sidebar-avatar-card:travel').props.uri, '/operitapp/data/cache/toolpkg_resource_exports/operit-avatar.png');
   assert.equal(keyedNode(tree, 'sidebar-section-card:travel').props.paddingStart, 20);
   assert.equal(composeNodes(tree, node => node.props.key === 'sidebar-section-card:empty').length, 0);
   const group = keyedNode(tree, 'sidebar-group-1');
@@ -306,6 +306,48 @@ test('obsolete sidebar browser files, registration and archive builder are remov
 });
 
 
+for (const entry of ['longPress', 'popup']) {
+  test(entry + ' promotes only child conversations and refreshes their parent projection', async () => {
+    let chats = [summary('c1'), summary('c2', { parentChatId: 'c1' }), summary('c3', { parentChatId: 'c2' })];
+    const mutations = [];
+    let screen;
+    screen = mount(context(chats), catalog(chats), {
+      catalog: async request => catalog(request.chatSidebar.chats),
+      chat: { promoteToRoot: async id => {
+        mutations.push(id);
+        chats = chats.map(chat => chat.id === id ? { ...chat, parentChatId: null } : chat);
+        await screen.update(context(chats));
+        return '';
+      } },
+    });
+    let { tree } = await screen.load();
+    ({ tree } = await screen.click(tree, 'sidebar-children-c1'));
+    const rootMenu = keyedNode(tree, 'sidebar-chat-menu-c1');
+    assert.equal(rootMenu.props.items.some(item => item.label === '提升为主对话'), false);
+    let result;
+    if (entry === 'popup') {
+      const menu = keyedNode(tree, 'sidebar-chat-menu-c2');
+      const index = menu.props.items.findIndex(item => item.label === '提升为主对话');
+      assert.ok(index >= 0);
+      result = await screen.dispatch(menu.props.onSelected, index);
+    } else {
+      const combined = keyedNode(tree, 'sidebar-chat-hit-c2').props.modifier.__modifierOps
+        .find(op => op.name === 'combinedClickable').args[0];
+      const opened = await screen.dispatch(combined.onLongClick);
+      const tile = composeNodes(opened.tree, node => node.type === 'Surface' && node.props.onClick
+        && composeNodes(node, child => child.type === 'Text' && child.props.text === '提升为主对话').length > 0)[0];
+      assert.ok(tile);
+      result = await screen.dispatch(tile.props.onClick);
+    }
+    assert.deepEqual(mutations, ['c2']);
+    assert.equal(result.state['native-sidebar-state'].error, '');
+    assert.equal(result.state['native-sidebar-state'].dialog, null);
+    assert.equal(chats[1].parentChatId, null);
+    assert.equal(chats[2].parentChatId, 'c2');
+    assert.equal(keyedNode(result.tree, 'sidebar-chat-menu-c2').props.items.some(item => item.label === '提升为主对话'), false);
+  });
+}
+
 test('generic long press and swipe callbacks render plugin-owned actions and confirmation dialogs', async () => {
   const chats = [summary('c1'), summary('c2'), summary('c3')], screen = mount(context(chats), catalog(chats));
   const {tree} = await screen.load();
@@ -313,7 +355,9 @@ test('generic long press and swipe callbacks render plugin-owned actions and con
   const combined = hit.props.modifier.__modifierOps.find(op => op.name === 'combinedClickable').args[0];
   const pressed = await screen.dispatch(combined.onLongClick);
   assert.ok(keyedNode(pressed.tree, 'sidebar-edit-dialog'));
-  for (const label of ['编辑名称', '上移', '下移', '置顶', '锁定', '删除'])
+  assert.ok(keyedNode(pressed.tree, 'sidebar-chat-actions-scroll'));
+  if (process.env.OPERIT_NATIVE_SIDEBAR_ACTIONS_FIXTURE) await writeFile(process.env.OPERIT_NATIVE_SIDEBAR_ACTIONS_FIXTURE, JSON.stringify(pressed.tree, null, 2) + '\n');
+  for (const label of ['搜索消息', '查看收藏', '编辑名称', '上移', '下移', '置顶', '锁定', '删除'])
     assert.ok(composeNodes(pressed.tree, node => node.type === 'Text' && node.props.text === label).length > 0, label);
   const rename = await screen.dispatch(keyedNode(tree, 'sidebar-chat-swipe-c1').props.onStartAction);
   assert.equal(keyedNode(rename.tree, 'sidebar-group-name').props.value, '对话 c1');
@@ -346,6 +390,38 @@ for (const view of ['characters', 'groups']) {
     assert.equal(keyedNode(opened.tree, 'sidebar-chat-rail-indicator-c2').props.height, 0);
     assert.equal(screen.calls.length, reads);
   });
+}
+
+for (const view of ['characters', 'groups']) {
+  for (const entry of ['popup', 'longPress']) {
+    for (const [label, type] of [['搜索消息', 'toolpkg.chat.searchMessages'], ['查看收藏', 'toolpkg.chat.viewFavorites']]) {
+      test(view + ' ' + entry + ' delegates ' + label + ' for the exact conversation to the host', async () => {
+        const chats = [summary('c1'), summary('c2')], roles = catalog(chats);
+        const data = view === 'characters' ? roles : { view, scopes: roles.sections.map(section => ({
+          id: section.id, title: section.title, ownerSelection: section.selection,
+          kind: section.kind, avatarUri: section.avatarUri, groups: section.conversationGroups,
+          ungrouped: section.ungroupedChats,
+        })) };
+        const screen = mount({ ...context(chats), input: { view } }, data);
+        const { tree } = await screen.load();
+        let result;
+        const reads = screen.calls.length;
+        if (entry === 'popup') {
+          const menu = keyedNode(tree, 'sidebar-chat-menu-c2');
+          result = await screen.dispatch(menu.props.onSelected, menu.props.items.findIndex(item => item.label === label));
+        } else {
+          const combined = keyedNode(tree, 'sidebar-chat-hit-c2').props.modifier.__modifierOps.find(op => op.name === 'combinedClickable').args[0];
+          const pressed = await screen.dispatch(combined.onLongClick);
+          const tile = composeNodes(pressed.tree, node => node.type === 'Surface' && node.props.onClick
+            && composeNodes(node, child => child.type === 'Text' && child.props.text === label).length > 0)[0];
+          result = await screen.dispatch(tile.props.onClick);
+        }
+        assert.deepEqual(JSON.parse(JSON.stringify(result.actionResult)), { type, chatId: 'c2' });
+        assert.equal(composeNodes(result.tree, node => node.type === 'Dialog').length, 0);
+        assert.equal(screen.calls.length, reads, 'lookup must use the validated host activation path');
+      });
+    }
+  }
 }
 
 for (const capabilities of [undefined, { openInWindow: false }]) {
@@ -388,7 +464,7 @@ for (const entry of ['popup', 'longPress']) {
     const { tree } = await screen.load();
     let result;
     if (entry === 'popup') {
-      result = await screen.dispatch(keyedNode(tree, 'sidebar-chat-menu-c1').props.onSelected, 3);
+      result = await screen.dispatch(keyedNode(tree, 'sidebar-chat-menu-c1').props.onSelected, 5);
     } else {
       const hit = keyedNode(tree, 'sidebar-chat-hit-c1');
       const combined = hit.props.modifier.__modifierOps.find(op => op.name === 'combinedClickable').args[0];
@@ -408,7 +484,7 @@ test('direct deletion keeps backend lock refusal visible', async () => {
     deleteChat: async id => { calls.push(id); throw new Error('Locked conversation cannot be deleted'); },
   }});
   const { tree } = await screen.load();
-  const result = await screen.dispatch(keyedNode(tree, 'sidebar-chat-menu-c1').props.onSelected, 3);
+  const result = await screen.dispatch(keyedNode(tree, 'sidebar-chat-menu-c1').props.onSelected, 5);
   assert.deepEqual(calls, ['c1']);
   assert.equal(composeNodes(result.tree, node => node.type === 'Dialog').length, 0);
   assert.ok(composeNodes(result.tree, node => node.type === 'Text'
@@ -423,8 +499,8 @@ test('plugin menu delegates pin and lock to the real SDK interface, not native b
   }});
   const {tree} = await screen.load();
   const selected = keyedNode(tree, 'sidebar-chat-menu-c1').props.onSelected;
-  await screen.dispatch(selected, 1);
-  await screen.dispatch(selected, 2);
+  await screen.dispatch(selected, 3);
+  await screen.dispatch(selected, 4);
   assert.deepEqual(mutations, [['pin', 'c1', true], ['lock', 'c1', true]]);
 });
 
@@ -598,7 +674,7 @@ test('native custom avatars carry paths without reading their contents', async (
 test('prepared role data and avatars appear in the first DSL tree before IPC completes', async () => {
   const chats = [summary('c1')], current = context(chats), data = catalog(chats);
   const chatSidebarPrepared = { context: JSON.stringify({ input: current.input, chats }), data,
-    defaultAvatar: '/app/data/cache/toolpkg_resource_exports/operit-avatar.png' };
+    defaultAvatar: '/operitapp/data/cache/toolpkg_resource_exports/operit-avatar.png' };
   let finish;
   const pending = new Promise(resolve => { finish = resolve; });
   const session = mount({ ...current, chatSidebarPrepared }, data, { catalog: () => pending });
@@ -640,7 +716,7 @@ test('twenty default avatars serialize resource paths without any binary reads',
   assert.equal(avatars.size, 20);
   assert.equal(reads, 0);
   assert.equal(screen.calls.filter(call => call.resource).length, 1);
-  for (const uri of avatars.values()) assert.equal(uri, '/app/data/cache/toolpkg_resource_exports/operit-avatar.png');
+  for (const uri of avatars.values()) assert.equal(uri, '/operitapp/data/cache/toolpkg_resource_exports/operit-avatar.png');
 });
 
 
@@ -652,11 +728,11 @@ test('sidebar content and onLoad complete while default avatar lookup remains pe
   const loaded = await screen.load();
   assert.ok(composeNodes(loaded.tree, node => node.type === 'Text' && node.props.text === '旅行角色').length > 0);
   assert.ok(composeNodes(loaded.tree, node => node.type === 'Text' && node.props.text === '对话 c1').length > 0);
-  assert.equal(composeNodes(loaded.tree, node => node.type === 'Image' && node.props.uri === '/app/default.png').length, 0);
-  complete('/app/default.png');
+  assert.equal(composeNodes(loaded.tree, node => node.type === 'Image' && node.props.uri === '/operitapp/default.png').length, 0);
+  complete('/operitapp/default.png');
   await new Promise(resolve => setImmediate(resolve));
   const rendered = screen.render();
-  assert.ok(composeNodes(rendered.tree, node => node.type === 'Image' && node.props.uri === '/app/default.png').length > 0);
+  assert.ok(composeNodes(rendered.tree, node => node.type === 'Image' && node.props.uri === '/operitapp/default.png').length > 0);
 });
 
 // Host inputs alone must trigger classification; production never manually clicks a lifecycle callback.

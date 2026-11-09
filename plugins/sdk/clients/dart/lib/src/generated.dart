@@ -9,6 +9,8 @@ final class OperitApplicationClient {
   final OperitPluginSdkClient _client;
   /// Watches `pluginLoadingProgressFlow` through the Core Link route.
   Stream<PluginLoadingProgress> pluginLoadingProgressFlow() => _client.watchTyped<PluginLoadingProgress>("core/application", 'pluginLoadingProgressFlow', <String, Object?>{}, (value) => PluginLoadingProgress.fromMessagePackValue(value as Map<String, Object?>));
+  /// Calls `getExtensionCatalogSnapshot` through the Core Link route.
+  Future<ExtensionCatalogSnapshot> getExtensionCatalogSnapshot() async { return await _client.callTyped<ExtensionCatalogSnapshot>("core/application", 'getExtensionCatalogSnapshot', <String, Object?>{}, (value) => ExtensionCatalogSnapshot.fromMessagePackValue(value as Map<String, Object?>)); }
 }
 
 /// Generated client for Core object `application.packageManager`.
@@ -37,10 +39,6 @@ final class OperitApplicationPackageManagerClient {
   Future<List<ToolPkgContainerDetails>> getToolPkgPluginContainerDetails({required bool useEnglish}) async { return await _client.callTyped<List<ToolPkgContainerDetails>>("core/application.packageManager", 'getToolPkgPluginContainerDetails', <String, Object?>{'useEnglish': useEnglish}, (value) => (value as List<Object?>).map((item) => ToolPkgContainerDetails.fromMessagePackValue(item as Map<String, Object?>)).toList(growable: false)); }
   /// Calls `getToolPkgContainerRuntimes` through the Core Link route.
   Future<List<ToolPkgContainerRuntime>> getToolPkgContainerRuntimes() async { return await _client.callTyped<List<ToolPkgContainerRuntime>>("core/application.packageManager", 'getToolPkgContainerRuntimes', <String, Object?>{}, (value) => (value as List<Object?>).map((item) => ToolPkgContainerRuntime.fromMessagePackValue(item as Map<String, Object?>)).toList(growable: false)); }
-  /// Calls `getToolPkgContainerOrder` through the Core Link route.
-  Future<List<String>> getToolPkgContainerOrder() async { return await _client.callTyped<List<String>>("core/application.packageManager", 'getToolPkgContainerOrder', <String, Object?>{}, (value) => (value as List<Object?>).map((item) => item as String).toList(growable: false)); }
-  /// Calls `setToolPkgContainerOrder` through the Core Link route.
-  Future<void> setToolPkgContainerOrder({required List<String> packageNames}) async { await _client.call("core/application.packageManager", 'setToolPkgContainerOrder', <String, Object?>{'packageNames': packageNames.map((item) => item).toList(growable: false)}); }
   /// Calls `getToolPkgContainerDetails` through the Core Link route.
   Future<ToolPkgContainerDetails?> getToolPkgContainerDetails({required String packageName, required bool useEnglish}) async { return await _client.callTyped<ToolPkgContainerDetails?>("core/application.packageManager", 'getToolPkgContainerDetails', <String, Object?>{'packageName': packageName, 'useEnglish': useEnglish}, (value) => value == null ? null : ToolPkgContainerDetails.fromMessagePackValue(value as Map<String, Object?>)); }
   /// Calls `readToolPkgLogoBytes` through the Core Link route.

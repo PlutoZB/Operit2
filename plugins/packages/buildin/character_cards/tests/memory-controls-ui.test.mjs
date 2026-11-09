@@ -8,7 +8,7 @@ import { createHtmlDocument } from "../scripts/build.mjs";
 import { fixture } from "./fixtures.mjs";
 import { plain } from "./runtime.mjs";
 import { CONTROLLED_CHAT_ID, CONTROLLED_OWNER, createMemoryJobsHarness } from "./memory-jobs-runtime.mjs";
-const require = createRequire(new URL("../../workflow/package.json", import.meta.url));
+const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
 const html = await createHtmlDocument();
 let browser, server, origin;
@@ -45,6 +45,9 @@ async function controlsPage(t, width = 390, view = "memory") {
   await context.exposeFunction("exportRealMemoryFile", async (path, content) => {
     await harness.tools.Files.write(path, content, false); return { cancelled: false, path };
   });
+  await context.exposeFunction("readRealMemoryFile", async path => {
+    return { cancelled: false, content: (await harness.tools.Files.read(path)).content };
+  });
   await context.addInitScript(({ theme, view }) => {
     window.rejectMemoryAction = null;
     window.CharacterMemoryHost = {
@@ -58,6 +61,11 @@ async function controlsPage(t, width = 390, view = "memory") {
       },
       async avatarImage() { return null; },
       async openEntity() { throw new Error("No avatar picker configured for memory-controls test"); },
+      /** Supplies only the host selection; the service imports actual file contents. */
+      async readImportFile() {
+        if (window.importSource === undefined) return { cancelled: true };
+        return window.readRealMemoryFile(window.importSource);
+      },
       /** Separates the host user's destination and cancellation from plugin preview state. */
       async exportFile(name, content) {
         if (window.rejectExport === true) throw new Error("Host save denied");
@@ -449,8 +457,15 @@ test("graph canonical relationship editing and full memory backup import/export 
   await imported.getByLabel("相同 UUID 记忆处理", { exact: true }).selectOption("UPDATE");
   backup.space.memories[0].content = "Restored through actual UI import";
   backup.userMarkdown = "# Restored profile";
-  await imported.getByLabel("粘贴记忆 JSON", { exact: true }).fill(JSON.stringify(backup));
-  await imported.getByRole("button", { name: "导入", exact: true }).click();
+  assert.equal(await imported.locator("textarea").count(), 0);
+  await ui.page.evaluate(path => { window.importSource = path; }, path);
+  await ui.harness.tools.Files.write(path, "{", false);
+  await imported.getByRole("button", { name: "选择 JSON 文件并导入", exact: true }).click();
+  await imported.getByRole("alert").waitFor();
+  assert.equal(await imported.count(), 1);
+  assert.notEqual((await storedOwner(ui.harness)).memories[0].content, "Restored through actual UI import");
+  await ui.harness.tools.Files.write(path, JSON.stringify(backup), false);
+  await imported.getByRole("button", { name: "选择 JSON 文件并导入", exact: true }).click();
   await imported.waitFor({ state: "hidden" });
   assert.equal((await storedOwner(ui.harness)).memories[0].content, "Restored through actual UI import");
   assert.equal((await ui.runtime.web({ action: "readUser", ownerKey: CONTROLLED_OWNER })).content, "# Restored profile");
@@ -528,5 +543,26 @@ test("real rebuild reports partial failure after continuing through the remainin
   assert.equal(await dialog.getByRole("button", { name: "取消重建", exact: true }).isDisabled(), true);
   await dialog.locator('[data-memory-chat="' + CONTROLLED_CHAT_ID + '"]').check();
   assert.equal(await dialog.getByRole("button", { name: "开始重建", exact: true }).isEnabled(), true);
+  assert.deepEqual(ui.errors, []);
+});
+
+test("missing character library stays nonblocking and offers explicit creation in memory settings", async t => {
+  const ui = await controlsPage(t);
+  const state = await ui.harness.readState(); state.owners = []; ui.harness.disk.replaceState(state);
+  ui.harness.disk.clearCalls();
+  await ui.page.reload();
+  await ui.card.getByText("当前角色无记忆库", { exact: true }).waitFor();
+  assert.equal(await ui.card.getByRole("button", { name: "记忆设置", exact: true }).count(), 0);
+  assert.equal((await ui.harness.readState()).owners.length, 0);
+  const resolved = await ui.runtime.api("chat.configuration.resolve", { purpose: "execution", chatId: CONTROLLED_CHAT_ID, chatExtension: { version: 1, selection: "card:default" }, participantId: null, promptFunctionType: "CHAT", defaultModelBinding: { providerId: "dashscope", modelId: "qwen-plus" }, defaultTtsConfigId: "tts-one" });
+  assert.equal(resolved.profile.userPreferencesText, "");
+  await ui.runtime.enqueueReplies(); await ui.runtime.interval();
+  assert.equal((await ui.harness.readState()).owners.length, 0);
+  assert.equal(ui.harness.disk.calls.some(call => call.method === "storage.commit"), false);
+  await ui.card.getByRole("button", { name: "新建角色卡记忆库", exact: true }).click();
+  await ui.card.getByRole("button", { name: "记忆设置", exact: true }).waitFor();
+  assert.equal(await ui.card.getByText("当前角色无记忆库", { exact: true }).count(), 0);
+  assert.equal((await ui.harness.readState()).owners.length, 1);
+  await ui.open();
   assert.deepEqual(ui.errors, []);
 });

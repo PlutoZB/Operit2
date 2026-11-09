@@ -783,3 +783,37 @@ fn normalize(value: &str) -> String {
     }
     normalized.trim().to_string()
 }
+
+#[cfg(test)]
+mod proxy_json_tests {
+    use super::*;
+
+    #[test]
+    fn cli_proxy_prompts_advertise_json_objects_in_both_languages() {
+        for english in [true, false] {
+            let tools = CliToolModeSupport::buildCliPublicToolPrompts(english);
+            let proxy = tools.iter().find(|tool| tool.name == PROXY_TOOL_NAME).unwrap();
+            let params = proxy.parametersStructured.as_ref().unwrap().iter().find(|p| p.name == "params").unwrap();
+            assert_eq!(params.r#type, "object");
+            assert!(params.description.contains("JSON"));
+            let prompt = CliToolModeSupport::buildCliModePrompt(english);
+            assert!(prompt.contains("JSON"));
+            assert!(!prompt.contains("YAML"));
+        }
+    }
+
+    #[test]
+    fn search_hints_render_as_json_objects() {
+        let entry = HiddenToolCatalogEntry {
+            target_tool_name: "use_package".into(), display_name: "browser".into(),
+            description: "Browser tools".into(), parameter_hints: vec![],
+            source_kind: HiddenToolSourceKind::ACTIVATION, keywords: vec![],
+            suggested_params_json: Some(r#"{"package_name":"browser"}"#.into()),
+        };
+        for english in [true, false] {
+            let result = CliToolModeSupport::formatSearchResults("browser", &[entry.clone()], english);
+            assert!(result.contains(r#"{"package_name":"browser"}"#));
+            assert!(!result.contains("YAML"));
+        }
+    }
+}

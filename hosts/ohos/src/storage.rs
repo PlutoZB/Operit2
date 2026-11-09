@@ -20,6 +20,10 @@ impl OhosRuntimeStorageHost {
 }
 
 impl RuntimeStorageHost for OhosRuntimeStorageHost {
+    fn openTransactionDatabase(&self, path: &str) -> operit_host_api::HostResult<Box<dyn operit_host_api::RuntimeSqliteConnection>> {
+        RuntimeSqliteHost::openSqliteDatabase(self, path)
+    }
+
     /// Returns the OpenHarmony runtime storage physical root.
     fn runtimeRootDir(&self) -> Option<PathBuf> {
         self.inner.runtimeRootDir()
@@ -44,6 +48,11 @@ impl RuntimeStorageHost for OhosRuntimeStorageHost {
     fn writeBytes(&self, path: &str, content: &[u8]) -> HostResult<()> {
         self.inner.writeBytes(path, content)
     }
+
+    /// Reads the source file modification time through the shared storage host.
+    fn modifiedAt(&self, path: &str) -> HostResult<i64> { self.inner.modifiedAt(path) }
+    /// Preserves source metadata through the shared storage host.
+    fn setModifiedAt(&self, path: &str, modifiedAt: i64) -> HostResult<()> { self.inner.setModifiedAt(path, modifiedAt) }
 
     fn writeBytesAtomically(&self, path: &str, content: &[u8]) -> HostResult<()> {
         self.inner.writeBytesAtomically(path, content)

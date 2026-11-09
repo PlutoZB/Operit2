@@ -7,6 +7,34 @@ The package owns character cards and memory in one ToolPkg
 The offline Material UI is present, but passing Node or browser tests does **not**
 mean the application is connected or the original feature has been fully extracted.
 
+## First installation
+
+Before writing business records, initialization saves its versioned payload in
+`meta.preferences.json` under `initialization`. The plan fixes the card UUID,
+template content and initial memory settings; interrupted attempts reuse those
+exact values rather than identifying records by the current default template.
+Publishing `state` and removing `initialization` happen in one metadata edit.
+
+Only absent records or exact planned records are accepted while resuming. Existing
+USER.md bytes are retained. Configuration or memory records without metadata and
+without an initialization plan are rejected, including old default-looking
+partial installs; they require explicit data recovery, not automatic adoption.
+This is a recoverable multi-owner operation, not a transaction spanning JSON,
+SQLite and files. Concurrent edits fail explicitly. The space-owned plan declares
+its card references for normal identity remapping during space merges.
+
+For an old interrupted installation without a plan, open character management in
+the plugin and select **检查初始化数据**. Inspection shows the actual saved card
+and does not adopt it automatically. After reviewing the preservation notice,
+check the confirmation box and select **修复初始化**. This explicitly retains
+the card ID/content, existing owner settings and USER.md, and supplies missing
+initial metadata with the documented initial global settings. Recovery supports
+exactly one complete card, at most its matching owner, and no other configuration
+or memory records; incompatible data is rejected rather than cleared or guessed.
+The recovery channel remains available after service initialization fails, and
+successful repair revives that same runtime without restarting the application.
+An interrupted repair retains its plan and can be continued from the same panel.
+
 ## Compose route entries
 
 Each of the nine UI routes has its own default-exported entry at
@@ -234,14 +262,20 @@ owner-scoped deduplication across calls.
 
 ## Built-in memory recall
 
-The plugin owns per-turn memory recall through its prompt finalize hook
-(`src/memory-recall.ts`). On every main character or group turn it strips host
-markup from the authored input, queries the speaking participant's primary
+The plugin owns per-turn memory recall through its `before_process` input hook
+(`src/memory-recall.ts`). When preprocessing input with an explicit character
+participant, it strips host markup from the authored input and queries that
+participant's primary
 memory owner with a per-chat snapshot for owner-scoped deduplication, and
-appends the configured number of matches as a transient `<memory_context>`
-block to the final model request. Injections never persist into chat history,
-an empty result injects nothing, and provider failures fail closed without
-blocking the send.
+appends the configured number of matches as a `<memory_context>` block before
+the host commits the user message. The block persists with that user message
+and is reused in later history and regeneration requests, preserving the
+previous prompt prefix for model caching. Input that already contains the
+block skips retrieval, including after a plugin restart. An empty result
+injects nothing. Retrieval exceptions are logged and skip injection; host hook
+timeouts still follow the shared pre-hook timeout policy. Group `record_only`
+submissions and their empty-input continuations bypass this input hook; the
+previous finalize hook also skipped these empty-input continuation requests.
 
 The memory menu's expanded section controls the persisted `memoryRecall` state
 field: the 自动检索注入记忆 switch, a numeric input for the per-turn injection
@@ -370,3 +404,23 @@ configuration preferences and the memory database have separate transaction boun
 Backups export source records without the retired text cache; importing with embeddings
 enabled recomputes vectors. Synchronization carries existing vectors with their source
 row. Opening migrated libraries deletes retired cache rows without loading their payloads.
+
+### 记忆检索索引
+
+SQLite 保存同步的源记录及其 embedding，检索不再在 SQL 中展开向量 JSON、计算点积或执行多层排名 CTE。
+插件第一次读取某个 owner 时，以主键范围分页建立词项索引、标题索引、文件夹和时间索引、关系邻接表，以及 USearch WASM 近邻索引。
+运行中的后续查询读取本地变更游标，只更新发生变化的源；普通查询只对候选进行合分，最后按 key 读取结果页。
+文档块复用同一索引和分词规则。检索仅生成当前 query 的临时向量，源 embedding 的缺失、过期或维数变化仍要求显式重建。
+
+`vendor/usearch` 是本插件拥有的依赖及构建入口，与 `plugins/sdk` 的外部 IPC 客户端无关。
+ANN 是近似检索，文件夹、时间和排除条件传入 WASM 过滤器；候选预算有上限，避免文档大量分块时退化为全库精确扫描。
+词项和关系评分在 `src/memory-search.ts` 中实现，保留 RRF、权重模式、阈值和排除后的分页语义。
+索引当前保留在运行时内存中，冷启动会重建索引；WASM 保存／恢复能力已由独立示例验证，尚未接入记忆插件的磁盘检查点。
+
+## Runtime diagnostics
+
+`[character_cards]` prints short send checks/decisions, group takeover, native
+send starts and group completion. Normal storage, role validation and UI reads
+are silent. Completed operations taking at least one second report their duration.
+Failures include the await stage, short chat ID and task ID; the same error is
+printed once, without JSON payloads, message text or full stacks.

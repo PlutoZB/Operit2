@@ -48,10 +48,9 @@ impl ToolGetter {
                 .httpHost
                 .clone()
                 .expect("HTTP host must be configured before registering HTTP tools"),
-            context
-                .fileSystemHost
-                .clone()
-                .expect("FileSystemHost must be configured before registering HTTP tools"),
+            Self::getVirtualFileSystem(context),
+            context.runtimeStorageHost.clone()
+                .expect("Runtime storage must be configured before registering HTTP tools"),
         )
     }
 
@@ -60,11 +59,15 @@ impl ToolGetter {
     pub fn getWebVisitTool(context: &HostManager) -> StandardWebVisitTool {
         StandardWebVisitTool::new(
             context.webVisitHost.clone(),
-            context
-                .fileSystemHost
-                .clone()
-                .expect("FileSystemHost must be configured before registering web-visit tools"),
+            Self::getVirtualFileSystem(context),
         )
+    }
+
+    /// Binds file consumers to the owning runtime's VFS and registered mounts.
+    #[allow(non_snake_case)]
+    fn getVirtualFileSystem(context: &HostManager) -> operit_tools::files::VisualFileSystem::VisualFileSystem {
+        operit_tools::files::VisualFileSystem::VisualFileSystem::fromContext(context)
+            .expect("Runtime VFS must be configured before registering file consumers")
     }
 
     /// Creates browser automation tools from the browser host capability.
@@ -84,13 +87,21 @@ impl ToolGetter {
         StandardSystemOperationTools::new(
             context.systemOperationHost.clone(),
             context.toastHost.clone(),
+            context.clipboardHost.clone(),
         )
     }
 
     /// Creates terminal tools from the optional terminal host.
     #[allow(non_snake_case)]
     pub fn getTerminalTools(context: &HostManager) -> StandardTerminalTools {
-        StandardTerminalTools::new(context.terminalHost.clone())
+        let tools = StandardTerminalTools::new(context.terminalHost.clone());
+        let Some(storage) = context.runtimeStorageHost.as_ref() else { return tools; };
+        let tools = tools.withStorage(storage.clone());
+        let (Some(runtimeRoot), Some(workspaceRoot)) =
+            (storage.runtimeRootDir(), storage.workspaceRootDir()) else { return tools; };
+        tools.withPathMapper(operit_tools::files::PathMapper::PathMapper::new(
+            runtimeRoot, workspaceRoot, storage.clone(),
+        ))
     }
 
     /// Creates music playback tools from the optional audio playback host.

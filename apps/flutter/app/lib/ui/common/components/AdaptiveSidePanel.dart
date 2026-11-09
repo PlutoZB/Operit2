@@ -6,7 +6,7 @@ import 'package:flutter/material.dart';
 
 import 'RetainedPage.dart';
 
-/// Hosts a resizable trailing panel on wide layouts and an overlay panel on phones.
+/// Hosts a resizable trailing panel on wide layouts and a full-width overlay in narrow hosts.
 class AdaptiveSidePanel extends StatefulWidget {
   /// Creates a responsive trailing panel around the primary content.
   const AdaptiveSidePanel({
@@ -17,12 +17,15 @@ class AdaptiveSidePanel extends StatefulWidget {
     required this.child,
     this.breakpoint = 600,
     this.defaultWidth = 360,
+    this.defaultWidthFraction,
     this.minWidth = 280,
     this.minContentWidth = 320,
     this.resizeHandleHitWidth = 24,
     this.resizeHandleVisualWidth = 3,
     this.resizeHandleHeight = 56,
     this.closedDropTarget,
+    this.overlayTopInset = 0,
+    this.widePanelPadding = const EdgeInsets.all(8),
     this.animate = true,
   });
 
@@ -32,12 +35,19 @@ class AdaptiveSidePanel extends StatefulWidget {
   final Widget child;
   final double breakpoint;
   final double defaultWidth;
+  final double? defaultWidthFraction;
   final double minWidth;
   final double minContentWidth;
   final double resizeHandleHitWidth;
   final double resizeHandleVisualWidth;
   final double resizeHandleHeight;
   final Widget? closedDropTarget;
+
+  /// Leaves the host's existing toolbar visible and interactive above an overlay.
+  final double overlayTopInset;
+
+  /// Embedded panes can meet the host edges without adding a second frame.
+  final EdgeInsetsGeometry widePanelPadding;
   final bool animate;
 
   /// Creates the state that tracks the panel width and drag interaction.
@@ -82,8 +92,15 @@ class _AdaptiveSidePanelState extends State<AdaptiveSidePanel> {
         final minimumPanelWidth = useWideLayout
             ? math.min(widget.minWidth, maximumPanelWidth)
             : constraints.maxWidth;
+        final targetDefaultWidth =
+            widget.defaultWidthFraction != null && useWideLayout
+            ? math.max(
+                widget.defaultWidth,
+                constraints.maxWidth * widget.defaultWidthFraction!,
+              )
+            : widget.defaultWidth;
         final panelWidth = _resolvePanelWidth(
-          widget.defaultWidth,
+          targetDefaultWidth,
           minimumPanelWidth,
           maximumPanelWidth,
         );
@@ -125,7 +142,8 @@ class _AdaptiveSidePanelState extends State<AdaptiveSidePanel> {
           // their non-positioned overlays and then be vertically centered.
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
-            Expanded(child: content),
+            // Primary menus must use this pane's bounds, not the full window.
+            Expanded(child: Overlay.wrap(child: content)),
             AnimatedContainer(
               duration: _animationDuration,
               curve: Curves.easeOutCubic,
@@ -134,8 +152,12 @@ class _AdaptiveSidePanelState extends State<AdaptiveSidePanel> {
           ],
         ),
         if (!useWideLayout && widget.open)
-          Positioned.fill(
+          PositionedDirectional(
             key: const ValueKey<String>('sidePanelDismissBarrier'),
+            top: widget.overlayTopInset,
+            bottom: 0,
+            start: 0,
+            end: 0,
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTap: () => widget.onOpenChanged(false),
@@ -148,7 +170,7 @@ class _AdaptiveSidePanelState extends State<AdaptiveSidePanel> {
           onEnd: _finishPanelTransition,
           duration: _animationDuration,
           curve: Curves.easeOutCubic,
-          top: 0,
+          top: useWideLayout ? 0 : widget.overlayTopInset,
           bottom: 0,
           end: widget.open ? 0 : -width,
           width: width,
@@ -158,18 +180,21 @@ class _AdaptiveSidePanelState extends State<AdaptiveSidePanel> {
               Positioned.fill(
                 child: RetainedPage(
                   active: widget.open || _closing,
-                  child: widget.panel,
+                  child: Padding(
+                    padding: useWideLayout
+                        ? widget.widePanelPadding
+                        : EdgeInsets.zero,
+                    child: widget.panel,
+                  ),
                 ),
               ),
               if (useWideLayout && widget.open)
                 PositionedDirectional(
                   top: 0,
                   bottom: 0,
-                  start: -widget.resizeHandleHitWidth / 2,
-                  width: widget.resizeHandleHitWidth,
+                  start: -4,
+                  width: 16,
                   child: _AdaptiveSidePanelResizeHandle(
-                    visualWidth: widget.resizeHandleVisualWidth,
-                    height: widget.resizeHandleHeight,
                     onDragStart: (_) {
                       _startResize(width);
                     },
@@ -236,39 +261,45 @@ class _AdaptiveSidePanelState extends State<AdaptiveSidePanel> {
       : const Duration(milliseconds: 220);
 }
 
-class _AdaptiveSidePanelResizeHandle extends StatelessWidget {
-  /// Creates the drag target displayed at the leading edge of a wide side panel.
+class _AdaptiveSidePanelResizeHandle extends StatefulWidget {
   const _AdaptiveSidePanelResizeHandle({
-    required this.visualWidth,
-    required this.height,
     required this.onDragStart,
     required this.onDragUpdate,
     required this.onDragEnd,
   });
 
-  final double visualWidth;
-  final double height;
   final GestureDragStartCallback onDragStart;
   final GestureDragUpdateCallback onDragUpdate;
   final GestureDragEndCallback onDragEnd;
 
-  /// Builds the panel resize gesture detector and its visible affordance.
+  @override
+  State<_AdaptiveSidePanelResizeHandle> createState() =>
+      _AdaptiveSidePanelResizeHandleState();
+}
+
+class _AdaptiveSidePanelResizeHandleState
+    extends State<_AdaptiveSidePanelResizeHandle> {
+  bool _hovered = false;
+
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     return MouseRegion(
       cursor: SystemMouseCursors.resizeColumn,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
       child: GestureDetector(
         behavior: HitTestBehavior.translucent,
-        onHorizontalDragStart: onDragStart,
-        onHorizontalDragUpdate: onDragUpdate,
-        onHorizontalDragEnd: onDragEnd,
+        onHorizontalDragStart: widget.onDragStart,
+        onHorizontalDragUpdate: widget.onDragUpdate,
+        onHorizontalDragEnd: widget.onDragEnd,
         child: Center(
-          child: Container(
-            width: visualWidth,
-            height: height,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            width: _hovered ? 2.5 : 0.0,
+            height: double.infinity,
             decoration: BoxDecoration(
-              color: colorScheme.outlineVariant,
+              color: colorScheme.primary.withValues(alpha: 0.65),
               borderRadius: BorderRadius.circular(2),
             ),
           ),

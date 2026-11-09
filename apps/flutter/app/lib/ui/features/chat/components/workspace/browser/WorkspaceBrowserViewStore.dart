@@ -6,6 +6,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:operit2/core/browser/BrowserSessions.dart';
+import 'package:operit2/core/host/RuntimeHostInteractionSubscriber.dart';
 import 'package:operit2/core/logging/ClientLogger.dart';
 import 'package:operit2/core/proxy/generated/CoreProxyModels.g.dart';
 
@@ -16,20 +17,24 @@ import 'permissions/WorkspaceBrowserPermissionStore.dart';
 import 'tabs/WorkspaceBrowserTabModels.dart';
 import 'userscripts/WorkspaceUserscriptModels.dart';
 
+export 'tabs/WorkspaceBrowserTabModels.dart';
+
 class WorkspaceBrowserViewDelegate {
   /// Creates workspace-only browser presentation callbacks.
-  const WorkspaceBrowserViewDelegate({
-    required this.onActivateRequested,
-    required this.onCloseRequested,
-  });
+  const WorkspaceBrowserViewDelegate({required this.onCloseRequested});
 
-  final VoidCallback onActivateRequested;
   final VoidCallback onCloseRequested;
 }
 
 class WorkspaceBrowserViewStore extends ChangeNotifier {
   /// Creates the workspace browser surface store.
-  WorkspaceBrowserViewStore._();
+  WorkspaceBrowserViewStore._({BrowserSessions? sessions})
+    : _sessions = sessions ?? BrowserSessions();
+
+  /// Creates an isolated store with a supplied browser client for tests.
+  @visibleForTesting
+  WorkspaceBrowserViewStore.forTesting({required BrowserSessions sessions})
+    : this._(sessions: sessions);
 
   static final WorkspaceBrowserViewStore instance =
       WorkspaceBrowserViewStore._();
@@ -49,7 +54,7 @@ class WorkspaceBrowserViewStore extends ChangeNotifier {
   static const String _encodedStreamTransport = 'encodedStream';
   static const String _logTag = 'WorkspaceBrowserSurface';
 
-  final BrowserSessions _sessions = BrowserSessions();
+  final BrowserSessions _sessions;
   final WorkspaceBrowserStores stores = WorkspaceBrowserStores();
   final WorkspaceBrowserPermissionStore permissions =
       WorkspaceBrowserPermissionStore();
@@ -106,6 +111,9 @@ class WorkspaceBrowserViewStore extends ChangeNotifier {
 
   /// Loads local browser chrome stores and existing Core sessions.
   Future<void> ensureLoaded() {
+    if (!kIsWeb && !RuntimeHostInteractionSubscriber.isInstalled) {
+      RuntimeHostInteractionSubscriber.install();
+    }
     if (_loaded) {
       return Future<void>.value();
     }
@@ -203,9 +211,22 @@ class WorkspaceBrowserViewStore extends ChangeNotifier {
       throw StateError('Browser session is not attached');
     }
     _selectedIndex = index;
-    _delegate?.onActivateRequested();
+    // Workspace already selected its tab before synchronizing the session.
+    // Calling back into tab selection here re-enters selectSession and can
+    // activate the previous tab while a new browser content widget is mounting.
     notifyListeners();
-    unawaited(_sessions.activate(sessionId));
+    unawaited(_activateSession(sessionId));
+  }
+
+  /// Reports asynchronous activation failures on the affected browser tab.
+  Future<void> _activateSession(String sessionId) async {
+    try {
+      await _sessions.activate(sessionId);
+    } catch (error) {
+      _tabById(
+        sessionId,
+      )?.update(errorText: error.toString(), isLoading: false);
+    }
   }
 
   /// Closes one browser session through Core.
@@ -589,7 +610,7 @@ class WorkspaceBrowserViewStore extends ChangeNotifier {
   }
 
   /// Returns the attached tab with the requested session identifier.
-  WorkspaceBrowserTabState? _tabById(String sessionId) {
+  WorkspaceBrowserTabState? tabById(String sessionId) {
     for (final tab in _tabs) {
       if (tab.id == sessionId) {
         return tab;
@@ -597,6 +618,8 @@ class WorkspaceBrowserViewStore extends ChangeNotifier {
     }
     return null;
   }
+
+  WorkspaceBrowserTabState? _tabById(String sessionId) => tabById(sessionId);
 
   /// Returns the current tab or reports a missing attachment.
   WorkspaceBrowserTabState _requireCurrentTab() {

@@ -3,6 +3,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:xml/xml.dart' as xml;
 
@@ -12,6 +13,7 @@ import '../../../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../../../core/proxy/generated/CoreProxyModels.g.dart'
     as core_proxy;
 import '../../../../../l10n/generated/app_localizations.dart';
+import '../../../../common/interactions/ChainedScrollController.dart';
 import '../../../../common/interactions/MessagePressShield.dart';
 import '../../../../common/markdown/StreamMarkdownRenderer.dart';
 import '../../../../common/markdown/Utf16Text.dart';
@@ -19,12 +21,13 @@ import '../../../../common/markdown/XmlRenderPluginRegistry.dart';
 import '../../../../../util/ChatMarkupRegex.dart';
 import '../../../packages/screens/ToolPkgUiLauncherScreen.dart';
 import '../ChatRuntimeScope.dart';
+import 'ChatActivityDisclosure.dart';
+import 'ChatActivityRowStyle.dart';
 import 'DetailsTagRenderer.dart';
 import 'DialogComponents.dart';
-import 'FileDiffDisplay.dart';
 import 'FontTagRenderer.dart';
+import 'ThinkingPreviewBuffer.dart';
 import 'ToolDisplayComponents.dart';
-import 'ToolResultDisplay.dart';
 import 'XmlCanvasBlockComponents.dart';
 
 class CustomXmlRenderer extends StatelessWidget {
@@ -34,6 +37,7 @@ class CustomXmlRenderer extends StatelessWidget {
     required this.isStreaming,
     required this.textColor,
     this.xmlStream,
+    this.xmlAttributes,
     this.xmlMarkdownEventStream,
     this.showThinkingProcess = true,
     this.initialThinkingExpanded = false,
@@ -45,6 +49,7 @@ class CustomXmlRenderer extends StatelessWidget {
   final bool isStreaming;
   final Color textColor;
   final Stream<String>? xmlStream;
+  final Map<String, String>? xmlAttributes;
   final Stream<Object>? xmlMarkdownEventStream;
   final bool showThinkingProcess;
   final bool initialThinkingExpanded;
@@ -54,7 +59,7 @@ class CustomXmlRenderer extends StatelessWidget {
   /// Builds the rendered XML message content.
   @override
   Widget build(BuildContext context) {
-    final parsed = _ParsedXml.from(xmlContent);
+    final parsed = _ParsedXml.from(xmlContent, attributes: xmlAttributes);
     if (_shouldHideGeminiThoughtSignatureMeta(xmlContent, parsed.tagName)) {
       return const SizedBox.shrink();
     }
@@ -139,19 +144,15 @@ class CustomXmlRenderer extends StatelessWidget {
         );
       case 'tool_result':
         final result = _extractToolResult(parsed, xmlContent);
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            for (final fileDiff in result.fileDiffs)
-              FileDiffDisplay(diff: fileDiff),
-            if (result.fileDiffs.isEmpty)
-              ToolResultDisplay(
-                toolName: result.toolName,
-                result: result.resultContent,
-                isSuccess: result.isSuccess,
-                isStreaming: isStreaming,
-              ),
-          ],
+        return ToolCallRow(
+          presentation: ToolPresentation.fromResult(
+            result.toolName,
+            result.resultContent,
+            isSuccess: result.isSuccess,
+            display: toolDisplayFromAttributes(parsed.attributes),
+            resultData: decodeToolMetadata(parsed.attributes['result_data']),
+          ),
+          isStreaming: isStreaming,
         );
       case 'html':
         return StreamMarkdownRenderer(
@@ -485,44 +486,21 @@ class _ToolRequestRenderer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final rawToolName = parsed.attr('name') ?? 'Unknown tool';
-    final params = _extractParamsFromTool(xmlContent);
     final paramText = _extractContentFromXml(
       xmlContent,
       tagName: 'tool',
     ).trim();
-    final displayToolName = _resolveToolDisplayNameForRender(
-      rawToolName,
-      params,
-    );
     final isClosed = _isXmlFullyClosed(xmlContent);
     final initialTokenEstimate = _estimateTokenCount(paramText);
 
     Widget renderWithEstimate(int paramTokenEstimate) {
-      if (displayToolName == 'apply_file' ||
-          displayToolName == 'create_file' ||
-          displayToolName == 'edit_file') {
-        if (isClosed) {
-          return CompactToolDisplay(
-            toolName: rawToolName,
-            params: paramText,
-            textColor: textColor,
-            isStreaming: isStreaming,
-          );
-        }
-        return DetailedToolDisplay(
-          toolName: rawToolName,
-          params: paramText,
-          textColor: textColor,
-          isStreaming: isStreaming,
-        );
-      }
-
       if (!isClosed && paramTokenEstimate > _toolParamTokenThreshold) {
         return DetailedToolDisplay(
           toolName: rawToolName,
           params: paramText,
           textColor: textColor,
           isStreaming: isStreaming,
+          display: toolDisplayFromAttributes(parsed.attributes),
         );
       }
 
@@ -531,6 +509,7 @@ class _ToolRequestRenderer extends StatelessWidget {
         params: paramText,
         textColor: textColor,
         isStreaming: isStreaming,
+        display: toolDisplayFromAttributes(parsed.attributes),
       );
     }
 
@@ -551,13 +530,11 @@ class _ToolResultRenderState {
     required this.toolName,
     required this.isSuccess,
     required this.resultContent,
-    required this.fileDiffs,
   });
 
   final String toolName;
   final bool isSuccess;
   final String resultContent;
-  final List<FileDiff> fileDiffs;
 }
 
 /// Renders thinking content with the established chat disclosure design.
@@ -589,12 +566,14 @@ class _ThinkPanel extends StatefulWidget {
 
 class _ThinkPanelState extends State<_ThinkPanel> {
   late bool _expanded;
+  bool? _userOverride;
   late bool _bodyFullHeight;
   late final ScrollController _scrollController;
   bool _autoScrollEnabled = true;
   bool _userHasInteractedWithScroll = false;
   bool _isProgrammaticScroll = false;
   int _expandSession = 0;
+  final ThinkingPreviewBuffer _previewBuffer = ThinkingPreviewBuffer();
 
   /// Initializes expansion, height, and scroll state.
   @override
@@ -603,23 +582,21 @@ class _ThinkPanelState extends State<_ThinkPanel> {
     _expanded = _targetExpandedFor(widget);
     _bodyFullHeight = widget.fullHeight && widget.initiallyExpanded;
     _expandSession = _expanded ? 1 : 0;
-    _scrollController = ScrollController();
+    _scrollController = ChainedScrollController();
   }
 
-  /// Syncs expansion state when streaming or caller defaults change.
+  /// Syncs expansion state when caller defaults change.
   @override
   void didUpdateWidget(covariant _ThinkPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.isStreaming != widget.isStreaming ||
-        oldWidget.initiallyExpanded != widget.initiallyExpanded) {
+    if (oldWidget.initiallyExpanded != widget.initiallyExpanded) {
       final targetExpanded = _targetExpandedFor(widget);
       if (targetExpanded && !_expanded) {
         _expandSession += 1;
       }
-      if (!targetExpanded && oldWidget.isStreaming && !widget.isStreaming) {
-        _bodyFullHeight = false;
+      if (_userOverride == null) {
+        _expanded = targetExpanded;
       }
-      _expanded = targetExpanded;
       if (_expanded) {
         _resetAutoScrollState();
       }
@@ -637,12 +614,9 @@ class _ThinkPanelState extends State<_ThinkPanel> {
     super.dispose();
   }
 
-  /// Resolves the current expansion target from stream state and caller intent.
+  /// Resolves the current expansion target from caller intent.
   bool _targetExpandedFor(_ThinkPanel widget) {
-    if (widget.initiallyExpanded && !widget.isStreaming) {
-      return true;
-    }
-    if (widget.isStreaming) {
+    if (widget.initiallyExpanded) {
       return true;
     }
     return false;
@@ -652,6 +626,7 @@ class _ThinkPanelState extends State<_ThinkPanel> {
   void _handleHeaderTap() {
     setState(() {
       final nextExpanded = !_expanded;
+      _userOverride = nextExpanded;
       if (nextExpanded) {
         _expandSession += 1;
         _resetAutoScrollState();
@@ -695,7 +670,7 @@ class _ThinkPanelState extends State<_ThinkPanel> {
     if (!_userHasInteractedWithScroll || !_scrollController.hasClients) {
       return;
     }
-    final position = _scrollController.position;
+    final position = _scrollController.positions.last;
     const threshold = 80.0;
     _autoScrollEnabled =
         position.pixels >= position.maxScrollExtent - threshold;
@@ -707,8 +682,11 @@ class _ThinkPanelState extends State<_ThinkPanel> {
       if (!mounted || !_scrollController.hasClients || !_autoScrollEnabled) {
         return;
       }
+      // AnimatedSwitcher can briefly keep the old and new body attached.
+      // Scroll the newest position instead of assuming a single attachment.
+      final target = _scrollController.positions.last;
       _isProgrammaticScroll = true;
-      _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+      target.jumpTo(target.maxScrollExtent);
       _isProgrammaticScroll = false;
     });
   }
@@ -719,9 +697,12 @@ class _ThinkPanelState extends State<_ThinkPanel> {
     final theme = Theme.of(context);
     final color = theme.colorScheme.secondary;
     final contentText = widget.text.trim();
-    final titleColor = widget.textColor.withValues(alpha: 0.7);
+    if (contentText.isEmpty && !widget.isStreaming) {
+      return const SizedBox.shrink();
+    }
     final l10n = AppLocalizations.of(context)!;
     final thinkingTitle = l10n.thinkingProcess;
+    final previewText = _expanded ? '' : _previewBuffer.update(contentText);
     final hasStreamingMarkdown =
         widget.isStreaming && widget.markdownEventStream != null;
     final shouldRenderBody =
@@ -734,56 +715,70 @@ class _ThinkPanelState extends State<_ThinkPanel> {
     final bodyScrollPhysics = renderFullHeight
         ? const NeverScrollableScrollPhysics()
         : null;
-    const switchDuration = Duration(milliseconds: 220);
-    return Semantics(
-      label: contentText.isEmpty
-          ? thinkingTitle
-          : '$thinkingTitle\n$contentText',
-      child: Padding(
-        padding: const EdgeInsets.only(bottom: 2),
+    return SelectionContainer.disabled(
+      child: Semantics(
+        label: contentText.isEmpty
+            ? thinkingTitle
+            : '$thinkingTitle\n$contentText',
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
             MessagePressShieldRegion(
-              child: InkWell(
-                onTap: _handleHeaderTap,
-                borderRadius: BorderRadius.circular(6),
-                child: Padding(
-                  padding: EdgeInsets.zero,
-                  child: Row(
-                    children: <Widget>[
-                      AnimatedRotation(
-                        turns: _expanded ? 0.25 : 0,
-                        duration: const Duration(milliseconds: 300),
-                        child: Icon(
-                          Icons.keyboard_arrow_right,
-                          size: 20,
-                          color: titleColor,
+              child: Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: _handleHeaderTap,
+                  borderRadius: BorderRadius.circular(4),
+                  child: Padding(
+                    padding: ChatActivityRowStyle.headerPadding,
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: <Widget>[
+                        Icon(
+                          Icons.psychology_outlined,
+                          size: ChatActivityRowStyle.iconSize,
+                          color: widget.isStreaming
+                              ? theme.colorScheme.primary
+                              : theme.colorScheme.onSurfaceVariant.withValues(
+                                  alpha: 0.8,
+                                ),
                         ),
-                      ),
-                      const SizedBox(width: 4),
-                      _ThinkingTitle(
-                        text: thinkingTitle,
-                        color: titleColor,
-                        streaming: widget.isStreaming,
-                      ),
-                    ],
+                        const SizedBox(width: ChatActivityRowStyle.iconGap),
+                        _ThinkingTitle(
+                          text: thinkingTitle,
+                          color: widget.isStreaming
+                              ? theme.colorScheme.primary
+                              : theme.colorScheme.onSurfaceVariant,
+                          streaming: widget.isStreaming,
+                        ),
+                        if (!_expanded && previewText.isNotEmpty) ...<Widget>[
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 6),
+                            child: Text(
+                              '·',
+                              style: ChatActivityRowStyle.textStyle(context)
+                                  .copyWith(
+                                    color: theme.colorScheme.outlineVariant,
+                                  ),
+                            ),
+                          ),
+                          Expanded(
+                            child: _ThinkingPreviewTicker(
+                              text: previewText,
+                              textOffset: _previewBuffer.textOffset,
+                              isStreaming: widget.isStreaming,
+                              textColor: theme.colorScheme.onSurfaceVariant
+                                  .withValues(alpha: 0.7),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
                   ),
                 ),
               ),
             ),
-            AnimatedSwitcher(
-              duration: switchDuration,
-              reverseDuration: switchDuration,
-              switchInCurve: Curves.easeOutCubic,
-              switchOutCurve: Curves.easeOutCubic,
-              transitionBuilder: (child, animation) {
-                return SizeTransition(
-                  sizeFactor: animation,
-                  axisAlignment: -1.0,
-                  child: FadeTransition(opacity: animation, child: child),
-                );
-              },
+            ChatActivityDisclosure(
               child: shouldRenderBody
                   ? Padding(
                       key: ValueKey<int>(_expandSession),
@@ -804,7 +799,7 @@ class _ThinkPanelState extends State<_ThinkPanel> {
                           ),
                           Padding(
                             padding: const EdgeInsetsDirectional.only(
-                              start: 24,
+                              start: ChatActivityRowStyle.contentInset,
                             ),
                             child: MessagePressShieldRegion(
                               child: GestureDetector(
@@ -851,7 +846,7 @@ class _ThinkPanelState extends State<_ThinkPanel> {
                         ],
                       ),
                     )
-                  : const SizedBox.shrink(key: ValueKey<String>('empty')),
+                  : null,
             ),
           ],
         ),
@@ -968,15 +963,14 @@ class _ThinkingTitleState extends State<_ThinkingTitle>
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final style = theme.textTheme.bodySmall?.copyWith(
-      color: widget.color,
-      fontWeight: FontWeight.w500,
-    );
+    final style = ChatActivityRowStyle.textStyle(
+      context,
+    ).copyWith(color: widget.color);
     final text = Text(widget.text, style: style);
     if (!widget.streaming) {
       return text;
     }
-    final highlightStyle = style?.copyWith(color: Colors.white);
+    final highlightStyle = style.copyWith(color: Colors.white);
     return AnimatedBuilder(
       animation: _controller,
       builder: (context, child) {
@@ -1011,6 +1005,152 @@ class _ThinkingTitleState extends State<_ThinkingTitle>
         );
       },
       child: text,
+    );
+  }
+}
+
+class _ThinkingPreviewTicker extends StatefulWidget {
+  const _ThinkingPreviewTicker({
+    required this.text,
+    required this.textOffset,
+    required this.isStreaming,
+    required this.textColor,
+  });
+
+  final String text;
+  final int textOffset;
+  final bool isStreaming;
+  final Color textColor;
+
+  @override
+  State<_ThinkingPreviewTicker> createState() => _ThinkingPreviewTickerState();
+}
+
+class _ThinkingPreviewTickerState extends State<_ThinkingPreviewTicker> {
+  late final ScrollController _controller;
+  final GlobalKey _textKey = GlobalKey();
+  bool _scrollScheduled = false;
+  bool _scrollAwaitingDimensions = false;
+  double _pendingScrollCorrection = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = ScrollController();
+    if (widget.isStreaming) {
+      _scrollToEnd();
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _ThinkingPreviewTicker oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.isStreaming &&
+        (oldWidget.text != widget.text ||
+            oldWidget.textOffset != widget.textOffset)) {
+      final removed = widget.textOffset - oldWidget.textOffset;
+      if (removed > 0 &&
+          removed < oldWidget.text.length &&
+          widget.text.startsWith(oldWidget.text.substring(removed))) {
+        // The retained suffix shifts left when the ring evicts its prefix.
+        // Reuse the previous paragraph's glyph positions to keep the same
+        // content under the viewport before animating towards the new tail.
+        final paragraph = _textKey.currentContext?.findRenderObject();
+        if (paragraph is RenderParagraph && paragraph.hasSize) {
+          final removedWidth =
+              paragraph
+                  .getOffsetForCaret(TextPosition(offset: removed), Rect.zero)
+                  .dx -
+              paragraph
+                  .getOffsetForCaret(const TextPosition(offset: 0), Rect.zero)
+                  .dx;
+          if (removedWidth > 0) _pendingScrollCorrection += removedWidth;
+        }
+      }
+      _scrollToEnd();
+    }
+  }
+
+  void _scrollToEnd() {
+    if (_scrollScheduled) return;
+    _scrollScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scrollScheduled = false;
+      if (!mounted || !_controller.hasClients) return;
+      final position = _controller.position;
+      // Attaching a scroll position does not mean its viewport was laid out.
+      // Keep pending corrections until the metrics notification retries this.
+      if (!position.hasContentDimensions) {
+        _scrollAwaitingDimensions = true;
+        return;
+      }
+      _scrollAwaitingDimensions = false;
+      final correction = _pendingScrollCorrection;
+      _pendingScrollCorrection = 0;
+      final target = position.maxScrollExtent;
+      if (correction > 0) {
+        position.jumpTo(
+          (position.pixels - correction)
+              .clamp(position.minScrollExtent, target)
+              .toDouble(),
+        );
+      }
+      if (position.pixels == target) return;
+      position.animateTo(
+        target,
+        duration: const Duration(milliseconds: 160),
+        curve: Curves.easeOut,
+      );
+    });
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ShaderMask(
+      shaderCallback: (Rect bounds) {
+        return LinearGradient(
+          begin: Alignment.centerLeft,
+          end: Alignment.centerRight,
+          colors: const <Color>[Colors.white, Colors.white, Colors.transparent],
+          stops: const <double>[0.0, 0.92, 1.0],
+        ).createShader(bounds);
+      },
+      blendMode: BlendMode.dstIn,
+      child: NotificationListener<ScrollMetricsNotification>(
+        onNotification: (notification) {
+          if (_scrollAwaitingDimensions) _scrollToEnd();
+          return false;
+        },
+        child: SingleChildScrollView(
+          controller: _controller,
+          scrollDirection: Axis.horizontal,
+          physics: const ClampingScrollPhysics(),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Text(
+                widget.text,
+                key: _textKey,
+                maxLines: 1,
+                softWrap: false,
+                style: ChatActivityRowStyle.textStyle(
+                  context,
+                ).copyWith(color: widget.textColor),
+              ),
+              if (widget.isStreaming) ...<Widget>[
+                const SizedBox(width: 4),
+                const StreamingCursor(),
+              ],
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -1760,7 +1900,7 @@ class _ParsedXml {
     required this.body,
   });
 
-  factory _ParsedXml.from(String xml) {
+  factory _ParsedXml.from(String xml, {Map<String, String>? attributes}) {
     xml = sanitizeUtf16(xml);
     final open = RegExp(
       r'^<([a-zA-Z_][\w:-]*)\b([^>]*)>',
@@ -1771,14 +1911,15 @@ class _ParsedXml {
     }
     final rawTagName = open.group(1)!;
     final tagName = ChatMarkupRegex.normalizeToolLikeTagName(rawTagName)!;
-    final attributes = _parseAttributes(open.group(2) ?? '');
+    final parsedAttributes =
+        attributes ?? _parseAttributes(open.group(2) ?? '');
     final closeTag = '</${rawTagName.toLowerCase()}>';
     final lowerXml = xml.toLowerCase();
     final closeIndex = lowerXml.lastIndexOf(closeTag);
     final bodyEnd = closeIndex > open.end ? closeIndex : xml.length;
     return _ParsedXml(
       tagName: tagName,
-      attributes: attributes,
+      attributes: parsedAttributes,
       body: xml.substring(open.end, bodyEnd).trim(),
     );
   }
@@ -1876,31 +2017,6 @@ String _extractContentFromXml(String content, {String? tagName}) {
       ? endIndex
       : content.length;
   return content.substring(openMatch.end, contentEndExclusive).trim();
-}
-
-Map<String, String> _extractParamsFromTool(String content) {
-  final params = <String, String>{};
-  final pattern = RegExp(
-    r'''<param\b[^>]*name=["']([^"']+)["'][^>]*>([\s\S]*?)<\/param>''',
-    caseSensitive: false,
-  );
-  for (final match in pattern.allMatches(content)) {
-    params[match.group(1)!] = match.group(2)!.trim();
-  }
-  return params;
-}
-
-String _resolveToolDisplayNameForRender(
-  String toolName,
-  Map<String, String> params,
-) {
-  if (toolName != 'package_proxy' && toolName != 'proxy') {
-    return toolName;
-  }
-  final targetToolName = params['tool_name'] == null
-      ? ''
-      : normalizeEscapedTextForDisplay(params['tool_name']!).trim();
-  return targetToolName.isNotEmpty ? targetToolName : toolName;
 }
 
 int _estimateTokenCount(String text) {
@@ -2016,7 +2132,7 @@ _ToolResultRenderState _extractToolResult(
     r'<content\b[^>]*>([\s\S]*?)<\/content>',
     caseSensitive: false,
   ).firstMatch(xmlContent);
-  final resultContent = (contentMatch?.group(1) ?? '').trim();
+  final resultContent = (contentMatch?.group(1) ?? parsed.body).trim();
   final isSuccess = status == 'success';
 
   if (!isSuccess) {
@@ -2028,67 +2144,12 @@ _ToolResultRenderState _extractToolResult(
       toolName: toolName.isEmpty ? 'Unknown tool' : toolName,
       isSuccess: false,
       resultContent: (errorMatch?.group(1) ?? resultContent).trim(),
-      fileDiffs: const <FileDiff>[],
     );
   }
 
-  final fileDiffs = _extractFileDiffs(resultContent);
-  final withoutFileDiff = resultContent
-      .replaceAll(
-        RegExp(r'<file-diff[\s\S]*<\/file-diff>', caseSensitive: false),
-        '',
-      )
-      .trim();
   return _ToolResultRenderState(
     toolName: toolName.isEmpty ? 'Unknown tool' : toolName,
     isSuccess: true,
-    resultContent: withoutFileDiff,
-    fileDiffs: _isFileDiffTool(toolName) ? fileDiffs : const <FileDiff>[],
+    resultContent: resultContent,
   );
-}
-
-bool _isFileDiffTool(String toolName) {
-  return toolName == 'apply_file' ||
-      toolName == 'create_file' ||
-      toolName == 'edit_file';
-}
-
-List<FileDiff> _extractFileDiffs(String resultContent) {
-  return RegExp(
-    r'<file-diff\b([^>]*)>([\s\S]*?)<\/file-diff>',
-    caseSensitive: false,
-  ).allMatches(resultContent).map((match) {
-    final attrs = match.group(1) ?? '';
-    final body = match.group(2) ?? '';
-    final path =
-        RegExp(
-          r'\bpath="([^"]*)"',
-          caseSensitive: false,
-        ).firstMatch(attrs)?.group(1) ??
-        '';
-    final details =
-        RegExp(
-          r'\bdetails="([^"]*)"',
-          caseSensitive: false,
-        ).firstMatch(attrs)?.group(1) ??
-        '';
-    final cdata = RegExp(
-      r'<!\[CDATA\[([\s\S]*?)\]\]>',
-      caseSensitive: false,
-    ).firstMatch(body)?.group(1);
-    return FileDiff(
-      path: path,
-      details: _decodeXmlText(details),
-      diffContent: _decodeXmlText((cdata ?? body).trim()),
-    );
-  }).toList();
-}
-
-String _decodeXmlText(String input) {
-  return input
-      .replaceAll('&lt;', '<')
-      .replaceAll('&gt;', '>')
-      .replaceAll('&amp;', '&')
-      .replaceAll('&quot;', '"')
-      .replaceAll('&apos;', "'");
 }

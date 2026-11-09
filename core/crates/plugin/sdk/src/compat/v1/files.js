@@ -28,8 +28,8 @@ function __operitV1FileAddress(path, environment) {
     }
     var normalized = '/' + segments.join('/');
     // Paths returned by the current resource/config APIs are already VFS addresses.
-    if (segments[0] === 'app' || segments[0] === 'mnt') return normalized;
-    if (environment === 'linux') return '/mnt/linux' + (normalized === '/' ? '' : normalized);
+    if (segments[0] === 'app' || segments[0] === 'operitapp' || segments[0] === 'mnt' || segments[0] === 'virtual') return normalized;
+    if (environment === 'linux') return '/virtual/linux' + (normalized === '/' ? '' : normalized);
     if (segments[0] === 'sdcard' || segments[0] === 'data') return normalized;
     if (segments[0] === 'storage' && segments[1] === 'emulated' && segments[2] === '0') {
         return '/sdcard' + (segments.length === 3 ? '' : '/' + segments.slice(3).join('/'));
@@ -131,7 +131,7 @@ function __operitCreateV1Files(current) {
         },
         /** Writes text in the declared legacy environment. */
         async write(path, content, append, environment = 'android') {
-            return result(await current.write(address(path, environment), content, append), path, environment);
+            return result((await current.write(address(path, environment), content, append)).operation, path, environment);
         },
         /** Writes Base64 bytes in the declared legacy environment. */
         async writeBinary(path, base64Content, environment = 'android') {

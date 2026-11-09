@@ -8,9 +8,12 @@ import type { GraphCamera, NodeSize, Point } from "../features/graph/layout";
 import type { ComposeFileSaveResult } from "../../../../../types/compose-dsl";
 
 /** Describes actual service results used by this finite editor bridge. */
-export type WebResponses = Pick<RequestResults, "listBindableChats" | "writeChatBinding" | "snapshot" | "writeGlobalMemoryPreference" | "searchMemoryDebug" | "readMemoryLink" | "exportMemory" | "importMemory" | "activate" | "saveStore" | "deleteStore" | "readUser" | "writeUser" | "graph" | "searchMemory" | "listMemories" | "listMemoryFolders" | "saveMemory" | "deleteMemory" | "createLink" | "deleteLink" | "updateLink" | "readMemorySettings" | "readMemorySearchConfig" | "writeMemorySettings" | "writeMemorySearchConfig" | "writeMemoryOwnerSettings" | "readMemoryAutoSaveStatus" | "listMemoryChats" | "pruneMissingChatBindings" | "startMemoryRebuild" | "readMemoryRebuildProgress" | "cancelMemoryRebuild" | "rebuildMemoryEmbeddings" | "updateChatMemory" | "autoCategorizeMemory" | "retryFailedCandidates" | "clearFailedCandidates" | "importCharacter" | "importGroup">;
+export type WebResponses = Pick<RequestResults, "listBindableChats" | "writeChatBinding" | "snapshot" | "createMemoryLibrary" | "writeGlobalMemoryPreference" | "searchMemoryDebug" | "readMemoryLink" | "exportMemory" | "importMemory" | "activate" | "saveStore" | "deleteStore" | "readUser" | "writeUser" | "graph" | "searchMemory" | "listMemories" | "listMemoryFolders" | "saveMemory" | "deleteMemory" | "createLink" | "deleteLink" | "updateLink" | "readMemorySettings" | "readMemorySearchConfig" | "writeMemorySettings" | "writeMemorySearchConfig" | "writeMemoryOwnerSettings" | "readMemoryAutoSaveStatus" | "listMemoryChats" | "pruneMissingChatBindings" | "startMemoryRebuild" | "readMemoryRebuildProgress" | "cancelMemoryRebuild" | "rebuildMemoryEmbeddings" | "updateChatMemory" | "autoCategorizeMemory" | "retryFailedCandidates" | "clearFailedCandidates" | "importCharacter" | "importGroup">;
 export type WebAction = keyof WebResponses;
 export type WebRequest<A extends WebAction> = Extract<Request, { action: A }>;
+
+/** Distinguishes picker cancellation from the selected document contents. */
+export type ImportFileResult = { cancelled: true } | { cancelled: false; content: string };
 
 /** Declares the existing WebView interface registered by the package's Compose host. */
 export interface CharacterMemoryBridge {
@@ -26,6 +29,8 @@ export interface CharacterMemoryBridge {
   avatarImage(uri: string | null): Promise<string>;
   /** Opens the sole plugin-authored native entity surface. */
   openEntity(mode: "create" | "edit" | "preview", entity: EntityKind, id: string): Promise<void>;
+  /** Reads a JSON document selected through the host file picker. */
+  readImportFile(): Promise<ImportFileResult>;
   /** Saves JSON using the host file selector and returns its explicit cancellation result. */
   exportFile(name: string, content: string): Promise<ComposeFileSaveResult>;
 }
@@ -68,7 +73,7 @@ export interface GraphDialog extends DialogState {
   selected: string | null; selectedEdge: MemoryGraphResult["graph"]["edges"][number]["id"] | null; linkMode: boolean; linkSource: string | null;
   viewport: { width: number; height: number } | null; layoutSignature: string | null;
   sizes: Map<string, NodeSize>; positions: Map<string, Point>; camera: GraphCamera;
-  query: string; appliedQuery: string; searchIds: Set<string> | null; folder: string;
+  query: string; appliedQuery: string; searchIds: Set<string> | null; folder: string; inspectorExpanded: boolean;
 }
 export interface ChatBindingDialog extends DialogState {
   type: "chat-binding"; cardId: string; query: string; filter: "all" | "unbound";

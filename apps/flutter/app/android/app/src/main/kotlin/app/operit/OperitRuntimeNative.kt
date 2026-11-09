@@ -1,6 +1,8 @@
 package app.operit
 
 object OperitRuntimeNative {
+    /** Runs PTY primitives inside the Shizuku user service's security context. */
+    @JvmStatic external fun privilegedPtyOperation(request: String): String
     /** Submits synchronous Java work to the native Host blocking scheduler. */
     @JvmStatic external fun scheduleRuntimeTask(task: Runnable)
     /** Reserves all native service workers required by one blocking pipeline. */
@@ -31,6 +33,10 @@ object OperitRuntimeNative {
     @JvmStatic external fun destroy(handle: Long)
     /** Creates a retained direct FFI connection to the host runtime. */
     @JvmStatic external fun connectCoreFfi(handle: Long): String
+    /** Connects to the module without creating a Core in this Android process. */
+    @JvmStatic external fun connectModuleCoreFfi(endpoint: String): String
+    /** Persists module client metadata over its authenticated loopback session. */
+    @JvmStatic external fun writeModuleBootstrap(endpoint: String, content: String)
 
 
     @JvmStatic external fun emitRuntimeEvent(handle: Long, eventJson: String): String

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use regex::Regex;
 use serde_json::{json, Value};
@@ -6,6 +7,7 @@ use serde_json::{json, Value};
 use crate::chat::config::FunctionalPrompts::FunctionalPrompts;
 use crate::chat::enhance::MultiServiceManager::MultiServiceManager;
 use crate::chat::hooks::SummaryHookRegistry::{SummaryHookContext, SummaryHookRegistry};
+use crate::chat::llmprovider::ThinkingDialect::RequestThinking;
 use crate::chat::llmprovider::AIService::{
     collect_stream_chunks, AiServiceError, SendMessageRequest,
 };
@@ -15,8 +17,13 @@ use operit_model::ModelParameter::ModelParameter;
 use operit_model::PromptTurn::{PromptTurn, PromptTurnKind};
 use operit_store::repository::UsageStatisticsStore::{UsageRequestSource, UsageStatisticsStore};
 use operit_util::ChatMarkupRegex::{attr_value, ChatMarkupRegex};
+use operit_tools::files::PathMapper::PathMapper;
+use operit_tools::ToolExecutionManager::ToolExecutionManager;
+use operit_util::stream::Stream::Stream;
+use crate::chat::llmprovider::MediaLinkParser::unescape_xml_attribute;
 
 const APPLY_FILE_TOOL_NAME: &str = "apply_file";
+pub type SummaryProgressCallback = Arc<dyn Fn(&'static str) + Send + Sync>;
 
 /// Controls how much tool metadata is exposed in prompt history.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -168,6 +175,43 @@ impl ConversationService {
             })
             .await?;
         Ok(after_context.prepared_history)
+    }
+
+    /// Converts stored locators only in the provider-facing copy of conversation history.
+    pub(crate) fn use_relative_attachment_paths(history: &mut [PromptTurn], base: &str) {
+        static ATTRIBUTES: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+        let attributes = ATTRIBUTES.get_or_init(|| Regex::new(
+            r#"(?i)(\b(?:id|path)\s*=\s*)(?:"([^"]*)"|'([^']*)')"#,
+        ).expect("attachment attribute regex must compile"));
+        for turn in history {
+            if turn.kind != PromptTurnKind::USER { continue; }
+            let mut content = turn.content.clone();
+            for (start, end) in ChatMarkupRegex::attachment_ranges(&turn.content).into_iter().rev() {
+                let Some(openEnd) = content[start..end].find('>') else { continue; };
+                let end = start + openEnd;
+                let rewritten = attributes.replace_all(&content[start..end], |capture: &regex::Captures<'_>| {
+                    let path = unescape_xml_attribute(capture.get(2).or_else(|| capture.get(3)).unwrap().as_str());
+                    if !["/app/", "/operitapp/", "/mnt/", "/virtual/"].iter().any(|root| path.starts_with(root)) {
+                        return capture[0].to_string();
+                    }
+                    match PathMapper::relativeFileToolPath(base, &path) {
+                        Ok(relative) => format!("{}\"{}\"", &capture[1], relative.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;").replace('\'', "&#39;")),
+                        Err(_) => capture[0].to_string(),
+                    }
+                }).into_owned();
+                content.replace_range(start..end, &rewritten);
+            }
+            for (start, end) in ChatMarkupRegex::workspace_attachment_ranges(&content).into_iter().rev() {
+                let Some(openEnd) = content[start..end].find('>') else { continue; };
+                let bodyStart = start + openEnd + 1;
+                let Some(closeStart) = content[bodyStart..end].rfind('<') else { continue; };
+                let bodyEnd = bodyStart + closeStart;
+                if let Ok(relative) = PathMapper::relativeFileToolPath(base, &content[bodyStart..bodyEnd]) {
+                    content.replace_range(bodyStart..bodyEnd, &relative);
+                }
+            }
+            turn.content = content;
+        }
     }
 
     /// Splits mixed text and XML-like assistant output into ordered tag segments.
@@ -376,7 +420,18 @@ impl ConversationService {
         previousSummary: Option<String>,
         multiServiceManager: &mut MultiServiceManager,
     ) -> Result<String, AiServiceError> {
+        self.generateSummaryWithProgress(messages, previousSummary, multiServiceManager, None).await
+    }
+
+    pub async fn generateSummaryWithProgress(
+        &self,
+        messages: Vec<PromptTurn>,
+        previousSummary: Option<String>,
+        multiServiceManager: &mut MultiServiceManager,
+        progress: Option<SummaryProgressCallback>,
+    ) -> Result<String, AiServiceError> {
         let useEnglish = false;
+        let previousSummary = previousSummary.map(|summary| ChatMarkupRegex::remove_meta_tags(&summary));
         let mut systemPrompt =
             FunctionalPrompts::buildSummarySystemPrompt(previousSummary.as_deref(), useEnglish);
         let modelParameters =
@@ -387,9 +442,11 @@ impl ConversationService {
             let service = summaryService.lock().await;
             service.provider_model()
         };
-        let mut summaryHistory = stripGeminiThoughtSignatureMetaTurns(messages);
+        let mut summaryHistory = stripSummaryMetaTurns(messages);
         let mut summaryPrompt = FunctionalPrompts::summaryUserMessage(useEnglish).to_string();
-        let baseSummaryMetadata = std::collections::HashMap::from([
+        let executionContext = ToolExecutionManager::currentToolRuntimeContext();
+        let summaryChatId = executionContext.as_ref().and_then(|context| context.callerChatId.clone());
+        let mut baseSummaryMetadata = std::collections::HashMap::from([
             ("providerModel".to_string(), json!(providerModel)),
             (
                 "sourceMessageCount".to_string(),
@@ -397,9 +454,17 @@ impl ConversationService {
             ),
         ]);
 
+        if let Some(context) = executionContext {
+            baseSummaryMetadata.insert("executionContext".to_string(), json!({
+                "chatId": context.callerChatId,
+                "participantId": context.callerParticipantId,
+            }));
+        }
+
         let beforePrepareContext =
             SummaryHookRegistry::dispatchSummaryGenerateHooks(SummaryHookContext {
                 stage: "before_prepare_summary_prompt".to_string(),
+                chat_id: summaryChatId.clone(),
                 use_english: Some(useEnglish),
                 previous_summary: previousSummary.clone(),
                 chat_history: summaryHistory,
@@ -433,6 +498,7 @@ impl ConversationService {
         let beforeSendContext =
             SummaryHookRegistry::dispatchSummaryGenerateHooks(SummaryHookContext {
                 stage: "before_send_to_model".to_string(),
+                chat_id: summaryChatId.clone(),
                 use_english: Some(useEnglish),
                 previous_summary: previousSummary.clone(),
                 chat_history: summaryHistory,
@@ -469,16 +535,15 @@ impl ConversationService {
             )
         };
 
-        let summaryStream = {
+        preparedHistory = stripSummaryMetaTurns(preparedHistory);
+        if let Some(callback) = &progress { callback("summary_preparing"); }
+        let mut summaryStream = {
             let mut service = summaryService.lock().await;
             service
                 .send_message(SendMessageRequest {
                     chat_history: preparedHistory.clone(),
                     model_parameters: modelParameters,
-                    enable_thinking: false,
-                    thinking_quality_level: 1,
-                    thinking_configurations: "[]".to_string(),
-                    thinking_option_id: String::new(),
+                    thinking: RequestThinking::default(),
                     stream: true,
                     available_tools: Vec::new(),
                     preserve_think_in_history: false,
@@ -488,8 +553,10 @@ impl ConversationService {
                 })
                 .await?
         };
-        let summaryChunks = collect_stream_chunks(summaryStream).await;
-        let mut summaryContent = removeThinkingContent(&summaryChunks.join("").trim().to_string());
+        let mut content = String::new();
+        summaryStream.collect(&mut |chunk| content.push_str(&chunk)).await;
+        crate::chat::llmprovider::AIService::ensure_response_completed(summaryStream.as_ref())?;
+        let mut summaryContent = ChatMarkupRegex::remove_meta_tags(&removeThinkingContent(content.trim()));
         let (summaryInputTokens, summaryCachedInputTokens, summaryOutputTokens) = {
             let service = summaryService.lock().await;
             (
@@ -502,6 +569,7 @@ impl ConversationService {
         let afterGenerateContext =
             SummaryHookRegistry::dispatchSummaryGenerateHooks(SummaryHookContext {
                 stage: "after_generate_summary".to_string(),
+                chat_id: summaryChatId,
                 use_english: Some(useEnglish),
                 previous_summary: previousSummary,
                 chat_history: summaryHistory,
@@ -530,9 +598,8 @@ impl ConversationService {
         summaryContent = afterGenerateContext.summary_result.expect(
             "SummaryHookContext.summary_result must be present after after_generate_summary",
         );
-        if summaryContent.trim().is_empty() {
-            return Ok("Conversation Summary: Unable to generate valid summary.".to_string());
-        }
+        summaryContent = ChatMarkupRegex::remove_meta_tags(&summaryContent);
+        validateSummaryContent(&summaryContent)?;
         self.runtime_context
             .support()
             .updateTokensForProviderModel(
@@ -593,10 +660,7 @@ impl ConversationService {
                 .send_message(SendMessageRequest {
                     chat_history: prepared_history,
                     model_parameters,
-                    enable_thinking: false,
-                    thinking_quality_level: 1,
-                    thinking_configurations: "[]".to_string(),
-                    thinking_option_id: String::new(),
+                    thinking: RequestThinking::default(),
                     stream: false,
                     available_tools: Vec::new(),
                     preserve_think_in_history: false,
@@ -808,6 +872,16 @@ fn buildSummaryPreparedHistory(
 }
 
 #[allow(non_snake_case)]
+fn validateSummaryContent(summary: &str) -> Result<(), AiServiceError> {
+    if summary.trim().is_empty() {
+        return Err(AiServiceError::RequestFailed(
+            "Compaction checkpoint was empty".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[allow(non_snake_case)]
 fn serializeSummaryHookModelParameters(
     modelParameters: &[ModelParameter<Value>],
 ) -> Vec<std::collections::HashMap<String, Value>> {
@@ -842,8 +916,14 @@ fn serializeSummaryHookModelParameters(
 }
 
 #[allow(non_snake_case)]
-fn stripGeminiThoughtSignatureMetaTurns(messages: Vec<PromptTurn>) -> Vec<PromptTurn> {
+fn stripSummaryMetaTurns(messages: Vec<PromptTurn>) -> Vec<PromptTurn> {
     messages
+        .into_iter()
+        .map(|mut turn| {
+            turn.content = ChatMarkupRegex::remove_meta_tags(&turn.content);
+            turn
+        })
+        .collect()
 }
 
 #[allow(non_snake_case)]
@@ -928,5 +1008,113 @@ fn build_media_intent_prompt(media_type: &str, path: &str, user_intent: Option<&
     match user_intent {
         Some(intent) => format!("{}:{}\n{}", media_type, path, intent),
         None => format!("{}:{}", media_type, path),
+    }
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+
+    #[test]
+    fn missing_template_does_not_reject_nonempty_summary() {
+        for summary in [
+            "A short conversation summary.",
+            "## 进展\n已完成检查，等待用户选择。",
+            "Custom summary from a plugin",
+        ] {
+            assert!(validateSummaryContent(summary).is_ok());
+        }
+        assert!(validateSummaryContent(" \n\t").is_err());
+    }
+
+    #[test]
+    fn summary_prompt_inherits_previous_summary_in_both_languages() {
+        for use_english in [false, true] {
+            let previous = "Important context from the previous conversation.";
+            let prompt = FunctionalPrompts::buildSummarySystemPrompt(Some(previous), use_english);
+            assert!(prompt.starts_with(FunctionalPrompts::summaryPrompt(use_english)));
+            assert_eq!(prompt.matches(previous).count(), 1);
+            assert_eq!(
+                FunctionalPrompts::buildSummarySystemPrompt(Some(" \n"), use_english),
+                FunctionalPrompts::summaryPrompt(use_english)
+            );
+        }
+    }
+
+    #[test]
+    fn removes_protocol_meta_without_changing_turn_identity() {
+        let mut turn = PromptTurn::new(
+            PromptTurnKind::ASSISTANT,
+            r#"before<meta provider="openai:reasoning">SECRET</meta>after"#,
+        );
+        turn.metadata.insert("author".to_string(), json!("participant"));
+        let cleaned = stripSummaryMetaTurns(vec![turn.clone()]);
+        assert_eq!(cleaned[0].content, "before after");
+        assert_eq!(cleaned[0].kind, turn.kind);
+        assert_eq!(cleaned[0].metadata, turn.metadata);
+    }
+}
+
+
+#[cfg(test)]
+mod relative_attachment_tests {
+    use super::*;
+
+    fn prepared(content: &str, base: &str) -> String {
+        let stored = PromptTurn::new(PromptTurnKind::USER, content);
+        let mut history = vec![stored.clone()];
+        ConversationService::use_relative_attachment_paths(&mut history, base);
+        assert_eq!(stored.content, content);
+        history.remove(0).content
+    }
+
+    #[test]
+    fn workspace_and_output_attachments_expose_the_same_relative_path() {
+        for base in ["/operitapp/workspaces/project", "/operitapp/outputs/family"] {
+            let source = format!(r#"<attachment id="{base}/.operit/attachments/id/report.pdf" path="{base}/.operit/attachments/id/report.pdf" node_id="source">body</attachment>"#);
+            let visible = prepared(&source, base);
+            assert!(visible.contains(r#"id=".operit/attachments/id/report.pdf""#));
+            assert!(visible.contains(r#"path=".operit/attachments/id/report.pdf""#));
+            assert!(visible.contains(r#"node_id="source""#));
+            assert!(visible.ends_with(">body</attachment>"));
+            assert!(!visible.contains("/operitapp/"));
+        }
+    }
+
+    #[test]
+    fn history_is_rebased_from_stable_locators_after_a_workspace_change() {
+        let content = r#"<attachment id="/operitapp/outputs/family/.operit/attachments/id/file.pdf" path="/operitapp/outputs/family/.operit/attachments/id/file.pdf"/>"#;
+        assert!(prepared(content, "/operitapp/outputs/family").contains(r#"path=".operit/attachments/id/file.pdf""#));
+        let visible = prepared(content, "/operitapp/workspaces/project");
+        let path = unescape_xml_attribute(&attr_value(&visible, "path").unwrap());
+        assert_eq!(PathMapper::resolveFileToolPath(Some("/operitapp/workspaces/project"), &path).unwrap(),
+            "/operitapp/outputs/family/.operit/attachments/id/file.pdf");
+    }
+
+    #[test]
+    fn attributes_keep_escaping_and_attachment_bodies_are_not_rewritten() {
+        let base = "/app/workspaces/a&b";
+        let content = r#"prefix <attachment path = '/operitapp/workspaces/a&amp;b/中文 &quot;file&#39;.pdf' id="/operitapp/workspaces/a&amp;b/中文 &quot;file&#39;.pdf" content="/operitapp/workspaces/unchanged">/operitapp/body</attachment> suffix"#;
+        let visible = prepared(content, base);
+        assert_eq!(unescape_xml_attribute(&attr_value(&visible, "path").unwrap()), "中文 \"file'.pdf");
+        assert!(visible.contains(r#"content="/operitapp/workspaces/unchanged""#));
+        assert!(visible.ends_with(">/operitapp/body</attachment> suffix"));
+    }
+
+    #[test]
+    fn multimodal_and_inline_identifiers_are_preserved_while_reference_paths_are_relative() {
+        let content = r#"<image_link id="pool-id"/><attachment id="pasted_text_1" content="inline"/><attachment id="/operitapp/outputs/family/.operit/attachments/id/big.zip.operit-ref.json" path="/operitapp/outputs/family/.operit/attachments/id/big.zip.operit-ref.json"/>"#;
+        let visible = prepared(content, "/operitapp/outputs/family");
+        assert!(visible.starts_with(r#"<image_link id="pool-id"/><attachment id="pasted_text_1" content="inline"/>"#));
+        assert!(visible.contains(r#"path=".operit/attachments/id/big.zip.operit-ref.json""#));
+    }
+
+    #[test]
+    fn workspace_notices_use_dot_without_modifying_other_message_roles() {
+        let content = "<workspace_attachment>/operitapp/workspaces/project</workspace_attachment>";
+        assert_eq!(prepared(content, "/app/workspaces/project"), "<workspace_attachment>.</workspace_attachment>");
+        let mut history = vec![PromptTurn::new(PromptTurnKind::ASSISTANT, content)];
+        ConversationService::use_relative_attachment_paths(&mut history, "/app/workspaces/project");
+        assert_eq!(history[0].content, content);
     }
 }

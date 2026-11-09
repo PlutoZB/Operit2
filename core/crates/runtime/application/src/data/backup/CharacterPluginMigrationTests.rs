@@ -287,7 +287,7 @@ fn historical_message_avatars_are_adopted_after_completed_imports() {
     let fixture = Fixture::new();
     let writer = fixture.writer();
     let mut source = data();
-    source.cards[0].avatarUri = Some("/app/character/avatar.png".into());
+    source.cards[0].avatarUri = Some("/operitapp/character/avatar.png".into());
     writer.import("operit1", source).unwrap();
     let database = SqliteStore::openWithHost(fixture.host.clone(), "runtime/avatar-history.sqlite").unwrap();
     operit_store::db::AppDatabase::createAllTables(&database).unwrap();
@@ -323,7 +323,7 @@ fn historical_message_avatars_are_adopted_after_completed_imports() {
                 expected.as_object_mut().unwrap().remove(LEGACY_BINDING_NAMESPACE);
                 if *repaired {
                     expected[PLUGIN_ID] = json!({"participantId":"legacy"});
-                    expected["host.chat.identity"] = json!({"title":name,"avatarUri":"/app/character/avatar.png"});
+                    expected["host.chat.identity"] = json!({"title":name,"avatarUri":"/operitapp/character/avatar.png"});
                 }
                 assert_eq!(actual, expected, "wrong historical avatar in {table}");
             }
@@ -335,15 +335,15 @@ fn historical_message_avatars_are_adopted_after_completed_imports() {
 #[test]
 fn historical_avatar_adoption_requires_an_exact_author() {
     let cards = vec![
-        json!({"id":"first","name":"Same name","avatarUri":"/app/first.png"}),
-        json!({"id":"second","name":"Same name","avatarUri":"/app/second.png"}),
+        json!({"id":"first","name":"Same name","avatarUri":"/operitapp/first.png"}),
+        json!({"id":"second","name":"Same name","avatarUri":"/operitapp/second.png"}),
     ];
     let mut unnamed = BTreeMap::new();
     adoptMessageIdentity(&mut unnamed, &cards, Some("Same name")).unwrap();
     assert!(unnamed.is_empty());
     let mut identified = BTreeMap::from([(PLUGIN_ID.into(), json!({"participantId":"second"}))]);
     adoptMessageIdentity(&mut identified, &cards, Some("Historical name")).unwrap();
-    assert_eq!(identified["host.chat.identity"], json!({"title":"Historical name","avatarUri":"/app/second.png"}));
+    assert_eq!(identified["host.chat.identity"], json!({"title":"Historical name","avatarUri":"/operitapp/second.png"}));
 }
 
 /// Requires explicit global flags before any fresh import can publish business data.
@@ -657,7 +657,7 @@ fn cleanup_rejects_outside_paths_before_any_deletion() {
     let mut source = data();
     source.cleanup_paths = vec![
         CHARACTER_CARDS_PREFERENCES_PATH.to_string(),
-        "/app/data/unrelated".to_string(),
+        "/operitapp/data/unrelated".to_string(),
     ];
     fixture.writer().import("operit2-v27", source).unwrap();
     assert!(cleanupLegacyCharacters(fixture.writer())
@@ -751,12 +751,12 @@ fn resolves_only_unique_legacy_binding_targets() {
 fn checks_cross_owner_resources() {
     assert!(validateResourcePath("../outside").is_err());
     assert_eq!(
-        legacyResourceStoragePath("/app/data/data/memory/characters/legacy/doc.txt").unwrap(),
+        legacyResourceStoragePath("/operitapp/data/data/memory/characters/legacy/doc.txt").unwrap(),
         "runtime/data/memory/characters/legacy/doc.txt"
     );
     assert_eq!(
         publicResourcePath("runtime/plugin_data/space/example/doc.txt").unwrap(),
-        "/app/data/plugin_data/space/example/doc.txt"
+        "/operitapp/data/plugin_data/space/example/doc.txt"
     );
     assert_eq!(
         legacyResourceRelativePath(&format!(
@@ -1071,7 +1071,7 @@ fn migrates_card_and_group_themes_without_changing_other_bindings() {
             );
             saved.set(
                 &stringPreferencesKey("custom_user_avatar_uri"),
-                "/app/data/global-avatar.png".to_string(),
+                "/operitapp/data/global-avatar.png".to_string(),
             );
             saved.set(&stringPreferencesKey("unrelated"), "keep".to_string());
         })
@@ -1113,7 +1113,7 @@ fn migrates_card_and_group_themes_without_changing_other_bindings() {
     );
     assert_eq!(
         manager.get(group_id.to_string()).unwrap().snapshot["customUserAvatarUri"],
-        "/app/data/global-avatar.png"
+        "/operitapp/data/global-avatar.png"
     );
     let saved = preferences.data().unwrap();
     assert_eq!(
@@ -1675,7 +1675,7 @@ fn archive_theme_adoption_uses_source_snapshot_and_keeps_destination_preferences
             saved.set(&stringPreferencesKey("theme_mode"), "light".to_string());
             saved.set(
                 &stringPreferencesKey("custom_user_avatar_uri"),
-                "/app/data/current-user.png".to_string(),
+                "/operitapp/data/current-user.png".to_string(),
             );
         })
         .unwrap();
@@ -1686,7 +1686,7 @@ fn archive_theme_adoption_uses_source_snapshot_and_keeps_destination_preferences
     let mut source = operit_store::PreferencesDataStore::emptyPreferences();
     source.set(
         &stringPreferencesKey("character_card_theme_legacy_background_image_uri"),
-        "/app/data/imported/archive-background.png".to_string(),
+        "/operitapp/data/imported/archive-background.png".to_string(),
     );
     source.set(
         &stringPreferencesKey("character_card_theme_legacy_use_background_image"),
@@ -1698,7 +1698,7 @@ fn archive_theme_adoption_uses_source_snapshot_and_keeps_destination_preferences
     );
     source.set(
         &stringPreferencesKey("custom_user_avatar_uri"),
-        "/app/data/imported/archive-user.png".to_string(),
+        "/operitapp/data/imported/archive-user.png".to_string(),
     );
     let targets = vec![("cards".to_string(), "legacy".to_string())];
     fixture
@@ -1711,11 +1711,11 @@ fn archive_theme_adoption_uses_source_snapshot_and_keeps_destination_preferences
     assert_eq!(configs.len(), 1);
     assert_eq!(
         configs[0].snapshot["backgroundImageUri"],
-        "/app/data/imported/archive-background.png"
+        "/operitapp/data/imported/archive-background.png"
     );
     assert_eq!(
         configs[0].snapshot["customUserAvatarUri"],
-        "/app/data/imported/archive-user.png"
+        "/operitapp/data/imported/archive-user.png"
     );
     let saved = destination.data().unwrap();
     assert_eq!(
@@ -1726,7 +1726,7 @@ fn archive_theme_adoption_uses_source_snapshot_and_keeps_destination_preferences
         saved
             .get(&stringPreferencesKey("custom_user_avatar_uri"))
             .unwrap(),
-        "/app/data/current-user.png"
+        "/operitapp/data/current-user.png"
     );
     assert!(source.contains(&stringPreferencesKey(
         "character_card_theme_legacy_theme_mode"
@@ -2544,7 +2544,7 @@ fn installed_startup_theme_failure_resumes_after_process_restart() {
     let saved = themePreferences(&fixture).data().unwrap();
     assert_eq!(
         saved.get(&stringPreferencesKey("__operit_preferences_schema_version")),
-        Some(&json!(4))
+        Some(&json!(5))
     );
     assert!(!saved
         .iterEntries()
@@ -2671,8 +2671,8 @@ fn missing_memory_attachments_do_not_block_migration() {
     let fixture = Fixture::new();
     let mut record = json!({
         "content":"retained user memory", "isDocumentNode":true,
-        "documentPath":"/app/data/data/memory/characters/legacy/missing.txt",
-        "chunkIndexFilePath":"/app/workspaces/missing-index.bin"
+        "documentPath":"/operitapp/data/data/memory/characters/legacy/missing.txt",
+        "chunkIndexFilePath":"/operitapp/workspaces/missing-index.bin"
     });
     let mut resources = BTreeMap::new();
     migrateMemoryResources(fixture.host.as_ref(), &fixture.writer().directory, "character:legacy", &mut record, &mut resources).unwrap();
@@ -2691,8 +2691,8 @@ fn available_memory_attachment_survives_a_missing_index() {
     fixture.host.writeBytes(&source, b"original document").unwrap();
     let mut record = json!({
         "content":"retained user memory",
-        "documentPath":"/app/data/data/memory/characters/legacy/document.txt",
-        "chunkIndexFilePath":"/app/data/data/memory/characters/legacy/missing-index.bin"
+        "documentPath":"/operitapp/data/data/memory/characters/legacy/document.txt",
+        "chunkIndexFilePath":"/operitapp/data/data/memory/characters/legacy/missing-index.bin"
     });
     let mut resources = BTreeMap::new();
     migrateMemoryResources(fixture.host.as_ref(), &fixture.writer().directory, "character:legacy", &mut record, &mut resources).unwrap();
@@ -2757,6 +2757,143 @@ fn cleanup_completion_marker_does_not_skip_the_remaining_startup_trigger() {
     let mut marker = fixture.writer().get("imports", "operit2-v27").unwrap().unwrap()["value"].clone();
     marker["cleanupComplete"] = json!(true);
     fixture.writer().commit(vec![fixture.writer().mutation("imports", "operit2-v27", marker).unwrap()]).unwrap();
+    crate::data::backup::CharacterPluginLayout::prepare(fixture.host.clone()).unwrap();
+    assert!(operit_store::PreferenceLayout::retirements(fixture.host.clone()).unwrap().is_empty());
     cleanupLegacyCharacters(fixture.writer()).unwrap();
     assert!(!fixture.host.exists(CHARACTER_CARDS_PREFERENCES_PATH).unwrap());
+    assert!(operit_store::PreferenceLayout::retirements(fixture.host.clone()).unwrap().contains(CHARACTER_CARDS_PREFERENCES_PATH));
+}
+
+/// Unknown sources retain receipts; a completed layout also consumes newly arriving retired history.
+#[test]
+fn character_layout_retires_late_transactions_after_import_and_cleanup() {
+    for retained_document in [false, true] {
+        assert_character_layout_retirement(retained_document);
+    }
+}
+
+/// Exercises fresh cleanup and an existing installation with a retained legacy document.
+fn assert_character_layout_retirement(retained_document: bool) {
+    use operit_store::{
+        PreferenceMerge,
+        SyncOperationStore::{SyncOperation, SyncOperationKnowledge, SyncOperationSemantics},
+    };
+    let fixture = Fixture::new();
+    let memory_root = format!("{DATA_MEMORY_CHARACTERS_DIR_PATH}/legacy");
+    let settings = format!("{memory_root}/settings/memory_search_settings.preferences.json");
+    let missing = format!("{DATA_MEMORY_CHARACTERS_DIR_PATH}/old-peer-only/settings/memory_search_settings.preferences.json");
+    let paths = [
+        CHARACTER_CARDS_PREFERENCES_PATH,
+        settings.as_str(),
+        missing.as_str(),
+    ];
+    let originals = paths.iter().enumerate().map(|(index, path)| SyncOperation {
+        opId: format!("legacy-peer:{}", index + 1), originDeviceId: "legacy-peer".into(),
+        sequence: index as i64 + 1, domain: "preferences".into(), entityType: "entry".into(),
+        entityId: serde_json::to_string(&(path, "legacy_setting")).unwrap(), operation: "set".into(),
+        semantics: SyncOperationSemantics::EntityState,
+        payload: json!({"storagePath":path,"key":"legacy_setting","value":"late history","encrypted":false,"formatVersion":1}),
+        createdAt: index as i64 + 1, schemaVersion: 1,
+    }).collect::<Vec<_>>();
+    let schema = crate::data::preferences::PreferenceSpaceMerge::schema();
+    let journal = SyncOperationStore::new(fixture.host.clone(), RUNTIME_SYNC_DIR_PATH);
+    journal.receiveOperations(&originals).unwrap();
+    crate::data::backup::CharacterPluginLayout::prepare(fixture.host.clone()).unwrap();
+    assert!(
+        operit_store::PreferenceLayout::retirements(fixture.host.clone())
+            .unwrap()
+            .is_empty()
+    );
+    fixture
+        .host
+        .writeBytes(CHARACTER_CARDS_PREFERENCES_PATH, b"{}")
+        .unwrap();
+    fixture.host.writeBytes(&settings, b"{}").unwrap();
+    let mut source = data();
+    source.cleanup_paths = vec![CHARACTER_CARDS_PREFERENCES_PATH.into(), memory_root.clone()];
+    fixture.writer().import("operit2-v27", source).unwrap();
+    crate::data::backup::CharacterPluginLayout::prepare(fixture.host.clone()).unwrap();
+    let registry =
+        PreferenceMerge::registry(fixture.host.clone(), &schema, [], |_, _| true).unwrap();
+    let before = registry.receive(&[]).unwrap();
+    assert!(before.pending.is_empty());
+    // Discovery has already compacted unregistered owners without applying their data.
+    assert_eq!(before.skipped, 0);
+    let discovered = journal.preferenceHistory().unwrap();
+    assert!(originals.iter().all(|operation| !discovered.contains(operation)));
+    assert!(before.errors.is_empty());
+    let document = format!("{memory_root}/USER.md");
+    if retained_document {
+        // Reproduce an already-cleaned installation before the new layout has ever run.
+        fixture.host.delete(CHARACTER_CARDS_PREFERENCES_PATH, false).unwrap();
+        fixture.host.delete(&memory_root, true).unwrap();
+        fixture.host.writeBytes(&document, b"retained user document").unwrap();
+        let mut marker = fixture.writer().get("imports", "operit2-v27").unwrap().unwrap()["value"].clone();
+        marker["cleanupComplete"] = json!(true);
+        fixture.writer().commit(vec![fixture.writer().mutation("imports", "operit2-v27", marker).unwrap()]).unwrap();
+    } else {
+        cleanupLegacyCharacters(fixture.writer()).unwrap();
+    }
+    let card = fixture.writer().get("cards", "legacy").unwrap();
+    let owner = fixture.writer().get("owners", "character:legacy").unwrap();
+    let active = fixture.writer().get("meta", "state").unwrap();
+    let late = originals.iter().cloned().map(|mut operation| {
+        operation.originDeviceId = "late-peer".into();
+        operation.opId = format!("late-peer:{}", operation.sequence);
+        operation
+    }).collect::<Vec<_>>();
+    journal.receiveOperations(&late).unwrap();
+    for attempt in 0..2 {
+        // Startup publishes persisted layout rules, and a retry has no new incoming batch.
+        crate::data::preferences::PreferenceSpaceMerge::prepareLayout(fixture.host.clone())
+            .unwrap();
+        let registry =
+            PreferenceMerge::registry(fixture.host.clone(), &schema, [], |_, _| true).unwrap();
+        let report = registry.receive(&[]).unwrap();
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(report.pending.is_empty());
+        assert!(report.applied.is_empty());
+        assert_eq!(
+            report.skipped,
+            if attempt == 0 { originals.len() } else { 0 }
+        );
+        let (snapshots, pending, errors) = registry.snapshots().unwrap();
+        assert!(pending.is_empty());
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(snapshots
+            .iter()
+            .all(|snapshot| !paths.contains(&snapshot.data.owner.path.as_str())));
+        assert_eq!(fixture.writer().get("cards", "legacy").unwrap(), card);
+        assert_eq!(
+            fixture.writer().get("owners", "character:legacy").unwrap(),
+            owner
+        );
+        assert_eq!(fixture.writer().get("meta", "state").unwrap(), active);
+        if retained_document {
+            assert_eq!(fixture.host.readBytes(&document).unwrap(), b"retained user document");
+        }
+        for path in &paths {
+            assert!(!fixture.host.exists(path).unwrap());
+        }
+    }
+    let history = journal.preferenceHistory().unwrap();
+    let receipt = journal.receipt().unwrap();
+    for operation in &late {
+        assert!(history.contains(operation));
+    }
+    for operation in originals.iter().chain(&late) {
+        assert!(receipt.containsSequence(&operation.originDeviceId, operation.sequence));
+    }
+}
+
+#[test]
+fn legacy_resource_roots_read_old_addresses_and_publish_new_addresses() {
+    for (old, current, storage) in [
+        ("/app/data/assets/a.png", "/operitapp/data/assets/a.png", "runtime/assets/a.png"),
+        ("/app/workspaces/demo/a.txt", "/operitapp/workspaces/demo/a.txt", "workspaces/demo/a.txt"),
+    ] {
+        assert_eq!(legacyResourceStoragePath(old).unwrap(), storage);
+        assert_eq!(legacyResourceStoragePath(current).unwrap(), storage);
+        assert_eq!(publicResourcePath(storage).unwrap(), current);
+    }
 }

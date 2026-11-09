@@ -184,7 +184,7 @@ impl AIToolHandler {
         let relative = path
             .strip_prefix("runtime/")
             .ok_or("Configuration is outside runtime storage")?;
-        PathMapper::joinVfsPath("/app/data", relative)
+        PathMapper::joinVfsPath("/operitapp/data", relative)
     }
 
     /// Creates persistent local plugin data through the filesystem Host and returns its public VFS path.
@@ -198,7 +198,7 @@ impl AIToolHandler {
             .makeDirectory(&directory.to_string_lossy(), true)
             .map_err(|error| error.to_string())?;
         let relative = path.strip_prefix("runtime/").ok_or("Local plugin data is outside runtime storage")?;
-        PathMapper::joinVfsPath("/app/data", relative)
+        PathMapper::joinVfsPath("/operitapp/data", relative)
     }
 
     fn truncateLogValue(value: &str, maxChars: usize) -> String {
@@ -630,6 +630,68 @@ impl AIToolHandler {
         self.publishToolExecutor(name, RegisteredToolExecutor::Shared(executor), visibility);
     }
 
+    /// Reads presentation only from the exact built-in or effective package declaration.
+    pub fn toolDisplayDeclaration(
+        &self,
+        name: &str,
+    ) -> Option<operit_plugin_sdk::js_sdk::tool_display::ToolDisplayDeclaration> {
+        if let Some(tool) = BuiltinToolName::from_name(name) {
+            return tool.display();
+        }
+        let (package, method) = name.split_once(':')?;
+        self.getOrCreatePackageManager()
+            .lock()
+            .ok()?
+            .selectPackageTool(package, method)
+            .ok()?
+            .display
+    }
+
+    /// Adds authoritative declaration metadata to a chat-owned Markdown projection.
+    pub fn decorateToolDisplayEvent(
+        &self,
+        event: &mut operit_util::MarkdownRenderStream::MarkdownStreamEvent,
+    ) {
+        let Some(xml) = event.xml.as_mut() else {
+            return;
+        };
+        if operit_util::ChatMarkupRegex::ChatMarkupRegex::normalize_tool_like_tag_name(
+            xml.tagName.as_deref(),
+        ) != Some("tool".to_string())
+        {
+            return;
+        }
+        let Some(attributes) = xml.attributes.as_mut() else {
+            return;
+        };
+        let name = attributes.get("name").map(String::as_str);
+        let target = if matches!(name, Some("proxy" | "package_proxy")) {
+            xml.children
+                .iter()
+                .find(|child| {
+                    child.tagName.as_deref() == Some("param")
+                        && child
+                            .attributes
+                            .as_ref()
+                            .and_then(|attrs| attrs.get("name"))
+                            .map(String::as_str)
+                            == Some("tool_name")
+                })
+                .and_then(|child| child.bodyChunk.as_deref())
+                .map(str::trim)
+        } else {
+            name
+        };
+        let declaration = target.and_then(|name| self.toolDisplayDeclaration(name));
+        attributes.remove("display");
+        if let Some(declaration) = declaration {
+            attributes.insert(
+                "display".into(),
+                serde_json::to_string(&declaration).expect("tool display serializes"),
+            );
+        }
+    }
+
     /// Returns the configured visibility for one tool.
     #[allow(non_snake_case)]
     pub fn getToolVisibility(&self, toolName: &str) -> Option<ToolRegistrationVisibility> {
@@ -770,7 +832,9 @@ impl AIToolHandler {
         let context = self.getContext();
         for packageTool in executableTools {
             let toolName = format!("{}:{}", toolPackage.name, packageTool.name);
-            if isMcpPackage {
+            if crate::tools::a2a::A2ARepository::is_a2a_package(&toolPackage) {
+                self.registerAsyncTool(toolName, Box::new(crate::tools::a2a::A2AToolExecutor::A2AToolExecutor::new(context.clone())));
+            } else if isMcpPackage {
                 self.registerAsyncTool(
                     toolName,
                     Box::new(MCPToolExecutor::new(MCPManager::getInstance(
@@ -970,8 +1034,10 @@ impl AIToolHandler {
             "Runtime storage Host does not expose its workspace root".to_string()
         ))?;
         let mapper = PathMapper::new(runtimeRoot, workspaceRoot, storage.clone());
+        let path = PathMapper::resolveFileToolPath(runtimeContext.workspacePath.as_deref(), path)
+            .map_err(WorkspaceBoundaryError::InvalidRequest)?;
         let resolvedPath = mapper
-            .resolve(path)
+            .resolve(&path)
             .map_err(WorkspaceBoundaryError::InvalidRequest)?;
         for folder in &workspaceFolders {
             let resolvedWorkspace = mapper
@@ -1007,7 +1073,22 @@ impl AIToolHandler {
     /// Executes under the native caller context and dispatches lifecycle hooks only for AI requests.
     async fn executeInvocationInContext(&mut self, request: &ToolCall, policy: ToolExecutionPolicy, context: &ToolInvocationContext) -> Result<Vec<ToolResult>, String> {
         let entryRequest = request;
-        let resolved = request.resolveTarget(context)?;
+        let resolved = match request.resolveTarget(context) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                let tool = request.toLegacyTool();
+                let result = Self::failedInvocation(&tool, format!("Invalid tool invocation: {error}"));
+                if matches!(policy, ToolExecutionPolicy::Ai { .. }) {
+                    let _lifecycle = ToolInvocationLifecycle {
+                        context: context.clone(),
+                        tool: tool.clone(),
+                    };
+                    self.notifyToolCallRequested(&tool);
+                    self.notifyToolExecutionResult(&tool, &result);
+                }
+                return Ok(vec![result]);
+            }
+        };
         let request = &resolved;
         let legacyTool = std::sync::OnceLock::new();
         let tool = || legacyTool.get_or_init(|| request.toLegacyTool());
@@ -1145,6 +1226,17 @@ impl JsExecutionHost for AIToolHandler {
         let mut host = self.clone();
         host.invocationSnapshot = ToolInvocationContext::capture(self.clone()).snapshot();
         Arc::new(host)
+    }
+
+    /// Exposes only this invocation's captured identity; role interpretation belongs to the v1 adapter.
+    fn toolpkg_caller_context(&self) -> Option<Value> {
+        Some(
+            self.invocationSnapshot.turnSnapshot.as_ref().map(|context| json!({
+                "chatId": context.callerChatId,
+                "participantId": context.callerParticipantId,
+                "extensionOwner": context.extensionOwner,
+            })).unwrap_or_else(|| json!({})),
+        )
     }
 
     /// Authenticates the actual registered container before binding an immutable per-engine owner.
@@ -1404,7 +1496,7 @@ impl JsExecutionHost for AIToolHandler {
         let relative = path
             .strip_prefix("runtime/")
             .ok_or("Configuration is outside runtime storage")?;
-        PathMapper::joinVfsPath("/app/data", relative)
+        PathMapper::joinVfsPath("/operitapp/data", relative)
     }
 
     /// Resolves the executing package owner while keeping arbitrary configuration aliases supported.
@@ -1468,6 +1560,12 @@ impl JsExecutionHost for AIToolHandler {
         crate::tools::ToolJsRuntime::materializeToolPkgResource(self, request)
     }
 
+    /// Loads a module once; compilation and instance lifetime belong to the JavaScript realm.
+    fn load_toolpkg_wasm(&self, target: &str, module_id: &str) -> Result<operit_plugin_sdk::javascript::JsToolPkgWasmModule, String> {
+        self.getOrCreatePackageManager().lock().expect("package manager mutex poisoned")
+            .loadToolPkgWasmModule(target, module_id)
+    }
+
     /// Calls one ToolPkg WASM export through the active package manager.
     fn call_toolpkg_wasm(
         &self,
@@ -1505,6 +1603,34 @@ impl JsExecutionHost for AIToolHandler {
             .ok_or_else(|| "ComposeDslWebViewHost is not registered".to_string())?
             .openFilePicker(request)
             .map_err(|error| error.to_string())
+    }
+
+    /// Authenticates surface ownership and resolves only this package's enabled UI routes.
+    fn floating_window_command(&self, payload: &serde_json::Value) -> Result<serde_json::Value, String> {
+        let owner = self.authenticatedExtensionOwner.as_ref()
+            .ok_or("Floating windows require an authenticated plugin engine")?;
+        let mut request = payload.as_object().cloned().ok_or("Expected a window request object")?;
+        let operation = request.get("operation").and_then(|v| v.as_str()).unwrap_or("");
+        if !["capabilities", "requestPermission", "open", "update", "show", "hide", "close", "list"].contains(&operation) {
+            return Err("Unknown floating window operation".into());
+        }
+        let manager = self.getOrCreatePackageManager();
+        let registry = manager.lock().map_err(|_| "Package registry is unavailable")?;
+        let plugin = registry.getEnabledToolPkgContainerRuntimes().into_iter()
+            .find(|plugin| &plugin.packageName == owner).ok_or("Floating window owner is disabled or removed")?;
+        if operation == "open" {
+            let route_id = request.get("route").and_then(|v| v.as_str()).ok_or("Window route is required")?;
+            if !registry.getToolPkgUiRoutes("compose_dsl", false).iter()
+                .any(|route| &route.containerPackageName == owner && route.routeId == route_id) {
+                return Err("Floating window route must belong to the executing enabled package".into());
+            }
+            request.insert("plugin".into(), serde_json::to_value(plugin).map_err(|e| e.to_string())?);
+        }
+        drop(registry);
+        request.insert("packageName".into(), serde_json::json!(owner));
+        self.getContext().floatingWindowHost.as_ref()
+            .ok_or("Floating window host is not registered")?
+            .command(serde_json::Value::Object(request)).map_err(|error| error.to_string())
     }
 
     /// Validates and forwards an export to the registered host file-save owner.
@@ -1858,11 +1984,11 @@ mod tests {
         for scope_path in ["device/example/cache.sqlite", "space/example/memory.sqlite"] {
             let relative = format!("plugin_data/{scope_path}");
             let expected = format!("runtime/{relative}");
-            for path in [format!("/app/data/{relative}"), expected.clone(), format!("storage-root/runtime/{relative}")] {
+            for path in [format!("/operitapp/data/{relative}"), expected.clone(), format!("storage-root/runtime/{relative}")] {
                 assert_eq!(crate::tools::defaultTool::standard::StandardStorageTools::resolve_plugin_storage_path(&path, &roots).unwrap(), expected);
             }
         }
-        for path in ["/app/workspaces/example/cache.sqlite", "/app/data/../../escape.sqlite", "storage-root/other/cache.sqlite", "/app/database/cache.sqlite"] {
+        for path in ["/operitapp/workspaces/example/cache.sqlite", "/operitapp/data/../../escape.sqlite", "storage-root/other/cache.sqlite", "/operitapp/database/cache.sqlite"] {
             assert!(crate::tools::defaultTool::standard::StandardStorageTools::resolve_plugin_storage_path(path, &roots).is_err(), "{path}");
         }
     }
@@ -1970,6 +2096,9 @@ mod tests {
     }
         /// Rejects unexpected application service access in execution pipeline tests.
     fn bundledExternalSkillAssets(&self) -> &'static [RuntimeBundledExternalSkillAsset] { panic!("Unexpected runtime service: bundledExternalSkillAssets") }
+
+    /// Rejects runtime package asset access in the tool handler's isolated service stub.
+    fn bundledExternalSkillPackageAssets(&self) -> &'static [crate::runtime_support::RuntimeBundledExternalSkillPackageAsset] { panic!("Unexpected runtime service: bundledExternalSkillPackageAssets") }
         /// Rejects unexpected application service access in execution pipeline tests.
     fn isSkillVisibleToAi(&self, skillName: &str) -> bool { panic!("Unexpected runtime service: isSkillVisibleToAi") }
         /// Rejects unexpected application service access in execution pipeline tests.
@@ -2098,13 +2227,33 @@ mod tests {
         }
     }
 
+    /// Native projections replace model attributes and resolve only exact declarations.
+    #[test]
+    fn display_events_use_authoritative_declarations_and_explicit_proxy_targets() {
+        use operit_util::MarkdownRenderStream::MarkdownRenderEventStream;
+        let fixture = PipelineFixture::new();
+        for (markup, expected) in [
+            (r#"<tool name="read_file" display="forged"><param name="path">/remote/a</param></tool>"#, BuiltinToolName::ReadFile.display()),
+            (r#"<tool name="proxy"><param name="tool_name">read_file</param><param name="params">{}</param></tool>"#, BuiltinToolName::ReadFile.display()),
+            (r#"<tool name="custom_read_file" display="forged"></tool>"#, None),
+        ] {
+            let mut events = MarkdownRenderEventStream::fromContent(markup.to_string());
+            for event in &mut events { fixture.handler.decorateToolDisplayEvent(event); }
+            let xml = events.iter().filter_map(|event| event.xml.as_ref())
+                .find(|xml| xml.tagName.as_deref() == Some("tool") && xml.isClosed == Some(true)).unwrap();
+            let display = xml.attributes.as_ref().unwrap().get("display")
+                .map(|value| serde_json::from_str::<operit_plugin_sdk::js_sdk::tool_display::ToolDisplayDeclaration>(value).unwrap());
+            assert_eq!(display, expected, "{markup}");
+        }
+    }
+
     /// Package discovery must work without interactive approval in both restricted AI modes.
     #[tokio::test(flavor = "current_thread")]
     async fn package_activation_does_not_require_write_approval() {
         static ASSETS: &[RuntimePluginAsset] = &[RuntimePluginAsset {
             name: "clock_probe.js", sha256: "", bytes: br#"/* METADATA
             {"name":"clock_probe","description":"Clock query tools","enabledByDefault":true,
-             "tools":[{"name":"get_current_date","description":"Get the current date and time","parameters":[]}]}
+             "tools":[{"name":"get_current_date","description":"Get the current date and time","parameters":[],"display":{"label":{"en":"Clock","fr":"Horloge"},"icon":"time"}}]}
             */"#,
         }];
         operit_host_api::HostManager::setDefaultHostJavaScriptRuntimeHost(Arc::new(
@@ -2149,6 +2298,7 @@ mod tests {
             assert!(manager.lock().unwrap().isPackageActivated("clock_probe"));
             assert_eq!(manager.lock().unwrap().getEnabledPackageNames(), enabled);
             assert!(fixture.handler.hasToolExecutor("clock_probe:get_current_date"));
+            assert_eq!(fixture.handler.toolDisplayDeclaration("clock_probe:get_current_date").unwrap().label["fr"], "Horloge");
             assert_eq!(fixture.handler.getToolVisibility("clock_probe:get_current_date"), Some(ToolRegistrationVisibility::PUBLIC));
         }
     }
@@ -2220,6 +2370,28 @@ mod tests {
         }
         let manager = RuntimePackageManager::readySnapshot(shared).await.unwrap();
         assert!(manager.getToolPkgLoadIssues().is_empty(), "{:?}", manager.getToolPkgLoadIssues());
+        // Window requests authenticate the bound engine even when JavaScript
+        // supplies a forged package name; foreign/unregistered UI routes fail.
+        fixture.handler.inner.lock().unwrap().context.floatingWindowHost = Some(Arc::new(
+            |request: serde_json::Value| Ok(request),
+        ));
+        assert!(fixture.handler.floating_window_command(&serde_json::json!({"operation":"list"}))
+            .unwrap_err().contains("authenticated"));
+        let bound = fixture.handler.for_toolpkg_execution_context(
+            &operit_plugin_sdk::javascript::ToolPkgExecutionContext {
+                context_key: "window-ownership-test".into(),
+                api_version: "2.0.0".into(),
+                text_resource_host: Arc::new(manager.toolPkgManager().clone()),
+                container_package_name: "configuration_probe".into(),
+            },
+        ).unwrap();
+        let response = bound.floating_window_command(&serde_json::json!({
+            "operation":"list", "packageName":"foreign-plugin",
+        })).unwrap();
+        assert_eq!(response["packageName"], "configuration_probe");
+        assert!(bound.floating_window_command(&serde_json::json!({
+            "operation":"open", "id":"pet", "route":"toolpkg:foreign:ui:pet",
+        })).unwrap_err().contains("executing enabled package"));
         for (mode, expected_error) in [("ready", None), ("error", Some("missing provider")), ("loop", Some("timed out")), ("ready", None)] {
             let started = std::time::Instant::now();
             let result = manager.invokeToolPkgPublicApiWithTimeoutMillis(
@@ -2406,6 +2578,26 @@ mod tests {
         assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
         assert_eq!(probe.accessCalls.load(Ordering::SeqCst), 2);
         assert_eq!(approvals.load(Ordering::SeqCst), 1);
+    }
+
+    /// Neutral SDK identity survives native scheduling without exposing provider execution data.
+    #[tokio::test]
+    async fn sdk_caller_identity_uses_captured_native_turn() {
+        let fixture = PipelineFixture::new();
+        let turn = ToolRuntimeContext {
+            callerChatId: Some("summary-chat".into()), callerParticipantId: Some("opaque-participant".into()),
+            workspacePath: None, workspaceFolders: Vec::new(), toolExposureMode: ToolExposureMode::CLI,
+            extensionOwner: "independent.configuration.provider".into(),
+            executionData: serde_json::from_value(json!({"private":"provider-only"})).unwrap(),
+        };
+        let host = ToolExecutionManager::scopeToolRuntimeContext(turn, async {
+            fixture.handler.capture_tool_invocation_host()
+        }).await;
+        assert_eq!(host.toolpkg_caller_context(), Some(json!({
+            "chatId":"summary-chat", "participantId":"opaque-participant",
+            "extensionOwner":"independent.configuration.provider",
+        })));
+        assert_eq!(fixture.handler.capture_tool_invocation_host().toolpkg_caller_context(), Some(json!({})));
     }
 
     /// A captured AI turn must not promote direct JS requests into AI admission.
@@ -2630,6 +2822,192 @@ mod tests {
         assert!(fixture.handler.hasToolExecutor("tts_set_current_config_id"));
     }
 
+    /// Both proxy entry points preserve typed JSON objects and legacy JSON text.
+    #[tokio::test]
+    async fn proxy_json_objects_and_legacy_text_resolve_to_identical_parameters() {
+        let fixture = PipelineFixture::new();
+        let expected = json!({"content": "print(\"\\d+\")\n\n", "enabled": true, "nested": {"items": [1, null]}});
+        for name in ["package_proxy", "proxy"] {
+            let turn = ToolRuntimeContext {
+                callerChatId: Some("chat".into()), callerParticipantId: None,
+                workspacePath: None, workspaceFolders: Vec::new(),
+                toolExposureMode: if name == "proxy" { ToolExposureMode::CLI } else { ToolExposureMode::FULL },
+                extensionOwner: "config-owner".into(), executionData: Default::default(),
+            };
+            for payload in [expected.clone(), Value::String(expected.to_string())] {
+                let request = ToolCall { name: name.into(), parameters: BTreeMap::from([
+                    ("tool_name".into(), json!("files:write")), ("params".into(), payload),
+                ]) };
+                let resolved = ToolExecutionManager::scopeToolRuntimeContext(turn.clone(), async {
+                    request.resolveTarget(&ToolInvocationContext::capture(fixture.handler.clone()))
+                }).await.unwrap();
+                assert_eq!(resolved.name, "files:write");
+                assert_eq!(serde_json::to_value(resolved.parameters).unwrap(), expected);
+            }
+        }
+    }
+
+    /// Returns invalid proxy envelopes as tool results and accepts a corrected JSON call afterward.
+    #[tokio::test]
+    async fn proxy_validation_errors_are_results_and_allow_corrected_json_calls() {
+        operit_host_api::HostManager::setDefaultHostJavaScriptRuntimeHost(Arc::new(
+            operit_host_native_scheduler::NativeHostJavaScriptRuntimeHost::new(),
+        ));
+        let mut fixture = PipelineFixture::with_package_assets(Some(&[]));
+        let context = fixture.handler.getContext();
+        operit_store::RuntimeStorageHost::setDefaultRuntimeStorageHost(context.runtimeStorageHost.unwrap());
+        operit_store::RuntimeStorageHost::setDefaultRuntimeSqliteHost(context.runtimeSqliteHost.unwrap());
+        operit_util::RuntimeStoreRoot::setDefaultRuntimeStoreRootConfig(
+            operit_util::RuntimeStoreRoot::RuntimeStoreRootConfig::new(
+                fixture.root.join("runtime"), fixture.root.join("workspaces"),
+            ),
+        );
+        {
+            let manager = fixture.handler.getOrCreatePackageManager();
+            let mut manager = manager.lock().unwrap();
+            assert!(manager.claimInitialPackageRegistryLoad().unwrap());
+            manager.loadAvailablePackages();
+        }
+        let hooks = Arc::new(LifecycleProbe::default());
+        let probe = Arc::new(SharedProbe::default());
+        fixture.handler.addToolHook(hooks.clone());
+        fixture.handler.registerSharedTool("fixture:probe".into(), probe.clone(), ToolRegistrationVisibility::PUBLIC);
+        fixture.handler.getToolPermissionSystem().saveAiPermissionMode(AiPermissionMode::Full).unwrap();
+        let invalid = [
+            (json!({"tool_name": "fixture:probe", "params": "command: git status", "timeoutMs": "120000"}), "Unexpected proxy parameter: timeoutMs"),
+            (json!({"params": "{}"}), "Proxy tool_name must be text"),
+            (json!({"tool_name": " fixture:probe", "params": "{}"}), "Proxy tool_name must be exact nonblank text"),
+            (json!({"tool_name": "fixture:probe"}), "Proxy params is required"),
+            (json!({"tool_name": "fixture:probe", "params": "command: [unfinished"}), "expected value"),
+            (json!({"tool_name": "fixture:probe", "params": "[]"}), "invalid type: sequence"),
+            (json!({"tool_name": "fixture:probe", "params": null}), "Proxy params must be a JSON object or its legacy text encoding"),
+            (json!({"tool_name": "proxy", "params": "{}"}), "Proxy cannot target another proxy"),
+        ];
+        for name in ["package_proxy", "proxy"] {
+            let exposure = if name == "proxy" { ToolExposureMode::CLI } else { ToolExposureMode::FULL };
+            let turn = ToolRuntimeContext {
+                callerChatId: Some("chat".into()), callerParticipantId: None,
+                workspacePath: None, workspaceFolders: Vec::new(),
+                toolExposureMode: exposure.clone(), extensionOwner: "config-owner".into(),
+                executionData: Default::default(),
+            };
+            for policy in [ToolExecutionPolicy::Ai { exposure }, ToolExecutionPolicy::Direct] {
+                for (parameters, expectedError) in &invalid {
+                    let request = ToolCall {
+                        name: name.into(),
+                        parameters: parameters.as_object().unwrap().clone().into_iter().collect(),
+                    };
+                    let calls = probe.calls.load(Ordering::SeqCst);
+                    let accessCalls = probe.accessCalls.load(Ordering::SeqCst);
+                    let results = ToolExecutionManager::scopeToolRuntimeContext(turn.clone(),
+                        fixture.handler.executeToolInvocation(&request, policy.clone())).await.unwrap();
+                    assert_eq!(results.len(), 1);
+                    assert_eq!(results[0].toolName, name);
+                    assert!(!results[0].success);
+                    let error = results[0].error.as_deref().unwrap();
+                    assert!(error.starts_with("Invalid tool invocation: "), "{error}");
+                    assert!(error.contains(expectedError), "{error}");
+                    assert_eq!(probe.calls.load(Ordering::SeqCst), calls);
+                    assert_eq!(probe.accessCalls.load(Ordering::SeqCst), accessCalls);
+                    if matches!(policy, ToolExecutionPolicy::Ai { .. }) {
+                        assert_eq!(hooks.take(), ["requested", "result", "finished"]);
+                    } else {
+                        assert!(hooks.take().is_empty());
+                    }
+
+                    let corrected = ToolCall { name: name.into(), parameters: BTreeMap::from([
+                        ("tool_name".into(), json!("fixture:probe")),
+                        ("params".into(), json!({"command": "git status", "timeoutMs": "120000"})),
+                    ]) };
+                    let results = ToolExecutionManager::scopeToolRuntimeContext(turn.clone(),
+                        fixture.handler.executeToolInvocation(&corrected, policy.clone())).await.unwrap();
+                    assert_eq!(results.len(), 1);
+                    assert!(results[0].success);
+                    assert_eq!(results[0].toolName, "fixture:probe");
+                    let ToolResultData::JsonResultData(data) = &results[0].result else { panic!("Expected probe result") };
+                    assert_eq!(data.value["parameters"], json!({"command": "git status", "timeoutMs": "120000"}));
+                    assert_eq!(probe.calls.load(Ordering::SeqCst), calls + 1);
+                    if matches!(policy, ToolExecutionPolicy::Ai { .. }) {
+                        assert_eq!(hooks.take(), ["requested", "intercept", "started", "result", "finished"]);
+                    } else {
+                        assert!(hooks.take().is_empty());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Invalid proxy parameters reach the model as a tool result and do not abort the batch.
+    #[tokio::test]
+    async fn malformed_proxy_parameters_return_tool_error_and_continue_batch() {
+        use crate::ToolExecutionManager::ToolInvocation;
+        use operit_store::RuntimeStorageHost::{setDefaultRuntimeStorageHost, setDefaultRuntimeSqliteHost};
+
+        operit_host_api::HostManager::setDefaultHostJavaScriptRuntimeHost(Arc::new(
+            operit_host_native_scheduler::NativeHostJavaScriptRuntimeHost::new(),
+        ));
+        let command = "python3 - <<'PY'\nimport json\nprint(json.dumps({}))\nPY";
+        let malformed = format!("command: |-\n  {}", command);
+        let corrected = json!({"command": command}).to_string();
+        for (name, exposure) in [
+            ("package_proxy", ToolExposureMode::FULL),
+            ("proxy", ToolExposureMode::CLI),
+        ] {
+            let mut fixture = PipelineFixture::new();
+            let probe = Arc::new(SharedProbe::default());
+            fixture.handler.registerSharedTool(
+                "pipeline:probe".into(), probe.clone(), ToolRegistrationVisibility::PUBLIC,
+            );
+            fixture.handler.getToolPermissionSystem().setAsyncPermissionRequester(|_, _, _| async {
+                crate::tools::ToolPermissionSystem::PermissionRequestResult::ALLOW
+            });
+            operit_util::RuntimeStoreRoot::setDefaultRuntimeStoreRootConfig(
+                operit_util::RuntimeStoreRoot::RuntimeStoreRootConfig::new(
+                    fixture.root.join("runtime"), fixture.root.join("workspaces"),
+                ),
+            );
+            let context = fixture.handler.getContext();
+            setDefaultRuntimeStorageHost(context.runtimeStorageHost.clone().unwrap());
+            setDefaultRuntimeSqliteHost(context.runtimeSqliteHost.clone().unwrap());
+            let manager = RuntimePackageManager::new(
+                RuntimeStorePaths::new(fixture.root.join("runtime"), fixture.root.join("workspaces")),
+                fixture.handler.clone(),
+            );
+            let invocations = [malformed.clone(), "{\"command\":".into(), corrected.clone()].into_iter().map(|params| {
+                ToolInvocation {
+                    tool: AITool {
+                        name: name.into(),
+                        parameters: vec![
+                            ToolParameter { name: "tool_name".into(), value: "pipeline:probe".into() },
+                            ToolParameter { name: "params".into(), value: params },
+                        ],
+                    },
+                    rawText: String::new(),
+                    responseLocation: (0, 0),
+                }
+            }).collect::<Vec<_>>();
+            let batch = ToolExecutionManager::executeInvocations(
+                &invocations, &mut fixture.handler, &manager,
+                None, Some("chat".into()), None, None, Vec::new(), exposure,
+                "config-owner".into(), Default::default(),
+            ).await.expect("Malformed model parameters must not terminate the chat round");
+
+            assert_eq!(batch.results.len(), 3);
+            for result in &batch.results[..2] {
+                assert!(!result.success);
+                let error = result.error.as_deref().unwrap();
+                assert!(error.starts_with("Invalid tool invocation:"), "{error}");
+            }
+            assert!(batch.message.contains("<error>"));
+            assert!(batch.message.contains("Invalid tool invocation:"));
+            assert!(batch.results[2].success);
+            let value: Value = serde_json::from_str(&batch.results[2].result.toString()).unwrap();
+            assert_eq!(value["parameters"]["command"], command);
+            assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(probe.accessCalls.load(Ordering::SeqCst), 1);
+        }
+    }
+
     /// Proves CLI aliases resolve once, with hooks and permission admission restricted to AI calls.
     #[tokio::test]
     async fn proxy_resolution_does_not_execute_a_second_lifecycle() {
@@ -2684,7 +3062,7 @@ mod tests {
     fn fullModeDoesNotRequireRuntimeWorkspaceForFilePaths() {
         let result = AIToolHandler::checkWorkspaceBoundary(
             &AiPermissionMode::Full,
-            &pathTool("/mnt/android/sdcard"),
+            &pathTool("/virtual/android/sdcard"),
             &filePathAccessSpec(ToolEffect::READ),
             None,
         );
@@ -2697,13 +3075,13 @@ mod tests {
     fn workspaceScopedModesAllowExternalFileReadsWithoutRuntimeWorkspace() {
         let readOnlyResult = AIToolHandler::checkWorkspaceBoundary(
             &AiPermissionMode::ReadOnly,
-            &pathTool("/mnt/android/sdcard"),
+            &pathTool("/virtual/android/sdcard"),
             &filePathAccessSpec(ToolEffect::READ),
             None,
         );
         let workspaceWriteResult = AIToolHandler::checkWorkspaceBoundary(
             &AiPermissionMode::WorkspaceWrite,
-            &pathTool("/mnt/android/sdcard"),
+            &pathTool("/virtual/android/sdcard"),
             &filePathAccessSpec(ToolEffect::READ),
             None,
         );
@@ -2717,7 +3095,7 @@ mod tests {
     fn workspaceWriteRequiresRuntimeWorkspaceForFileWrites() {
         let result = AIToolHandler::checkWorkspaceBoundary(
             &AiPermissionMode::WorkspaceWrite,
-            &pathTool("/mnt/android/sdcard"),
+            &pathTool("/virtual/android/sdcard"),
             &filePathAccessSpec(ToolEffect::WRITE),
             None,
         );

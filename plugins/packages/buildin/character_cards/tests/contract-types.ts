@@ -9,6 +9,12 @@ import type { CharacterRepository } from "../src/canonical";
 type Equal<A, B> = [A] extends [B] ? [B] extends [A] ? true : false : false;
 type Assert<T extends true> = T;
 
+/** Keeps the Files write declaration identical to the executor payload, including its diff envelope. */
+export type FileWriteResultContract = Assert<Equal<
+  Awaited<ReturnType<typeof Tools.Files.write>>,
+  import("../../../../types/tool-types").ToolResultMap["write_file"]
+>>;
+
 /** Preserves complete plugin domain records across its editor and public API models. */
 export type PluginRecordContracts = [
   Assert<Equal<Card, CharacterRecord>>, Assert<Equal<Group, GroupRecord>>, Assert<Equal<Tag, TagRecord>>,
@@ -40,8 +46,14 @@ export type FileRepositoryIdentifierContracts = [
   Assert<Equal<DomainInput<"memory.link.update">["linkId"], MemoryLink["id"]>>,
 ];
 
-/** The list API exposes viewport geometry; content invalidation belongs to the engine. */
+/** The list API exposes viewport geometry and optional natural row sizing; content invalidation belongs to the engine. */
 export type LazyItemOptionContract = Assert<Equal<
   keyof import("../../../../types/compose-dsl").ComposeLazyItemOptions,
-  "key" | "itemCount" | "itemExtent" | "initialItemCount"
+  "key" | "itemCount" | "itemExtent" | "initialItemCount" | "variableExtent"
+>>;
+
+/** Natural row sizing remains optional so fixed-extent lists retain their existing contract. */
+export type LazyItemVariableExtentContract = Assert<Equal<
+  Pick<import("../../../../types/compose-dsl").ComposeLazyItemOptions, "variableExtent">,
+  { variableExtent?: boolean }
 >>;

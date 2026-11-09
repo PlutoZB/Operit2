@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 
 /** Adapts generic object-storage calls to real SQLite transactions without implementing character business logic. */
 export function createStorageHost(directory, attempted) {
@@ -15,6 +15,10 @@ export function createStorageHost(directory, attempted) {
     const sql = new DatabaseSync(target); handles.add(sql);
     sql.exec("CREATE TABLE IF NOT EXISTS records(collection TEXT NOT NULL,key TEXT NOT NULL,value TEXT NOT NULL,version TEXT NOT NULL,PRIMARY KEY(collection,key));CREATE TABLE IF NOT EXISTS revisions(id INTEGER PRIMARY KEY AUTOINCREMENT)");
     sql.exec("CREATE VIEW IF NOT EXISTS plugin_objects AS SELECT collection,key,value,version FROM records");
+    sql.exec(`CREATE TABLE IF NOT EXISTS changes(revision INTEGER PRIMARY KEY AUTOINCREMENT,collection TEXT NOT NULL,key TEXT NOT NULL);
+      CREATE TRIGGER IF NOT EXISTS record_insert AFTER INSERT ON records BEGIN INSERT INTO changes(collection,key) VALUES(NEW.collection,NEW.key); END;
+      CREATE TRIGGER IF NOT EXISTS record_update AFTER UPDATE ON records BEGIN INSERT INTO changes(collection,key) VALUES(NEW.collection,NEW.key); END;
+      CREATE TRIGGER IF NOT EXISTS record_delete AFTER DELETE ON records BEGIN INSERT INTO changes(collection,key) VALUES(OLD.collection,OLD.key); END;`);
     /** Reads one existing object and its exact version without treating stored null as absence. */
     function get(collection, key) {
       const row = sql.prepare("SELECT value,version FROM records WHERE collection=? AND key=?").get(collection, key);
@@ -46,6 +50,21 @@ export function createStorageHost(directory, attempted) {
     }
     return {
       path: options.path,
+      async changes(after, limit = 100) {
+        attempted("storage.changes", [after, limit]);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error("Change page limit");
+        sql.exec("BEGIN");
+        try {
+          const head = sql.prepare("SELECT COALESCE((SELECT revision FROM changes ORDER BY revision DESC LIMIT 1),0) AS revision").get().revision;
+          const prefix = target + "#", position = after === null ? head : Number(after.slice(after.lastIndexOf("#") + 1));
+          const reset = after !== null && (!after.startsWith(prefix) || position > head || !Number.isSafeInteger(position) || position < 0);
+          const rows = reset || after === null ? [] : sql.prepare("SELECT revision,collection,key FROM changes WHERE revision>? ORDER BY revision LIMIT ?").all(position, limit);
+          const last = rows.length ? rows.at(-1).revision : reset ? head : position;
+          const identities = new Map(rows.map(row => [row.collection + "\0" + row.key, row]));
+          const result = { cursor: prefix + last, reset, hasMore: !reset && last < head, changes: [...identities.values()].map(row => ({ collection: row.collection, key: row.key, entry: get(row.collection, row.key) })) };
+          sql.exec("COMMIT"); return result;
+        } catch (error) { sql.exec("ROLLBACK"); throw error; }
+      },
       /** Executes the production read-only object SQL contract in real SQLite. */
       async query(statement, params = []) { attempted("storage.query", [statement, structuredClone(params)]); return sql.prepare(statement).all(...params); },
       /** Exposes one named generic collection with primary-key pagination and atomic writes. */
@@ -133,7 +152,14 @@ export function createStorageHost(directory, attempted) {
         const version = Object.hasOwn(values, "__operit_preferences_schema_version") ? values.__operit_preferences_schema_version : 0;
         if (declaration !== null) {
           if (version > declaration.version) throw new Error("Preference schema version is newer than the declared schema");
-          for (let step = version; step < declaration.version; step += 1) await declaration.migrate(step, preferences);
+          for (let step = version; step < declaration.version; step += 1) for (const rule of declaration.steps[step]) {
+            if (rule.op !== "set_object_field") throw new Error("Unexpected schema rule in plugin host fixture");
+            const value = preferences.get(rule.key);
+            if (value !== undefined) {
+              if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("Migration requires an object");
+              preferences.set(rule.key, {...value, [rule.field]: structuredClone(rule.value)});
+            }
+          }
           values.__operit_preferences_schema_version = declaration.version;
         }
         if (callback !== null) await callback(preferences);
@@ -148,8 +174,23 @@ export function createStorageHost(directory, attempted) {
     }
     const handle = {
       path: options.path,
+      async changes(after, limit = 100) {
+        attempted("storage.changes", [after, limit]);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error("Change page limit");
+        sql.exec("BEGIN");
+        try {
+          const head = sql.prepare("SELECT COALESCE((SELECT revision FROM changes ORDER BY revision DESC LIMIT 1),0) AS revision").get().revision;
+          const prefix = target + "#", position = after === null ? head : Number(after.slice(after.lastIndexOf("#") + 1));
+          const reset = after !== null && (!after.startsWith(prefix) || position > head || !Number.isSafeInteger(position) || position < 0);
+          const rows = reset || after === null ? [] : sql.prepare("SELECT revision,collection,key FROM changes WHERE revision>? ORDER BY revision LIMIT ?").all(position, limit);
+          const last = rows.length ? rows.at(-1).revision : reset ? head : position;
+          const identities = new Map(rows.map(row => [row.collection + "\0" + row.key, row]));
+          const result = { cursor: prefix + last, reset, hasMore: !reset && last < head, changes: [...identities.values()].map(row => ({ collection: row.collection, key: row.key, entry: get(row.collection, row.key) })) };
+          sql.exec("COMMIT"); return result;
+        } catch (error) { sql.exec("ROLLBACK"); throw error; }
+      },
       /** Declares one schema before this handle starts reading or editing. */
-      withSchema(version, migrate) { if (started || declaration !== null) throw new Error("Preference schema must be declared before operations"); declaration = { version, migrate }; return handle; },
+      withSchema(version, steps) { if (started || declaration !== null) throw new Error("Preference schema must be declared before operations"); if (!Array.isArray(steps) || steps.length !== version) throw new Error("Portable schema steps required"); declaration = { version, steps }; return handle; },
       /** Returns one complete immutable snapshot after declared schema upgrades. */
       data() { attempted("storage.preferences.data", [options.path]); return enqueue(() => perform(null)); },
       /** Publishes exactly the mutations made by the owning callback. */
@@ -173,6 +214,21 @@ export function createStorageHost(directory, attempted) {
         function params(values = []) { return values.map(value => Object.prototype.toString.call(value) === "[object Uint8Array]" ? Buffer.from(value) : value); }
         return {
           path: options.path,
+      async changes(after, limit = 100) {
+        attempted("storage.changes", [after, limit]);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error("Change page limit");
+        sql.exec("BEGIN");
+        try {
+          const head = sql.prepare("SELECT COALESCE((SELECT revision FROM changes ORDER BY revision DESC LIMIT 1),0) AS revision").get().revision;
+          const prefix = target + "#", position = after === null ? head : Number(after.slice(after.lastIndexOf("#") + 1));
+          const reset = after !== null && (!after.startsWith(prefix) || position > head || !Number.isSafeInteger(position) || position < 0);
+          const rows = reset || after === null ? [] : sql.prepare("SELECT revision,collection,key FROM changes WHERE revision>? ORDER BY revision LIMIT ?").all(position, limit);
+          const last = rows.length ? rows.at(-1).revision : reset ? head : position;
+          const identities = new Map(rows.map(row => [row.collection + "\0" + row.key, row]));
+          const result = { cursor: prefix + last, reset, hasMore: !reset && last < head, changes: [...identities.values()].map(row => ({ collection: row.collection, key: row.key, entry: get(row.collection, row.key) })) };
+          sql.exec("COMMIT"); return result;
+        } catch (error) { sql.exec("ROLLBACK"); throw error; }
+      },
           /** Declares exactly the supplied scalar columns and primary identity. */
           async defineTable(table) {
             sql.exec('CREATE TABLE IF NOT EXISTS "' + table.name + '" (' + table.columns.map(column => '"' + column.name + '" ' + column.affinity.toUpperCase() + (column.nullable ? "" : " NOT NULL") + (column.name === table.primaryKey ? " PRIMARY KEY" : "")).join(",") + ")");
@@ -232,9 +288,12 @@ export function createStorageHost(directory, attempted) {
     close() { for (const sql of handles) sql.close(); handles.clear(); },
     /** Reads and deliberately edits a real JSON preference file for independent assertions. */
     inspectPreferences(name, callback) {
-      const target = path.join(directory, name + ".preferences.json"), values = readPreferences(target);
+      const target = path.join(directory, name === "migration" ? "local" : "", name + ".preferences.json"), values = readPreferences(target);
       const before = JSON.stringify(values), result = callback(values);
-      if (JSON.stringify(values) !== before) writeFileSync(target, JSON.stringify(values), "utf8");
+      if (JSON.stringify(values) !== before) {
+        mkdirSync(path.dirname(target), { recursive: true });
+        writeFileSync(target, JSON.stringify(values), "utf8");
+      }
       return result;
     },
     /** Reads raw collection entries for independent test assertions and deliberate corruption cases. */

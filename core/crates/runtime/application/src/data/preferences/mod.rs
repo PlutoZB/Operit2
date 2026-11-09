@@ -24,6 +24,8 @@ pub mod GitHubAuthBus;
 pub mod GitHubAuthPreferences;
 #[path = "ModelConfigManager.rs"]
 pub mod ModelConfigManager;
+#[path = "ModelSpecResolver.rs"]
+pub(crate) mod ModelSpecResolver;
 #[path = "PreferenceStorageManager.rs"]
 pub mod PreferenceStorageManager;
 #[path = "PreferenceSpaceMerge.rs"]
@@ -36,6 +38,8 @@ pub mod RemoteAnnouncementPreferences;
 pub mod SkillVisibilityPreferences;
 #[path = "SttConfigManager.rs"]
 pub mod SttConfigManager;
+#[path = "ThemeAppearanceMigration.rs"]
+pub(crate) mod ThemeAppearanceMigration;
 #[path = "ThemeConfigManager.rs"]
 pub mod ThemeConfigManager;
 #[path = "ThemePreferenceSnapshot.rs"]

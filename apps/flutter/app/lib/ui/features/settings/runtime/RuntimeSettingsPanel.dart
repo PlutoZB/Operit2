@@ -81,7 +81,7 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
   _pairedDeviceStatusesSubscription;
   StreamSubscription<generated.RuntimeDeviceSpaceSnapshot>?
   _snapshotSubscription;
-  Timer? _watchRetryTimer;
+  final _watchRetryTimers = <Timer>{};
 
   late final GeneratedCoreProxyClients _clients =
       widget.clients ??
@@ -93,7 +93,10 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
   @override
   void onPageActivityChanged(bool active) {
     _pageGeneration += 1;
-    _watchRetryTimer?.cancel();
+    for (final timer in _watchRetryTimers) {
+      timer.cancel();
+    }
+    _watchRetryTimers.clear();
     if (!active) {
       _snapshotSubscription?.cancel();
       _snapshotSubscription = null;
@@ -109,7 +112,10 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
 
   @override
   void dispose() {
-    _watchRetryTimer?.cancel();
+    for (final timer in _watchRetryTimers) {
+      timer.cancel();
+    }
+    _watchRetryTimers.clear();
     final snapshotSubscription = _snapshotSubscription;
     if (snapshotSubscription != null) {
       unawaited(snapshotSubscription.cancel());
@@ -132,29 +138,34 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
     void Function(T value) onData,
     void Function(StreamSubscription<T> subscription) install,
   ) {
-    install(
-      flow().listen(
-        onData,
-        onError: (Object error) {
-          if (!mounted) {
-            return;
-          }
-          setState(() {
-            _connectionMessage = error.toString();
-            _connectionFailed = true;
-          });
-          if (!isPageActive) {
-            return;
-          }
-          _watchRetryTimer?.cancel();
-          _watchRetryTimer = Timer(const Duration(seconds: 2), () {
-            if (mounted && isPageActive) {
-              _subscribeWatch(flow, onData, install);
-            }
-          });
-        },
-      ),
+    Timer? retry;
+    late final StreamSubscription<T> subscription;
+    void scheduleRetry() {
+      if (!mounted || !isPageActive || retry != null) return;
+      final generation = _pageGeneration;
+      retry = Timer(const Duration(seconds: 2), () async {
+        _watchRetryTimers.remove(retry);
+        await subscription.cancel();
+        if (mounted && isPageActive && generation == _pageGeneration) {
+          _subscribeWatch(flow, onData, install);
+        }
+      });
+      _watchRetryTimers.add(retry!);
+    }
+
+    subscription = flow().listen(
+      onData,
+      onError: (Object error) {
+        if (!mounted || !isPageActive) return;
+        setState(() {
+          _connectionMessage = error.toString();
+          _connectionFailed = true;
+        });
+        scheduleRetry();
+      },
+      onDone: scheduleRetry,
     );
+    install(subscription);
   }
 
   /// Subscribes the synchronized overview, the pairing records and the
@@ -196,8 +207,7 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
   }
 
   /// Reads the identity-control projection, which is not part of the
-  /// snapshot flow. A failed read stays silent: the next snapshot re-pulls,
-  /// and the rest of the page remains readable.
+  /// snapshot flow. A failed read is shown while the next snapshot can retry it.
   Future<void> _pullDeviceSpaceControl() async {
     if (!mounted || !isPageActive) {
       return;
@@ -209,8 +219,13 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
       if (mounted && isPageActive && generation == _pageGeneration) {
         setState(() => _control = control);
       }
-    } catch (_) {
-      // The next snapshot re-pulls.
+    } catch (error) {
+      if (mounted && isPageActive && generation == _pageGeneration) {
+        setState(() {
+          _connectionMessage = error.toString();
+          _connectionFailed = true;
+        });
+      }
     }
   }
 
@@ -241,29 +256,55 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
   Future<void> _refreshCurrentDeviceSpace() async {
     if (!mounted || !isPageActive) return;
     final generation = _pageGeneration;
-    try {
-      final deviceSpace = await _clients.server.runtimeRemoteLinkService
-          .deviceSpace();
-      if (!mounted || !isPageActive || generation != _pageGeneration) return;
-      final topology = await _clients.server.runtimeRemoteLinkService
-          .deviceSpaceTopology();
-      if (!mounted || !isPageActive || generation != _pageGeneration) return;
-      final control = await _clients.server.runtimeRemoteLinkService
-          .deviceSpaceControl();
-      if (mounted && isPageActive && generation == _pageGeneration) {
-        setState(() {
-          _currentDeviceSpace = deviceSpace;
-          _topology = topology;
-          _control = control;
-        });
+    final l10n = AppLocalizations.of(context)!;
+    final errors = <String>[];
+    Future<void> read<T>(
+      String name,
+      Future<T> Function() load,
+      void Function(T) apply,
+    ) async {
+      try {
+        final value = await load();
+        if (mounted && isPageActive && generation == _pageGeneration) {
+          setState(() => apply(value));
+        }
+      } catch (error) {
+        errors.add('$name: $error');
+        if (mounted && isPageActive && generation == _pageGeneration) {
+          setState(() {
+            _connectionMessage = errors.join('\n');
+            _connectionFailed = true;
+          });
+        }
       }
-    } catch (error) {
-      if (mounted && isPageActive && generation == _pageGeneration) {
-        setState(() {
-          _connectionMessage = error.toString();
-          _connectionFailed = true;
-        });
-      }
+    }
+
+    final service = _clients.server.runtimeRemoteLinkService;
+    await Future.wait([
+      read(
+        l10n.settingsRuntimeCurrentSpace,
+        service.deviceSpace,
+        (value) => _currentDeviceSpace = value,
+      ),
+      read(
+        l10n.settingsRuntimeViewSpaceTopology,
+        service.deviceSpaceTopology,
+        (value) => _topology = value,
+      ),
+      read(
+        l10n.runtimeIdentityManage,
+        service.deviceSpaceControl,
+        (value) => _control = value,
+      ),
+    ]);
+    if (errors.isEmpty &&
+        mounted &&
+        isPageActive &&
+        generation == _pageGeneration) {
+      setState(() {
+        _connectionMessage = null;
+        _connectionFailed = false;
+      });
     }
   }
 
@@ -991,6 +1032,23 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
     }
   }
 
+  /// Rebuilds synchronization history from this device's current content.
+  Future<void> _resetTransactions() async {
+    setState(() => _busy = true);
+    try {
+      await _clients.application.syncResetTransactions();
+      if (mounted) {
+        _showDeviceFeedback(
+          AppLocalizations.of(context)!.settingsRuntimeResetTransactionsDone,
+        );
+      }
+    } catch (error) {
+      if (mounted) _showDeviceFeedback(error.toString());
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   /// Prompts for and persists a new name for the current device space.
   Future<void> _renameCurrentDeviceSpace() async {
     final currentDeviceSpace = _currentDeviceSpace;
@@ -1238,6 +1296,7 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
         busy: _busy,
         onRename: _renameCurrentDeviceSpace,
         onLeave: _leaveCurrentDeviceSpace,
+        onResetTransactions: _resetTransactions,
         onOpenProfile: widget.onOpenProfile,
         onDisconnectDevice: _disconnectDeviceSpaceConnection,
         connectionMessage: _connectionMessage,
@@ -1246,6 +1305,7 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
       _SectionCard(
         title: l10n.deviceSpaceDevices,
         headerActions: DeviceSpaceDiscoveryPanel(
+          key: ValueKey(_currentDeviceSpace?.spaceId),
           clients: _clients,
           enabled: !_busy,
           onJoined: _handleJoinedDeviceSpace,
@@ -1260,6 +1320,7 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
         title: l10n.settingsRuntimeIdentitiesAndPermissions,
         children: <Widget>[
           NetworkControlPanel(
+            key: ValueKey(_currentDeviceSpace?.spaceId),
             clients: _clients,
             onChanged: _refreshCurrentDeviceSpace,
           ),
@@ -1409,6 +1470,7 @@ class _DeviceSpaceOverviewCard extends StatelessWidget {
     required this.busy,
     required this.onRename,
     required this.onLeave,
+    required this.onResetTransactions,
     required this.onOpenProfile,
     required this.onDisconnectDevice,
     required this.connectionMessage,
@@ -1420,6 +1482,7 @@ class _DeviceSpaceOverviewCard extends StatelessWidget {
   final bool busy;
   final VoidCallback onRename;
   final VoidCallback onLeave;
+  final VoidCallback onResetTransactions;
   final VoidCallback onOpenProfile;
   final Future<generated.RuntimeDeviceSpaceTopology> Function(String deviceId)
   onDisconnectDevice;
@@ -1432,25 +1495,25 @@ class _DeviceSpaceOverviewCard extends StatelessWidget {
     final l10n = AppLocalizations.of(context)!;
     final scheme = Theme.of(context).colorScheme;
     final space = deviceSpace;
-    if (space == null) {
-      return _SectionCard(
-        title: l10n.settingsRuntimeCurrentSpace,
-        children: <Widget>[
-          SizedBox(
-            height: 190,
-            child: Center(child: M3LoadingIndicator(size: 24)),
-          ),
-        ],
-      );
-    }
     final graph = topology;
-    if (graph == null) {
+    if (space == null || graph == null) {
       return _SectionCard(
         title: l10n.settingsRuntimeCurrentSpace,
         children: <Widget>[
-          SizedBox(
-            height: 190,
-            child: Center(child: M3LoadingIndicator(size: 24)),
+          if (connectionMessage != null)
+            _InlineStatus(message: connectionMessage!, failed: connectionFailed)
+          else
+            const SizedBox(
+              height: 120,
+              child: Center(child: M3LoadingIndicator(size: 24)),
+            ),
+          Align(
+            alignment: AlignmentDirectional.centerEnd,
+            child: TextButton.icon(
+              onPressed: busy ? null : onLeave,
+              icon: const Icon(Icons.logout_outlined),
+              label: Text(l10n.settingsRuntimeLeaveSpace),
+            ),
           ),
         ],
       );
@@ -1487,6 +1550,8 @@ class _DeviceSpaceOverviewCard extends StatelessWidget {
                           switch (action) {
                             case _DeviceSpaceMenuAction.rename:
                               onRename();
+                            case _DeviceSpaceMenuAction.resetTransactions:
+                              onResetTransactions();
                             case _DeviceSpaceMenuAction.leave:
                               onLeave();
                           }
@@ -1503,8 +1568,17 @@ class _DeviceSpaceOverviewCard extends StatelessWidget {
                                 ),
                               ),
                               PopupMenuItem<_DeviceSpaceMenuAction>(
+                                value: _DeviceSpaceMenuAction.resetTransactions,
+                                enabled: !busy,
+                                child: ListTile(
+                                  contentPadding: EdgeInsets.zero,
+                                  leading: const Icon(Icons.restart_alt_rounded),
+                                  title: Text(l10n.settingsRuntimeResetTransactions),
+                                ),
+                              ),
+                              PopupMenuItem<_DeviceSpaceMenuAction>(
                                 value: _DeviceSpaceMenuAction.leave,
-                                enabled: !busy && space.members.length > 1,
+                                enabled: !busy,
                                 child: ListTile(
                                   contentPadding: EdgeInsets.zero,
                                   leading: const Icon(Icons.logout_outlined),
@@ -1539,7 +1613,7 @@ class _DeviceSpaceOverviewCard extends StatelessWidget {
   }
 }
 
-enum _DeviceSpaceMenuAction { rename, leave }
+enum _DeviceSpaceMenuAction { rename, resetTransactions, leave }
 
 class _DeviceSpaceIdentityChip extends StatefulWidget {
   const _DeviceSpaceIdentityChip({required this.onTap});

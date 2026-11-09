@@ -30,7 +30,7 @@ class PickerCompletionBridge: NSObject, UIDocumentPickerDelegate {
   ) {
     if scoped {
       do {
-        sendResult(try urls.map { try IOSFolderAccessStore.shared.rememberSelection($0).path })
+        sendResult(try urls.map { try IOSFolderAccessStore.shared.rememberSelection($0, persist: false).path })
       } catch {
         completion(.failure(error))
         owner.pendingCompletions.remove(self)
@@ -137,6 +137,7 @@ public class FileSelectorPlugin: NSObject, FlutterPlugin, FileSelectorApi {
   private var preparingFileSave = false
 
   public static func register(with registrar: FlutterPluginRegistrar) {
+    _ = IOSFolderAccessStore.shared
     let instance = FileSelectorPlugin(
       viewPresenterProvider: DefaultViewPresenterProvider(registrar: registrar))
     FileSelectorApiSetup.setUp(binaryMessenger: registrar.messenger(), api: instance)
@@ -150,12 +151,12 @@ public class FileSelectorPlugin: NSObject, FlutterPlugin, FileSelectorApi {
 
   func openFile(config: FileSelectorConfig, completion: @escaping (Result<[String], Error>) -> Void)
   {
-    let completionBridge = PickerCompletionBridge(completion: completion, owner: self)
+    let completionBridge = PickerCompletionBridge(completion: completion, owner: self, scoped: true)
     let documentPicker =
       documentPickerViewControllerOverride
       ?? UIDocumentPickerViewController(
         documentTypes: config.utis,
-        in: .import)
+        in: .open)
     documentPicker.allowsMultipleSelection = config.allowMultiSelection
     documentPicker.delegate = completionBridge
 
@@ -387,33 +388,6 @@ public class FileSelectorPlugin: NSObject, FlutterPlugin, FileSelectorApi {
     }
     pendingDirectoryCompletions.insert(bridge)
     presenter.present(picker, animated: true, completion: nil)
-  }
-
-}
-
-/// Keeps iOS security-scoped directory access active while the app process runs.
-final class IOSFolderAccessStore {
-  static let shared = IOSFolderAccessStore()
-  private var activeURLs: [String: URL] = [:]
-
-  func rememberSelection(_ inputURL: URL) throws -> URL {
-    let url = inputURL.standardizedFileURL
-    let path = url.path
-    if activeURLs[path] != nil { return url }
-    guard url.startAccessingSecurityScopedResource() else {
-      throw NSError(
-        domain: "file_selector_ios",
-        code: 1,
-        userInfo: [NSLocalizedDescriptionKey: "iOS did not grant access to the selected folder: \(path)"]
-      )
-    }
-    do {
-      activeURLs[path] = url
-      return url
-    } catch {
-      url.stopAccessingSecurityScopedResource()
-      throw error
-    }
   }
 
 }

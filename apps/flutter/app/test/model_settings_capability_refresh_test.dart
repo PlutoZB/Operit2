@@ -58,9 +58,8 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('test-model').last);
       await tester.pumpAndSettle();
-      await tester.tap(find.text(l10n.settingsModelDirectImage).last);
-      await tester.ensureVisible(find.widgetWithText(FilledButton, l10n.save));
-      await tester.tap(find.widgetWithText(FilledButton, l10n.save));
+      // A capability saves as soon as it is switched.
+      await tester.tap(find.text(l10n.settingsModelCapabilityImage).last);
       await tester.pumpAndSettle();
       expect(bridge.capabilities.directImage, isTrue);
       final updatedSnapshot = await panelKey.currentState!.loadFuture;
@@ -253,8 +252,6 @@ class _ModelSettingsBridge extends OperitRuntimeBridge {
   static const summarySettings = core.ModelSummarySettings(
     enableSummary: true,
     summaryTokenThreshold: 0.7,
-    enableSummaryByMessageCount: false,
-    summaryMessageCountThreshold: 0,
   );
   static const localRuntime = core.LocalModelRuntimeSettings(
     inferenceBindingKey: '',
@@ -276,9 +273,20 @@ class _ModelSettingsBridge extends OperitRuntimeBridge {
     id: modelId,
     pricingOverride: null,
     contextOverride: contextSpec,
-    capabilitiesOverride: capabilities,
+    capabilitiesOverride: core.ModelCapabilityOverrides(
+      directImage: capabilities.directImage,
+      directAudio: capabilities.directAudio,
+      directVideo: capabilities.directVideo,
+      toolCall: capabilities.toolCall,
+    ),
     builtinToolsOverride: const [],
-    requestOverride: null,
+    requestOverride: const core.ModelRequestOverrides(
+      supportsStructuredTools: null,
+      enableClaude1HPromptCache: null,
+    ),
+    listed: null,
+    thinkingOverride: null,
+    thinkingLevel: null,
     parameters: const [],
     summary: summarySettings,
     localRuntime: localRuntime,
@@ -298,8 +306,6 @@ class _ModelSettingsBridge extends OperitRuntimeBridge {
     customHeaders: '{}',
     requestLimitPerMinute: 0,
     maxConcurrentRequests: 1,
-    thinkingConfigurations: '[]',
-    thinkingOptionId: '',
     models: [model],
   );
 
@@ -326,8 +332,13 @@ class _ModelSettingsBridge extends OperitRuntimeBridge {
       'supportsStructuredTools': true,
     }),
     parameters: const [],
-    thinkingConfigurations: '[]',
-    thinkingOptionId: '',
+    thinking: const core.ModelThinkingSpec(
+      supported: false,
+      toggle: false,
+      efforts: [],
+      budget: null,
+    ),
+    thinkingLevel: null,
     summary: summarySettings,
     localRuntime: localRuntime,
   );
@@ -349,9 +360,30 @@ class _ModelSettingsBridge extends OperitRuntimeBridge {
             endpoint: provider.endpoint,
             modelId: modelId,
             capabilities: capabilities,
+            context: contextSpec,
             pricing: null,
+            thinking: const core.ModelThinkingSpec(
+              supported: false,
+              toggle: false,
+              efforts: [],
+              budget: null,
+            ),
           ).toJson(),
         ];
+      case 'getThinkingSettingsForModel':
+        result = const core.ModelThinkingSettings(
+          spec: core.ModelThinkingSpec(
+            supported: false,
+            toggle: false,
+            efforts: [],
+            budget: null,
+          ),
+          source: core.ThinkingSpecSource.unknown,
+          catalog: null,
+          levels: [],
+          current: null,
+          chosen: false,
+        ).toJson();
       case 'getResolvedModelConfig':
         resolutionCalls++;
         if (resolutionError != null) {

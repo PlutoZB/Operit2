@@ -96,7 +96,7 @@ export interface StorageRecordWatchState {
 /**
  * Dispatches storage operations only through an authenticated engine-owned handle.
  */
-export type StorageRequest = { op: "open"; path: string; kind: StorageKind; merge: StorageMergeDescriptor | null; } | { op: "open_preferences"; path: string; merge: StoragePreferencesMergeDescriptor | null; } | { op: "preferences_data"; handle: string; } | { op: "preferences_begin_edit"; handle: string; } | { op: "preferences_finish_edit"; handle: string; token: string; edits: StoragePreferenceEdit[]; schemaVersion: number; } | { op: "preferences_cancel_edit"; handle: string; token: string; } | { op: "close"; handle: string; } | { op: "query"; handle: string; statement: StorageStatement; } | { op: "execute"; handle: string; statement: StorageStatement; } | { op: "transaction"; handle: string; statements: StorageStatement[]; whenAbsent: StorageRecordIdentity | null; } | { op: "define_table"; handle: string; table: StorageTable; } | { op: "get"; handle: string; collection: string; key: string; } | { op: "get_many"; handle: string; collection: string; keys: string[]; } | { op: "list"; handle: string; collection: string; after: string | null; limit: number; } | { op: "commit"; handle: string; mutations: StorageMutation[]; guards: StorageRecordGuard[]; };
+export type StorageRequest = { op: "open"; path: string; kind: StorageKind; merge: StorageMergeDescriptor | null; } | { op: "open_preferences"; path: string; merge: StoragePreferencesMergeDescriptor | null; } | { op: "preferences_schema"; handle: string; schema: StoragePreferencesSchema; } | { op: "preferences_data"; handle: string; } | { op: "preferences_begin_edit"; handle: string; } | { op: "preferences_finish_edit"; handle: string; token: string; edits: StoragePreferenceEdit[]; schemaVersion: number; } | { op: "preferences_cancel_edit"; handle: string; token: string; } | { op: "close"; handle: string; } | { op: "query"; handle: string; statement: StorageStatement; } | { op: "execute"; handle: string; statement: StorageStatement; } | { op: "transaction"; handle: string; statements: StorageStatement[]; whenAbsent: StorageRecordIdentity | null; } | { op: "define_table"; handle: string; table: StorageTable; } | { op: "get"; handle: string; collection: string; key: string; } | { op: "get_many"; handle: string; collection: string; keys: string[]; } | { op: "list"; handle: string; collection: string; after: string | null; limit: number; } | { op: "changes"; handle: string; after: string | null; limit: number; } | { op: "commit"; handle: string; mutations: StorageMutation[]; guards: StorageRecordGuard[]; };
 
 /**
  * Identifies one successfully opened database session.
@@ -177,6 +177,25 @@ export interface StorageMergeDescriptor {
 export interface StorageSqlRow {
   columns: string[];
   values: StorageSqlValue[];
+}
+
+/**
+ * Carries the current value (or deletion) for one changed object identity.
+ */
+export interface StorageObjectChange {
+  collection: string;
+  key: string;
+  entry: StorageValueEntry | null;
+}
+
+/**
+ * Pages a bounded local change journal, including synchronization and conflict-merge writes.
+ */
+export interface StorageChangePage {
+  cursor: string;
+  reset: boolean;
+  hasMore: boolean;
+  changes: StorageObjectChange[];
 }
 
 /**
@@ -275,6 +294,19 @@ export interface StoragePreferencesMergeDescriptor {
 export type StoragePreferenceEdit = { op: "set"; key: string; value: unknown; } | { op: "remove"; key: string; } | { op: "increment_integer"; key: string; delta: number; } | { op: "set_object_field"; key: string; field: string; value: unknown; };
 
 /**
+ * A portable format migration. Step n converts format n to n+1 on data and transactions.
+ */
+export interface StoragePreferencesSchema {
+  version: number;
+  steps: StoragePreferencesMigrationRule[][];
+}
+
+/**
+ * Pure migration operations executed by the shared native migration context.
+ */
+export type StoragePreferencesMigrationRule = { op: "RenameKey"; from: string; to: string; } | { op: "RenameField"; key: string; from: string; to: string; } | { op: "SplitObject"; key: string; fields: Record<string, string>; } | { op: "SplitRecords"; key: string; prefix: string; identity: string; } | { op: "DropKey"; key: string; } | { op: "SetObjectField"; key: string; field: string; value: unknown; } | { op: "DecodeJson"; key: string; };
+
+/**
  * Carries a complete typed preference snapshot independently of object collection versions.
  */
 export interface StoragePreferencesSnapshot {
@@ -294,4 +326,4 @@ export interface StoragePreferencesEdit {
  * Returns each storage operation's concrete business result.
  * Serialization preserves the database API payload; tool results add their own operation discriminator.
  */
-export type StorageResponse = StorageOpenResult | StoragePreferencesSnapshot | StoragePreferencesEdit | StoragePreferencesSnapshot | null | null | StorageSqlRow[] | StorageSqlExecutionResult[] | StorageSqlExecutionResult[] | StorageTableDefinitionResult | StorageValueEntry | null | (StorageValueEntry | null)[] | StorageKeyValueEntry[] | StorageCommitResult;
+export type StorageResponse = StorageOpenResult | StoragePreferencesSnapshot | StoragePreferencesEdit | StoragePreferencesSnapshot | null | null | StorageSqlRow[] | StorageSqlExecutionResult[] | StorageSqlExecutionResult[] | StorageTableDefinitionResult | StorageValueEntry | null | (StorageValueEntry | null)[] | StorageKeyValueEntry[] | StorageCommitResult | StorageChangePage;

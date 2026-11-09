@@ -4,6 +4,11 @@
 #[path = "../../common/chromium_browser.rs"]
 pub mod chromium_browser;
 pub mod tools;
+mod sandbox;
+#[cfg(target_vendor = "apple")]
+mod service_discovery;
+#[cfg(target_vendor = "apple")]
+pub use service_discovery::AppleServiceDiscoveryHost;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod logging;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -31,3 +36,8 @@ pub use tools::tts::{AppleTtsPlaybackCommand, AppleTtsPlaybackHost, AppleTtsSynt
 pub use plugin_sdk_ipc::UnixPluginSdkIpcHost as ApplePluginSdkIpcHost;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod plugin_sdk_ipc;
+
+// The Flutter owner supplies these native symbols; CLI hosts keep this feature off.
+#[cfg(all(feature = "arm64-runtime", target_os = "macos", target_arch = "aarch64"))]
+#[path = "../../ios/src/bridge.rs"]
+mod bridge;

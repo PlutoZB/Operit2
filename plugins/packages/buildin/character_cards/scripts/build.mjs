@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { checkProject } from "./check.mjs";
-const require = createRequire(new URL("../../workflow/package.json", import.meta.url));
+const require = createRequire(import.meta.url);
 const { build } = require("esbuild");
 const { zipSync } = require("fflate");
 const ts = require("typescript");
@@ -21,7 +21,7 @@ export async function buildBrowserScript() {
 async function staticResourcePaths() {
   const manifest = JSON.parse(await readFile(path.join(root, "manifest.json"), "utf8"));
   const generated = new Set(["resources/character-memory.html"]);
-  return manifest.resources.map(
+  return [...manifest.resources, ...(manifest.wasm_modules ?? [])].map(
     /** Uses the manifest's exact resource path; missing files must fail the build. */
     resource => resource.path,
   ).filter(
@@ -118,7 +118,7 @@ export async function sourceFiles(directory) {
 
 /** Captures every package input so concurrent source changes cannot produce a mixed production archive. */
 export async function captureBuildInputs() {
-  const files = ["manifest.json", "README.md", "tsconfig.json", "tsconfig.web.json", ...await sourceFiles("scripts"), ...await sourceFiles("src"), ...await sourceFiles("web"), ...await staticResourcePaths()];
+  const files = ["manifest.json", "README.md", "tsconfig.json", "tsconfig.web.json", ...await sourceFiles("scripts"), ...await sourceFiles("vendor"), ...await sourceFiles("src"), ...await sourceFiles("web"), ...await staticResourcePaths()];
   const inputs = new Map();
   for (const file of files.sort()) inputs.set(file, createHash("sha256").update(await readFile(path.join(root, file))).digest("hex"));
   return inputs;
@@ -137,13 +137,13 @@ export async function createPackageArchive(mainScript, toolsScript, htmlDocument
   if (typeof htmlDocument !== "string" || !htmlDocument.startsWith("<!doctype html>")) throw new Error("The archive requires the actual offline HTML document");
   const entries = { "dist/main.js": new Uint8Array(mainScript), "dist/tools.js": new Uint8Array(toolsScript), "resources/character-memory.html": new TextEncoder().encode(htmlDocument) };
   Object.assign(entries, uiScripts ?? await buildUiScreenScripts());
-  const files = ["manifest.json", "README.md", "tsconfig.json", "tsconfig.web.json", ...await sourceFiles("scripts"), ...await sourceFiles("src"), ...await sourceFiles("web"), ...await staticResourcePaths()];
+  const files = ["manifest.json", "README.md", "tsconfig.json", "tsconfig.web.json", ...await sourceFiles("scripts"), ...await sourceFiles("vendor"), ...await sourceFiles("src"), ...await sourceFiles("web"), ...await staticResourcePaths()];
   for (const file of files) entries[file] = new Uint8Array(await readFile(path.join(root, file)));
   const manifest = JSON.parse(new TextDecoder().decode(entries["manifest.json"]));
-  for (const resource of manifest.resources) {
+  for (const resource of [...manifest.resources, ...(manifest.wasm_modules ?? [])]) {
     if (!(entries[resource.path] instanceof Uint8Array) || entries[resource.path].length === 0) throw new Error("Declared resource is missing from package: " + resource.path);
   }
-  return zipSync(entries);
+  return zipSync(entries, { mtime: new Date(1980, 0, 1) });
 }
 
 /** Packages one typed character-and-memory provider with the same document exercised by UI tests. */

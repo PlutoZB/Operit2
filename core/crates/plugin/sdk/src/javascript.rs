@@ -121,6 +121,13 @@ pub struct JsToolPkgWasmArg {
     pub value: Value,
 }
 
+/// Owns one declared module and its permitted public exports.
+#[derive(Clone)]
+pub struct JsToolPkgWasmModule {
+    pub bytes: Vec<u8>,
+    pub exports: Vec<String>,
+}
+
 /// Describes one ToolPkg WASM export call requested by JavaScript.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct JsToolPkgWasmRequest {
@@ -207,6 +214,12 @@ pub trait JsExecutionHost: Send + Sync {
     /// Captures immutable native caller state before crossing the JavaScript runtime scheduler.
     fn capture_tool_invocation_host(&self) -> Arc<dyn JsExecutionHost>;
 
+    /// Projects this invocation's neutral caller identity for SDK getters in every API version.
+    /// An empty object clears participant identity outside a turn; None retains embedding-host transport.
+    fn toolpkg_caller_context(&self) -> Option<Value> {
+        None
+    }
+
     /// Binds a host instance to an engine-owned authenticated ToolPkg execution context.
     fn for_toolpkg_execution_context(
         &self,
@@ -286,6 +299,11 @@ pub trait JsExecutionHost: Send + Sync {
         request: JsToolPkgResourceRequest,
     ) -> Result<String, String>;
 
+    /// Loads a declared module for execution in the owning JavaScript realm.
+    fn load_toolpkg_wasm(&self, _package_target: &str, _module_id: &str) -> Result<JsToolPkgWasmModule, String> {
+        Err("ToolPkg WASM module loading is unavailable".to_string())
+    }
+
     /// Calls one scalar ToolPkg WASM export.
     fn call_toolpkg_wasm(
         &self,
@@ -297,6 +315,11 @@ pub trait JsExecutionHost: Send + Sync {
 
     /// Opens one Compose DSL file picker through the embedding application's host UI.
     fn open_compose_file_picker(&self, payload: &Value) -> Result<Value, String>;
+
+    /// Controls a floating surface with identity supplied by the authenticated engine.
+    fn floating_window_command(&self, _payload: &Value) -> Result<Value, String> {
+        Err("Floating windows are unavailable on this host".into())
+    }
 
     /// Saves a UTF-8 export through the embedding application's file selector.
     fn save_compose_file(&self, payload: &Value) -> Result<Value, String>;

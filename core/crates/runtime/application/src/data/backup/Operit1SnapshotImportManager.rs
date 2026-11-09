@@ -35,7 +35,6 @@ use crate::data::backup::Operit1RoomSchemaMigration::{
 use crate::data::backup::Operit1SnapshotArchive::{
     validateRelativePath, Operit1PreferenceValue, Operit1SnapshotArchive, Operit1SnapshotEntry,
 };
-use crate::data::backup::Operit1ThinkingMigration::convert_thinking_configurations;
 
 use super::CharacterPluginLegacyData::sanitizeMemoryOwnerId;
 use super::CharacterPluginLegacyData::{
@@ -57,8 +56,8 @@ use operit_model::MessagePart::MessagePart;
 use operit_model::MessagePartCodec::MessagePartCodec;
 use operit_model::ModelCatalog::ModelCatalog;
 use operit_model::ModelConfigData::{
-    ApiProviderType, ModelCapabilities, ModelConfigDefaults, ModelContextSpec, ModelProfile,
-    ModelRequestSpec, ModelSummarySettings, ProviderProfile,
+    ApiProviderType, ModelCapabilityOverrides, ModelConfigDefaults, ModelContextSpec, ModelProfile,
+    ModelRequestOverrides, ModelSummarySettings, ProviderProfile,
 };
 use operit_model::ModelParameter::{ModelParameter, ParameterCategory};
 use operit_model::OperitChatArchive::{
@@ -110,10 +109,6 @@ const OPERIT1_INTERNAL_FILES_PREFIXES: [&str; 4] = [
 ];
 const OPERIT1_EXTERNAL_DOWNLOAD_PREFIX: &str = "/storage/emulated/0/Download/Operit/";
 const OPERIT1_DEFAULT_AI_AVATAR_URI: &str = "file:///android_asset/operit.png";
-const OPERIT1_OBJECTBOX_KEY_MEMORY: [u8; 4] = [0x18, 0x00, 0x00, 0x10];
-const OPERIT1_OBJECTBOX_KEY_LINK: [u8; 4] = [0x18, 0x00, 0x00, 0x14];
-const OPERIT1_OBJECTBOX_KEY_TAG: [u8; 4] = [0x18, 0x00, 0x00, 0x1c];
-const OPERIT1_OBJECTBOX_KEY_MEMORY_TAG_RELATION: [u8; 4] = [0x20, 0x00, 0x00, 0x20];
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[allow(non_snake_case)]
@@ -660,6 +655,13 @@ impl Operit1SnapshotImportManager {
                         .map_err(|error| error.to_string())?;
                     (*GitHubAuthPreferences::store(self.storageHost.clone())).clone()
                 }
+                "payload/files/datastore/current_chat_id.preferences_pb" => {
+                    use operit_store::PreferencesDataStore::CoreNodeStateStore;
+                    (*CoreNodeStateStore::newWithStorage(
+                        self.storageHost.clone(),
+                        operit_util::RuntimeStorageLayout::CURRENT_CHAT_ID_PREFERENCES_PATH,
+                    )).clone()
+                }
                 _ => PreferencesDataStore::new(filePath),
             };
             for (key, value) in preferences
@@ -805,7 +807,7 @@ impl Operit1SnapshotImportManager {
     /// Imports the OP1 v21 token ledger and pricing identities without deriving usage from chats.
     fn importTokenStatistics(&self, parsed: &ParsedOperit1Snapshot) -> Result<(i32, i32), String> {
         self.withStagedOperit1ChatDatabase(parsed, |connection, bridge| {
-            if bridge != Operit1ToOperit2ChatArchiveBridge::Operit1RoomV21ToOperit2SqliteV28 {
+            if bridge != Operit1ToOperit2ChatArchiveBridge::Operit1RoomV21ToOperit2SqliteV29 {
                 return Ok((0, 0));
             }
             let usageRows = connection

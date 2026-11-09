@@ -1,3 +1,6 @@
+use crate::core::application::ApplicationUpdate::{
+    ApplicationUpdateInfo, ApplicationUpdateInstallResult, ApplicationUpdateProgress,
+};
 use crate::data::backup::CharacterPluginMigration::{
     isRetiredCharacterOperation, isRetiredCharacterPreferenceKey,
 };
@@ -5,6 +8,7 @@ use crate::core::chat::AIMessageManager::AIMessageManager;
 use crate::core::chat::ChatRuntimeHolder::ChatRuntimeHolder;
 use crate::core::events::RuntimeEvent::RuntimeEvent;
 use crate::data::preferences::ApiPreferences::ApiPreferences;
+use crate::data::preferences::GitHubAuthPreferences::GitHubAuthPreferences;
 use crate::data::preferences::ModelConfigManager::ModelConfigManager;
 use crate::data::preferences::PreferenceSpaceMerge;
 use crate::data::preferences::ThemeConfigManager::ThemeConfigManager;
@@ -15,6 +19,9 @@ use crate::plugins::toolpkg::ToolPkgInputMenuToggleBridge::ToolPkgInputMenuToggl
 use crate::plugins::PluginRegistry::PluginRegistry;
 use crate::services::ProviderRuntimeSupportService::ProviderRuntimeSupportService;
 use crate::services::ToolRuntimeSupportService::ToolRuntimeSupportService;
+use crate::core::application::ExtensionCatalogSupport::{
+    ExtensionCatalogDiagnostic, ExtensionCatalogSnapshot, ExtensionCatalogUpdateCheck,
+};
 #[cfg(feature = "javascript")]
 use operit_host_api::HostManager::setDefaultHostJavaScriptRuntimeHost;
 use operit_host_api::HostManager::{
@@ -26,6 +33,9 @@ use operit_host_api::{HostRuntimeEventRegistration, HostRuntimeTaskSchedulerHost
 #[cfg(feature = "javascript")]
 use operit_js_bridge::javascript::JsExecutionProvider::HostJsExecutionProvider;
 use operit_providers::chat::llmprovider::ModelConfigConnectionTester::ModelConnectionTestReport;
+use operit_providers::market::MarketStatsApiService::{
+    setDefaultGitHubTokenSource, GitHubTokenSource,
+};
 use operit_providers::runtime_support::ProviderRuntimeContext;
 use operit_store::sync::SqlChatSyncStore::{SqlChatSyncStore, CHAT_SYNC_DOMAIN};
 use operit_store::CoreNodeBindingStore::{CoreNodeBindingStore, BINDING_SYNC_DOMAIN};
@@ -96,6 +106,18 @@ use operit_util::OperitPaths;
 
 static HOST_MANAGER: OnceLock<Mutex<Option<HostManager>>> = OnceLock::new();
 
+/// Gives marketplace clients the access token of the saved GitHub login.
+struct GitHubLoginTokenSource;
+
+impl GitHubTokenSource for GitHubLoginTokenSource {
+    /// Reads the token on every request so signing in or out applies immediately.
+    fn current_access_token(&self) -> Result<Option<String>, String> {
+        GitHubAuthPreferences::getInstance()
+            .getCurrentAccessToken()
+            .map_err(|error| error.to_string())
+    }
+}
+
 /// Owns process-wide runtime initialization and exposes host-facing application operations.
 pub struct OperitApplication {
     pub appStartupTimeMs: i64,
@@ -106,6 +128,7 @@ pub struct OperitApplication {
     pub toolPkgBridgeRuntime: ToolPkgBridgeRuntime,
     pub providerRuntimeContext: ProviderRuntimeContext,
     pub initialized: bool,
+    pub(super) applicationUpdate: super::ApplicationUpdate::ApplicationUpdateManager,
     extensionChanges: Option<operit_store::SyncAppliedChanges::SyncAppliedSubscription>,
     hostRuntimeEventRegistration: Option<Arc<Mutex<Box<dyn HostRuntimeEventRegistration>>>>,
 }
@@ -136,11 +159,11 @@ impl OperitApplication {
                 runtimeStorageHost.clone(),
             );
             let logFile = pathMapper
-                .resolve("/app/data/logs/operit.log")
+                .resolve("/operitapp/data/logs/operit.log")
                 .expect("runtime log path must resolve through the file-system host")
                 .physicalPath;
             let packageLogFile = pathMapper
-                .resolve("/app/data/logs/toolpkg.log")
+                .resolve("/operitapp/data/logs/toolpkg.log")
                 .expect("ToolPkg log path must resolve through the file-system host")
                 .physicalPath;
             if let Err(error) =
@@ -168,6 +191,7 @@ impl OperitApplication {
         if let Some(httpHost) = hostManager.httpHost.clone() {
             setDefaultHttpHost(httpHost);
         }
+        setDefaultGitHubTokenSource(Arc::new(GitHubLoginTokenSource));
         if let Some(webSocketHost) = hostManager.webSocketHost.clone() {
             setDefaultWebSocketHost(webSocketHost);
         }
@@ -231,6 +255,7 @@ impl OperitApplication {
             .try_lock()
             .expect("new chat runtime holder must be unlocked") = initializedChatRuntimeHolder;
         Self {
+            applicationUpdate: super::ApplicationUpdate::ApplicationUpdateManager::new(),
             appStartupTimeMs: 0,
             hostManager,
             chatRuntimeHolder,
@@ -249,6 +274,7 @@ impl OperitApplication {
     #[allow(non_snake_case)]
     pub fn sharedCoreCommandRuntime(&self) -> Self {
         Self {
+            applicationUpdate: self.applicationUpdate.clone(),
             appStartupTimeMs: self.appStartupTimeMs,
             hostManager: self.hostManager.clone(),
             chatRuntimeHolder: self.chatRuntimeHolder.clone(),
@@ -267,7 +293,7 @@ impl OperitApplication {
     #[allow(non_snake_case)]
     fn cleanOnExitFiles(&self) -> Result<(), String> {
         let fileSystem = self.runtimeFileSystem()?;
-        const CLEAN_ON_EXIT_PATH: &str = "/app/data/temp/clean_on_exit";
+        const CLEAN_ON_EXIT_PATH: &str = "/operitapp/data/temp/clean_on_exit";
         fileSystem.makeDirectory(CLEAN_ON_EXIT_PATH, true)?;
         for entry in fileSystem.listFiles(CLEAN_ON_EXIT_PATH)? {
             let path = PathMapper::joinVfsPath(CLEAN_ON_EXIT_PATH, &entry.name)?;
@@ -319,12 +345,10 @@ impl OperitApplication {
         AppLogger::v("OperitApplication", "runtime initialization start");
         setHostManager(self.hostManager.clone());
         if let Some(storage) = self.hostManager.runtimeStorageHost.clone() {
-            if let Err(error) =
-                operit_store::ExtensionStore::ExtensionStore::new(storage).migrateLegacyLayout()
-            {
+            if let Err(error) = PreferenceSpaceMerge::prepareLayout(storage) {
                 AppLogger::e(
-                    "ExtensionMigration",
-                    &format!("Legacy data retained; migration will retry: {error}"),
+                    "PreferenceLayout",
+                    &format!("Preference layout migration incomplete: {error}"),
                 );
             }
         }
@@ -349,6 +373,12 @@ impl OperitApplication {
         crate::data::backup::CharacterPluginMigration::migrateLegacyCharacters(
             RuntimeStorePaths::default(),
         )?;
+        crate::data::preferences::ThemeAppearanceMigration::migrate(
+            self.hostManager.runtimeStorageHost.clone().unwrap_or_else(
+                operit_store::RuntimeStorageHost::defaultRuntimeStorageHost,
+            ),
+        )
+        .map_err(|error| error.to_string())?;
         self.preloadDatabase();
         AppLogger::v(
             "OperitApplication",
@@ -409,6 +439,7 @@ impl OperitApplication {
             self.toolHandler.clone(),
         );
         self.dispatchPluginLoading()?;
+        crate::services::ModelCatalogService::startKeepingFresh();
         self.initialized = true;
         AppLogger::i(
             "OperitApplication",
@@ -542,6 +573,53 @@ impl OperitApplication {
         MCPRepository::getInstance(&self.hostManager, self.toolHandler.runtimeSupport())
     }
 
+    /// Imports portable A2A connection definitions into the extension/package registry.
+    #[allow(non_snake_case)]
+    pub fn importA2AConfig(&self, configJson: String) -> Result<Vec<String>, String> {
+        let ids = operit_tools::tools::a2a::A2ARepository::A2ARepository::new(self.hostManager.clone())?.import(&configJson)?;
+        self.packageManager().lock().map_err(|e| e.to_string())?.reloadA2APackages();
+        Ok(ids)
+    }
+
+    /// Reads the saved connection manifest for editing or export.
+    #[allow(non_snake_case)]
+    pub fn getA2AConfig(&self, id: String) -> Result<String, String> {
+        let config = operit_tools::tools::a2a::A2ARepository::A2ARepository::new(self.hostManager.clone())?.config(&id)?;
+        serde_json::to_string(&config).map_err(|e| e.to_string())
+    }
+
+    /// Fetches and validates an Agent Card before the user saves a connection.
+    #[allow(non_snake_case)]
+    pub async fn discoverA2AAgent(&self, configJson: String) -> Result<String, String> {
+        let config = serde_json::from_str(&configJson).map_err(|e| e.to_string())?;
+        let config = operit_tools::tools::a2a::A2ARepository::A2ARepository::new(self.hostManager.clone())?.discover(config).await?;
+        serde_json::to_string(&config).map_err(|e| e.to_string())
+    }
+
+    /// Enables or disables an installed A2A package through its canonical owner record.
+    #[allow(non_snake_case)]
+    pub fn setA2AEnabled(&self, id: String, enabled: bool) -> Result<(), String> {
+        operit_tools::tools::a2a::A2ARepository::A2ARepository::new(self.hostManager.clone())?.set_enabled(&id, enabled)?;
+        self.packageManager().lock().map_err(|e| e.to_string())?.reloadA2APackages();
+        Ok(())
+    }
+
+    /// Deletes an A2A installation and removes its package tools.
+    #[allow(non_snake_case)]
+    pub fn deleteA2A(&self, id: String) -> Result<(), String> {
+        operit_tools::tools::a2a::A2ARepository::A2ARepository::new(self.hostManager.clone())?.delete(&id)?;
+        self.packageManager().lock().map_err(|e| e.to_string())?.reloadA2APackages();
+        Ok(())
+    }
+
+    /// Executes the same A2A operations used by the installed package's tools.
+    #[allow(non_snake_case)]
+    pub async fn invokeA2A(&self, id: String, operation: String, argumentsJson: String) -> Result<String, String> {
+        let arguments = serde_json::from_str(&argumentsJson).map_err(|e| e.to_string())?;
+        let result = operit_tools::tools::a2a::A2ARepository::A2ARepository::new(self.hostManager.clone())?.invoke(&id, &operation, arguments).await?;
+        serde_json::to_string(&result).map_err(|e| e.to_string())
+    }
+
     /// Creates a skill repository with this runtime's host and tool support.
     #[allow(non_snake_case)]
     pub fn skillRepository(&self) -> SkillRepository {
@@ -552,6 +630,32 @@ impl OperitApplication {
     #[allow(non_snake_case)]
     pub fn extensionCatalogRevisionFlow(&self) -> StateFlow<i64> {
         operit_store::ExtensionStore::catalogRevisionFlow()
+    }
+
+    /// Returns one normalized local catalog for the redesigned package manager.
+    #[allow(non_snake_case)]
+    #[operit_route_macros::operit_plugin_sdk_expose]
+    pub fn getExtensionCatalogSnapshot(
+        &self,
+    ) -> Result<ExtensionCatalogSnapshot, String> {
+        super::ExtensionCatalogSupport::snapshot(self)
+    }
+
+    /// Checks installed marketplace entries against their latest published versions.
+    #[allow(non_snake_case)]
+    pub fn checkExtensionCatalogUpdates(
+        &self,
+    ) -> Result<Vec<ExtensionCatalogUpdateCheck>, String> {
+        super::ExtensionCatalogSupport::check_updates(self)
+    }
+
+    /// Deletes one package-manager diagnostic after the redesigned card confirms it.
+    #[allow(non_snake_case)]
+    pub fn deleteExtensionCatalogDiagnostic(
+        &self,
+        diagnostic: ExtensionCatalogDiagnostic,
+    ) -> Result<bool, String> {
+        super::ExtensionCatalogSupport::delete_diagnostic(self, diagnostic)
     }
 
     /// Lists explicit installation scopes, including subpackages that inherit their container scope.
@@ -572,7 +676,7 @@ impl OperitApplication {
                 self.skillRepository().getAvailableSkillPackages();
                 None
             }
-            "mcp" => None,
+            "mcp" | "a2a" => None,
             _ => return Err(format!("Unknown extension kind: {kind}")),
         };
         let mut result = BTreeMap::new();
@@ -619,7 +723,7 @@ impl OperitApplication {
                 operit_store::ExtensionStore::ExtensionStore::default()
                     .moveScope(&kind, &id, &scope)
             }
-            "mcp" => operit_store::ExtensionStore::ExtensionStore::default()
+            "mcp" | "a2a" => operit_store::ExtensionStore::ExtensionStore::default()
                 .moveScope(&kind, &id, &scope),
             _ => Err(format!("Unknown extension kind: {kind}")),
         }
@@ -744,6 +848,42 @@ impl OperitApplication {
         }
     }
 
+    /// Checks the installed client using shared Rust release/channel/target rules.
+    pub fn checkApplicationUpdate(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Option<ApplicationUpdateInfo>, String>> + 'static {
+        let manager = self.applicationUpdate.clone();
+        async move { manager.check().await }
+    }
+
+    /// Observes host download progress without exposing URLs or native file paths.
+    pub fn applicationUpdateProgressFlow(&self) -> StateFlow<ApplicationUpdateProgress> {
+        self.applicationUpdate.progress()
+    }
+
+    /// Downloads the selected release and returns an opaque native receipt.
+    pub fn downloadApplicationUpdate(
+        &self,
+        version: String,
+    ) -> impl std::future::Future<Output = Result<String, String>> + 'static {
+        let manager = self.applicationUpdate.clone();
+        async move { manager.download(version).await }
+    }
+
+    pub fn cancelApplicationUpdateDownload(&self) {
+        self.applicationUpdate.cancel();
+    }
+
+    /// Resolves the receipt inside core and calls the existing install_app pipeline.
+    pub fn installApplicationUpdate(
+        &self,
+        receipt: String,
+    ) -> impl std::future::Future<Output = Result<ApplicationUpdateInstallResult, String>> + 'static {
+        let manager = self.applicationUpdate.clone();
+        let tools = self.toolHandler.clone();
+        async move { manager.install(receipt, tools).await }
+    }
+
     /// Returns the Cargo package version compiled into the runtime crate.
     #[allow(non_snake_case)]
     pub fn coreVersion(&self) -> String {
@@ -838,385 +978,147 @@ impl OperitApplication {
         }
         let store = self.runtimeSyncOperationStore()?;
         errors.extend(store.publishPreferenceOutboxes().map_err(|error| error.to_string())?);
-        let mut receipt = store.receipt().map_err(|error| error.to_string())?;
-        match SqlChatSyncStore::default()
-            .map_err(|error| error.to_string())
-            .and_then(|store| store.receipt().map_err(|error| error.to_string()))
-        {
-            Ok(sql) => receipt.merge(sql),
-            Err(error) => errors.push(format!("chat receipt: {error}")),
-        }
-        match self
-            .pluginSqliteHost()
-            .and_then(|host| PluginStorage::receipt(host).map_err(|error| error.to_string()))
-        {
-            Ok((plugin, pluginErrors)) => {
-                receipt.merge(plugin);
-                errors.extend(pluginErrors);
+        let schema = PreferenceSpaceMerge::schema();
+        let pending_owners = store.pendingOperations().map_err(|e|e.to_string())?;
+        let registry = self.transactionRegistry(&schema,&pending_owners)?;
+        let summary = store.synchronizationSummary().map_err(|e|e.to_string())?;
+        let (receipt,failures) = registry.receipt()?;
+        errors.extend(failures);
+        let pending = store.applicationOperations().map_err(|e|e.to_string())?;
+        let mut states = BTreeMap::<&str, &SyncOperation>::new();
+        for operation in pending.iter().filter(|op|op.domain == RUNTIME_FILE_SYNC_DOMAIN) {
+            if states.get(operation.entityId.as_str()).is_none_or(|current|
+                operit_store::Transaction::Revision::fromOperation(operation) > operit_store::Transaction::Revision::fromOperation(current)) {
+                states.insert(&operation.entityId, operation);
             }
-            Err(error) => errors.push(format!("plugin_storage receipt: {error}")),
         }
-        let pending = store.pendingOperationCount().map_err(|error| error.to_string())?;
         let mut blobs = BTreeMap::new();
-        store.visitPendingOperations(&[RUNTIME_FILE_SYNC_DOMAIN], |operation| {
+        let managedFiles = self.runtimeWorkspaceFileSyncStore()?;
+        for reference in managedFiles.deferredBlobs()? { blobs.insert(reference.contentHash.clone(), reference); }
+        for operation in states.into_values() {
+            if !store.shouldApplyOperation(operation).map_err(|e|e.to_string())? { continue; }
+            if operit_store::WorkspaceFileSyncStore::WorkspaceFileSyncStore::owns(operation) && !managedFiles.wantsBlob(operation)? { continue; }
             match RuntimeFileSyncStore::requiredBlob(operation) {
-                Ok(Some(reference)) => {
-                    blobs.insert(reference.contentHash.clone(), reference);
-                }
+                Ok(Some(reference)) => { blobs.insert(reference.contentHash.clone(), reference); }
                 Ok(None) => {}
                 Err(error) => errors.push(format!("pending blob op={}: {error}", operation.opId)),
             }
-        }).map_err(|error| error.to_string())?;
+        }
         let mut result = serde_json::to_value(receipt).map_err(|error| error.to_string())?;
         result["protocolVersion"] = serde_json::json!(1);
-        result["pending"] = serde_json::json!(pending);
+        result["consistencyVersion"] = serde_json::json!(7);
+        result["stateSummary"] = serde_json::json!(format!("digest:{summary}"));
+        result["pending"] = serde_json::json!(pending.len());
+        result["pendingOperationIds"] = serde_json::json!(pending.into_iter().map(|op|op.opId).collect::<Vec<_>>());
         result["pendingBlobs"] = serde_json::to_value(blobs.into_values().collect::<Vec<_>>())
             .map_err(|error| error.to_string())?;
         result["errors"] = serde_json::json!(errors);
         Ok(result)
     }
 
-    /// Returns a compact change fingerprint of the state a full synchronization
-    /// pass would exchange. Peers poll this instead of the full receipt: the
-    /// receipt carries one exact range per synced entity, which grows with the
-    /// Space and made every idle probe transfer the complete clock.
-    ///
-    /// Only durable operation clocks are fingerprinted. A storage-handle close
-    /// publishes a process mutation without writing any operation, so the
-    /// mutation revision cannot distinguish real changes from idle opens.
-    /// Only origins this device authored count as a change: applying a peer's
-    /// operations advances their ranges locally, but that is not new work to
-    /// offer the other members. Device preferences and projected control
-    /// operations change no clock, but the device that made them detects them
-    /// in its own local-state summary and starts the pass that pushes them to
-    /// its peers.
+    /// Rebuilds local synchronization transactions from the current materialized business data.
+    pub fn syncResetTransactions(&self) -> Result<serde_json::Value, String> {
+        let journal = self.runtimeSyncOperationStore()?;
+        let _application = journal.lockApplication().map_err(|e|e.to_string())?;
+        let errors = journal.publishPreferenceOutboxes().map_err(|e|e.to_string())?;
+        if !errors.is_empty() { return Err(errors.join("\n")); }
+        let schema = PreferenceSpaceMerge::schema();
+        let pending = journal.pendingOperations().map_err(|e|e.to_string())?;
+        let owners = self.transactionRegistry(&schema,&pending)?.reset_transactions()?;
+        let files = self.runtimeFileSyncStore()?.resetTransactions()?;
+        AppLogger::i("TransactionSync", &format!("sync_transactions.reset owners={owners} files={files}"));
+        Ok(serde_json::json!({"owners":owners,"files":files}))
+    }
+
+    /// Compares the materialized datasets after their ordinary transaction exchange.
+    pub fn syncConsistency(&self) -> Result<serde_json::Value, String> {
+        self.consistencyManifest()
+    }
+
+    pub fn syncReadSnapshot(&self, owner: serde_json::Value, token: String) -> Result<serde_json::Value, String> {
+        self.exportConsistencySnapshot(serde_json::from_value(owner).map_err(|e| e.to_string())?, &token)
+    }
+
+    pub fn syncReadCoverage(&self, owner: serde_json::Value, token: String) -> Result<serde_json::Value, String> {
+        self.exportConsistencyCoverage(serde_json::from_value(owner).map_err(|e| e.to_string())?, &token)
+    }
+
+    pub fn syncRepairSnapshot(&self, owner: serde_json::Value, expected: String, reference: serde_json::Value) -> Result<bool, String> {
+        self.repairConsistencySnapshot(serde_json::from_value(owner).map_err(|e| e.to_string())?, &expected,
+            serde_json::from_value(reference).map_err(|e| e.to_string())?)
+    }
+
+    /// Returns the same change boundary carried by the ordinary synchronization receipt.
     #[allow(non_snake_case)]
     pub fn syncClockDigest(&self) -> Result<serde_json::Value, String> {
-        let store = self.runtimeSyncOperationStore()?;
-        let localDeviceId = store
-            .localDeviceId()
-            .map_err(|error| error.to_string())?;
-        let mut clock = store
-            .currentLocalClock()
-            .map_err(|error| error.to_string())?;
-        // Chat operations live in their own SQL journal; merge its clock the
-        // same way the local-state summary does so chat-only writes are seen.
-        if operit_util::RuntimeStoreRoot::default_runtime_store_root_config().is_some() {
-            match SqlChatSyncStore::default() {
-                Ok(sqlStore) => match sqlStore.localClock() {
-                    Ok(sqlClock) => {
-                        for (deviceId, sequence) in sqlClock.sequences {
-                            if sequence > clock.sequenceFor(&deviceId) {
-                                clock.setSequence(deviceId, sequence);
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        operit_util::AppLogger::AppLogger::v_with_level(
-                            "CoreSyncTrace",
-                            &format!("sync_clock_digest.chat_clock_unavailable error={error}"),
-                            operit_util::AppLogger::VERBOSE_LEVEL_6,
-                        );
-                    }
-                },
-                Err(error) => {
-                    operit_util::AppLogger::AppLogger::v_with_level(
-                        "CoreSyncTrace",
-                        &format!("sync_clock_digest.chat_storage_unavailable error={error}"),
-                        operit_util::AppLogger::VERBOSE_LEVEL_6,
-                    );
-                }
-            }
-        }
-        // Operations applied from peers advance their origins in this clock.
-        // Fingerprinting every origin would make each applied batch look like
-        // new work to every neighbor, reopening full passes that have nothing
-        // to exchange. Advertise only what this device authored: members
-        // synchronize with each other over routed links, and projected control
-        // operations are advertised through the local-state summary.
-        clock.retainAuthoredBy(&localDeviceId);
-        let fingerprint = serde_json::to_vec(&clock).map_err(|error| error.to_string())?;
-        let digest = Sha256::digest(&fingerprint);
-        Ok(serde_json::json!({
-            "protocolVersion": 1,
-            "digest": format!("{digest:x}"),
-        }))
+        let digest = self.runtimeSyncOperationStore()?.synchronizationSummary().map_err(|e|e.to_string())?;
+        Ok(serde_json::json!({"protocolVersion":1,"digest":digest}))
     }
 
     /// Exports missing operations while reporting independently unavailable storage engines.
     #[allow(non_snake_case)]
     pub fn syncOperationsSince(
-        &self,
-        clock: serde_json::Value,
-        domains: Vec<String>,
-        limit: usize,
-    ) -> Result<serde_json::Value, String> {
-        let receipt: SyncReceipt = serde_json::from_value(clock).map_err(|error| error.to_string())?;
+        &self, clock: serde_json::Value, domains: Vec<String>, limit: usize,
+    ) -> Result<serde_json::Value,String> {
+        let include_progress = clock.get("includeProgress").and_then(serde_json::Value::as_bool) == Some(true);
+        let receipt: SyncReceipt = serde_json::from_value(clock).map_err(|e|e.to_string())?;
         receipt.validate()?;
-        let store = self.runtimeSyncOperationStore()?;
-        let mut operations = Vec::new();
-        let mut errors = Vec::new();
-        let mut failedDomains = std::collections::BTreeSet::new();
-        match store.operationsSinceWithBudget(
-            &receipt,
-            &domains,
-            limit,
-            DEFAULT_SYNC_PAGE_BYTES,
-            |operation| !isRetiredCharacterOperation(operation),
-        ) {
-            Ok(page) => operations.extend(page),
-            Err(error) => {
-                errors.push(format!("journal export: {error}"));
-                failedDomains.extend([
-                    "preferences",
-                    CHAT_SYNC_DOMAIN,
-                    BINDING_SYNC_DOMAIN,
-                    RUNTIME_FILE_SYNC_DOMAIN,
-                    NETWORK_CONTROL_SYNC_DOMAIN,
-                ]);
+        let storage = self.hostManager.runtimeStorageHost.clone().ok_or("Runtime storage is unavailable")?;
+        let mut errors = PreferenceSpaceMerge::prepare(storage);
+        let journal = self.runtimeSyncOperationStore()?;
+        let schema = PreferenceSpaceMerge::schema();
+        let pending = journal.pendingOperations().map_err(|e|e.to_string())?;
+        let registry = self.transactionRegistry(&schema,&pending)?;
+        let (operations,failures) = registry.export(&receipt,&domains,limit)?;
+        errors.extend(failures);
+        let (remaining,progress_errors) = if include_progress {
+            match registry.inventory(&receipt,&domains) {
+                Ok((ids,failures)) => ((failures.is_empty() && errors.is_empty()).then_some(ids.len()),failures),
+                Err(error) => (None,vec![error]),
             }
-        }
-        match SqlChatSyncStore::default()
-            .map_err(|error| error.to_string())
-            .and_then(|store| {
-                store
-                    .operationsSince(&receipt, &domains, limit)
-                    .map_err(|error| error.to_string())
-            }) {
-            Ok(page) => operations.extend(page),
-            Err(error) => {
-                errors.push(format!("chat export: {error}"));
-                failedDomains.insert(CHAT_SYNC_DOMAIN);
-            }
-        }
-        if domains.is_empty()
-            || domains
-                .iter()
-                .any(|domain| domain == PLUGIN_STORAGE_SYNC_DOMAIN)
-        {
-            match self.pluginSqliteHost().and_then(|host| {
-                PluginStorage::exportWithBudget(
-                    host,
-                    &receipt,
-                    &domains,
-                    limit,
-                    DEFAULT_SYNC_PAGE_BYTES,
-                )
-                .map_err(|error| error.to_string())
-            }) {
-                Ok((page, pluginErrors)) => {
-                    operations.extend(page);
-                    if !pluginErrors.is_empty() {
-                        failedDomains.insert(PLUGIN_STORAGE_SYNC_DOMAIN);
-                    }
-                    errors.extend(pluginErrors);
-                }
-                Err(error) => {
-                    errors.push(format!("plugin_storage export: {error}"));
-                    failedDomains.insert(PLUGIN_STORAGE_SYNC_DOMAIN);
-                }
-            }
-        }
-        let mut unique = BTreeMap::new();
-        for operation in operations {
-            if let Some(existing) = unique.insert(operation.opId.clone(), operation.clone()) {
-                if existing != operation {
-                    return Err(format!(
-                        "Conflicting immutable operation {}",
-                        operation.opId
-                    ));
-                }
-            }
-        }
-        let mut operations = unique.into_values().collect::<Vec<_>>();
-        operations.sort_by(|left, right| {
-            (left.createdAt, &left.originDeviceId, left.sequence).cmp(&(
-                right.createdAt,
-                &right.originDeviceId,
-                right.sequence,
-            ))
-        });
-        operations = compactSyncOperations(operations);
-        operations.truncate(limit);
-        let operations = boundSyncOperationPage(operations, DEFAULT_SYNC_PAGE_BYTES);
-        Ok(
-            serde_json::json!({ "operations": operations, "errors": errors, "failedDomains": failedDomains }),
-        )
+        } else { (None,vec![]) };
+        let failed_domains = if errors.is_empty() { vec![] } else if domains.is_empty() {
+            vec!["preferences".to_owned(),CHAT_SYNC_DOMAIN.into(),PLUGIN_STORAGE_SYNC_DOMAIN.into(),RUNTIME_FILE_SYNC_DOMAIN.into()]
+        } else { domains };
+        let files = self.runtimeFileSyncStore()?;
+        let operations = operations.into_iter().map(|op|files.prepareTransactionForTransport(op)).collect::<Result<Vec<_>,_>>()?;
+        Ok(serde_json::json!({"operations":boundSyncOperationPage(operations,DEFAULT_SYNC_PAGE_BYTES),"remaining":remaining,
+            "progressErrors":progress_errors,"errors":errors,"failedDomains":failed_domains}))
     }
 
     /// Durably receives originals and materializes independent owners without acknowledging failed application.
     #[allow(non_snake_case)]
-    pub fn syncApplyOperations(
-        &self,
-        operations: serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
-        let operations: Vec<SyncOperation> =
-            serde_json::from_value(operations).map_err(|error| error.to_string())?;
-        let store = self.runtimeSyncOperationStore()?;
-        let application = store.lockApplication().map_err(|error| error.to_string())?;
-        store
-            .receiveOperations(&operations)
-            .map_err(|error| error.to_string())?;
-        let pending = store
-            .pendingOperations()
-            .map_err(|error| error.to_string())?;
-        let storage = self
-            .hostManager
-            .runtimeStorageHost
-            .clone()
-            .ok_or("RuntimeStorageHost is not registered for persistent sync")?;
+    pub fn syncApplyOperations(&self, operations: serde_json::Value) -> Result<serde_json::Value,String> {
+        let operations: Vec<SyncOperation> = serde_json::from_value(operations).map_err(|e|e.to_string())?;
+        let files = self.runtimeFileSyncStore()?;
         let mut errors = Vec::new();
-        let mut applied = Vec::new();
-        let mut skipped = Vec::new();
-        let mut preferenceReferences = std::collections::BTreeMap::new();
-        let preferences = pending
-            .iter()
-            .filter(|operation| operation.domain == "preferences")
-            .cloned()
-            .collect::<Vec<_>>();
-        if !preferences.is_empty()
-            || pending
-                .iter()
-                .any(|operation| operation.domain == PLUGIN_STORAGE_SYNC_DOMAIN)
-        {
-            match store.preferenceMergeHistory() {
-                Err(error) => {
-                    errors.push(format!("preference history: {error}"));
-                }
-                Ok(history) => {
-                    for outcome in applyIndependentOperations(
-                        storage.clone(),
-                        &PreferenceSpaceMerge::schema(&history.iter().chain(&preferences).cloned().collect::<Vec<_>>()),
-                        &history,
-                        &preferences,
-                        |path, key| !isRetiredCharacterPreferenceKey(path, key),
-                    ) {
-                        match outcome.result {
-                            Ok(map) => {
-                                if outcome.skipped {
-                                    skipped.extend(outcome.operations);
-                                } else {
-                                    preferenceReferences.extend(map);
-                                    applied.extend(outcome.operations);
-                                }
-                            }
-                            Err(error) => {
-                                errors.push(format!(
-                                    "preferences paths={}: {error}",
-                                    outcome.paths.iter().cloned().collect::<Vec<_>>().join(",")
-                                ));
-                            }
-                        }
-                    }
-                }
+        let mut deferred = BTreeMap::new();
+        let operations = operations.into_iter().filter_map(|op| {
+            let (id, owner) = (op.opId.clone(), op.entityId.clone());
+            match files.hydrateTransaction(op) {
+                Ok(original) => Some(original),
+                Err(error) => { errors.push(format!("transaction {id} owner={owner}: {error}")); deferred.insert(id, owner); None }
             }
-        }
-        let mut blocked = std::collections::BTreeSet::new();
-        for operation in pending
-            .iter()
-            .filter(|operation| operation.domain != "preferences")
-        {
-            let ordered = operation.semantics == SyncOperationSemantics::Transaction;
-            let dataset = match synchronizationDataset(operation) {
-                Ok(dataset) => (operation.originDeviceId.clone(), operation.domain.clone(), dataset),
-                Err(error) => { errors.push(format!("dataset op={}: {error}", operation.opId)); continue; }
-            };
-            if ordered && blocked.contains(&dataset) { continue; }
-            let result = (|| -> Result<(), String> {
-                if isRetiredCharacterOperation(operation) {
-                    return Err("Retired Core data requires its owner's migration".into());
-                }
-                match operation.domain.as_str() {
-                    CHAT_SYNC_DOMAIN => SqlChatSyncStore::default()
-                        .map_err(|error| error.to_string())?
-                        .applyOperation(operation)
-                        .map_err(|error| error.to_string()),
-                    BINDING_SYNC_DOMAIN => self.runtimeBindingStore()?.applySyncedOperation(operation),
-                    NETWORK_CONTROL_SYNC_DOMAIN => self
-                        .runtimeNetworkControlStore()?
-                        .applySyncedOperation(operation),
-                    PLUGIN_STORAGE_SYNC_DOMAIN => PluginStorage::applyOperation(
-                        self.pluginSqliteHost()?,
-                        storage.clone(),
-                        operation,
-                        &preferenceReferences,
-                    )
-                    .map_err(|error| error.to_string()),
-                    _ => {
-                        if store
-                            .shouldApplyOperation(operation)
-                            .map_err(|error| error.to_string())?
-                        {
-                            if operit_store::WorkspaceFileSyncStore::WorkspaceFileSyncStore::owns(
-                                operation,
-                            ) {
-                                self.runtimeWorkspaceFileSyncStore()?
-                                    .materializeOperation(operation, false)?;
-                            } else {
-                                self.applyNonPreferenceSyncOperation(operation)?;
-                            }
-                            store
-                                .recordAppliedOperation(operation)
-                                .map_err(|error| error.to_string())?;
-                        }
-                        store
-                            .appendOperation(operation)
-                            .map_err(|error| error.to_string())
-                    }
-                }
-            })();
-            match result {
-                Ok(()) => applied.push(operation.clone()),
-                Err(error) => {
-                    if ordered {
-                        blocked.insert(dataset);
-                    }
-                    errors.push(format!(
-                        "domain={} op={} origin={} sequence={}: {error}",
-                        operation.domain, operation.opId, operation.originDeviceId, operation.sequence
-                    ));
-                }
-            }
-        }
-        let skippedCount = match store.skipOperations(&skipped) {
-            Ok(()) => skipped.len(),
-            Err(error) => {
-                errors.push(format!("skip obsolete preference operations: {error}"));
-                0
-            }
-        };
-        if let Err(error) = store.completeOperations(&applied) {
-            errors.push(format!("complete pending operations: {error}"));
-        }
-        let remaining = store.pendingOperationCount().map_err(|error| error.to_string())?;
-        if !preferenceReferences.is_empty() {
-            if let Err(error) = self.pluginSqliteHost().and_then(|host| {
-                PluginStorage::reconcilePreferenceReferences(host, &preferenceReferences)
-                    .map_err(|error| error.to_string())
-            }) {
-                errors.push(format!("plugin_storage reconcile: {error}"));
-            }
-        }
+        }).collect::<Vec<_>>();
+        let journal = self.runtimeSyncOperationStore()?;
+        let application = journal.lockApplication().map_err(|e|e.to_string())?;
+        journal.receiveOperations(&operations).map_err(|e|e.to_string())?;
+        let pending = journal.pendingOperations().map_err(|e|e.to_string())?;
+        let storage = self.hostManager.runtimeStorageHost.clone().ok_or("Runtime storage is unavailable")?;
+        if let Err(error) = PreferenceSpaceMerge::prepareLayout(storage.clone()) { errors.push(format!("layout: {error}")); }
+        let schema = PreferenceSpaceMerge::schema();
+        let registry = self.transactionRegistry(&schema,&pending)?;
+        let mut report = registry.apply_pending()?;
+        errors.append(&mut report.errors);
+        report.pending.extend(deferred.keys().cloned());
+        let pending_owners = deferred.values().map(|path| operit_store::Transaction::Migrations::resolve_path(&registry.routes, path))
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
         drop(application);
-        operit_store::SyncAppliedChanges::publish(&storage, &applied);
-        let chatIds = applied.iter().filter_map(synchronizedChatId).collect();
-        if let Err(error) = self.refreshSynchronizedChatFlows(&chatIds) {
-            errors.push(format!("chat refresh: {error}"));
-        }
-        if !errors.is_empty() {
-            AppLogger::w(
-                "CoreSyncTrace",
-                &format!(
-                    "sync_apply.partial applied={} pending={} errors={}",
-                    applied.len(),
-                    remaining,
-                    errors.join("; ")
-                ),
-            );
-        }
-        Ok(
-            serde_json::json!({ "received": operations.len(), "applied": applied.len(), "skipped": skippedCount, "pending": remaining, "errors": errors }),
-        )
+        operit_store::SyncAppliedChanges::publish(&storage,&report.applied);
+        let chats = report.applied.iter().filter_map(synchronizedChatId).collect();
+        if let Err(error) = self.refreshSynchronizedChatFlows(&chats) { errors.push(format!("chat refresh: {error}")); }
+        Ok(serde_json::json!({"received":operations.len(),"applied":report.applied.len(),"skipped":report.skipped,"pending":report.pending.len(),
+            "pendingOperationIds":report.pending,"pendingOwners":pending_owners,"errors":errors}))
     }
 
     /// Applies one route-transported Binding operation without moving persistent sync clocks.
@@ -1246,6 +1148,22 @@ impl OperitApplication {
         if chatIds.is_empty() {
             return Ok(());
         }
+        let store = SqlChatSyncStore::default().map_err(|error| error.to_string())?;
+        let mut deletedChatIds = Vec::new();
+        let mut liveChatIds = Vec::new();
+        for chatId in chatIds {
+            if store.chatIsDeleted(chatId).map_err(|error| error.to_string())? {
+                deletedChatIds.push(chatId.clone());
+            } else {
+                liveChatIds.push(chatId.clone());
+            }
+        }
+        if !deletedChatIds.is_empty() {
+            self.dispatchSynchronizedChatDeletions(deletedChatIds)?;
+        }
+        if liveChatIds.is_empty() {
+            return Ok(());
+        }
         let mut holder = self.chatRuntimeHolder.try_lock().map_err(|_| {
             "chat runtime holder is busy during synchronized chat refresh".to_string()
         })?;
@@ -1260,7 +1178,7 @@ impl OperitApplication {
                     activeChatIds.join(",")
                 ),
             );
-            for chatId in chatIds {
+            for chatId in &liveChatIds {
                 let flowSnapshot = core
                     .chatHistoryDelegate
                     .chatMessageFlowsByChatId
@@ -1332,11 +1250,37 @@ impl OperitApplication {
         );
         Ok(())
     }
-    /// Reports whether one complete verified synchronization blob exists locally.
+
+    /// Applies committed chat deletions once the shared runtime is available, including active streams.
+    fn dispatchSynchronizedChatDeletions(&self, chatIds: Vec<String>) -> Result<(), String> {
+        let scheduler = self.hostManager.hostRuntimeTaskSchedulerHost.clone().ok_or_else(|| {
+            "runtime task scheduler host must be configured for synchronized chat deletion".to_string()
+        })?;
+        let holder = self.chatRuntimeHolder.clone();
+        scheduler.scheduleHostRuntimeAsyncTask("operit-chat-sync-deletion", Box::new(move || {
+            Box::pin(async move {
+                let mut holder = holder.lock().await;
+                for core in holder.cores.values_mut() {
+                    for chatId in &chatIds {
+                        if let Err(error) = core.applySynchronizedChatDeletion(chatId.clone()).await {
+                            AppLogger::e("CoreSyncTrace", &format!(
+                                "sync_apply.chat_deletion_cleanup chatId={chatId}: {error}"
+                            ));
+                        }
+                    }
+                }
+            }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>
+        })).map_err(|error| error.to_string())
+    }
+
+    /// Checks local blob presence without reading contents, retaining independent failures.
+    /// Keep the per-file Result envelopes in JSON: nested Results are not proxyable return types.
     #[allow(non_snake_case)]
-    pub fn syncBlobExists(&self, contentHash: String, size: i64) -> Result<bool, String> {
-        self.runtimeFileSyncStore()?
-            .hasBlob(&RuntimeFileSyncReference { contentHash, size })
+    pub fn syncBlobExists(&self, references: serde_json::Value) -> Result<serde_json::Value, String> {
+        let references: Vec<RuntimeFileSyncReference> = serde_json::from_value(references).map_err(|e|e.to_string())?;
+        let store = self.runtimeFileSyncStore()?;
+        let presence: Vec<Result<bool, String>> = references.iter().map(|reference|store.hasBlob(reference)).collect();
+        serde_json::to_value(presence).map_err(|error|error.to_string())
     }
 
     /// Reads one bounded synchronization blob chunk for transfer to another CoreNode.
@@ -1419,7 +1363,7 @@ impl OperitApplication {
 
     /// Creates the persistent sync operation store owned by this application instance.
     #[allow(non_snake_case)]
-    fn runtimeSyncOperationStore(&self) -> Result<SyncOperationStore, String> {
+    pub(super) fn runtimeSyncOperationStore(&self) -> Result<SyncOperationStore, String> {
         let storageHost = self.hostManager.runtimeStorageHost.clone().ok_or_else(|| {
             "RuntimeStorageHost is not registered for persistent sync".to_string()
         })?;
@@ -1431,7 +1375,7 @@ impl OperitApplication {
 
     /// Creates the opaque Binding store owned by this application instance.
     #[allow(non_snake_case)]
-    fn runtimeBindingStore(&self) -> Result<CoreNodeBindingStore, String> {
+    pub(super) fn runtimeBindingStore(&self) -> Result<CoreNodeBindingStore, String> {
         let storageHost = self.hostManager.runtimeStorageHost.clone().ok_or_else(|| {
             "RuntimeStorageHost is not registered for persistent Binding storage".to_string()
         })?;
@@ -1440,14 +1384,14 @@ impl OperitApplication {
 
     /// Creates the synchronized Space authorization and control store owned by this application.
     #[allow(non_snake_case)]
-    fn runtimeNetworkControlStore(&self) -> Result<NetworkControlStore, String> {
+    pub(super) fn runtimeNetworkControlStore(&self) -> Result<NetworkControlStore, String> {
         let storageHost = self.hostManager.runtimeStorageHost.clone().ok_or_else(|| {
             "RuntimeStorageHost is not registered for network control storage".to_string()
         })?;
         NetworkControlStore::new(storageHost)
     }
 
-    fn runtimeWorkspaceFileSyncStore(
+    pub(super) fn runtimeWorkspaceFileSyncStore(
         &self,
     ) -> Result<operit_store::WorkspaceFileSyncStore::WorkspaceFileSyncStore, String> {
         let host = self.hostManager.runtimeStorageHost.clone().ok_or_else(|| {
@@ -1463,7 +1407,7 @@ impl OperitApplication {
 
     /// Creates the content-addressed runtime file store owned by this application instance.
     #[allow(non_snake_case)]
-    fn runtimeFileSyncStore(&self) -> Result<RuntimeFileSyncStore, String> {
+    pub(super) fn runtimeFileSyncStore(&self) -> Result<RuntimeFileSyncStore, String> {
         let storageHost = self.hostManager.runtimeStorageHost.clone().ok_or_else(|| {
             "RuntimeStorageHost is not registered for runtime file synchronization".to_string()
         })?;
@@ -1475,7 +1419,7 @@ impl OperitApplication {
 
     /// Requires the existing runtime SQLite Host for plugin storage synchronization.
     #[allow(non_snake_case)]
-    fn pluginSqliteHost(
+    pub(super) fn pluginSqliteHost(
         &self,
     ) -> Result<std::sync::Arc<dyn operit_host_api::RuntimeSqliteHost>, String> {
         self.hostManager
@@ -1486,7 +1430,7 @@ impl OperitApplication {
 
     /// Applies one non-preferences persistent operation to its owning domain.
     #[allow(non_snake_case)]
-    fn applyNonPreferenceSyncOperation(&self, operation: &SyncOperation) -> Result<(), String> {
+    pub(super) fn applyNonPreferenceSyncOperation(&self, operation: &SyncOperation) -> Result<(), String> {
         match (
             operation.domain.as_str(),
             operation.entityType.as_str(),
@@ -1521,7 +1465,7 @@ fn setHostManager(hostManager: HostManager) {
 }
 
 /// Resolves each owner's declared durable commit boundary for ordered failure isolation.
-fn synchronizationDataset(operation: &SyncOperation) -> Result<String, String> {
+pub(super) fn synchronizationDataset(operation: &SyncOperation) -> Result<String, String> {
     match operation.domain.as_str() {
         CHAT_SYNC_DOMAIN => synchronizedChatId(operation).ok_or_else(|| "Chat transaction dataset is missing".into()),
         PLUGIN_STORAGE_SYNC_DOMAIN => PluginStorage::syncDatasetPath(operation).map_err(|error| error.to_string()),

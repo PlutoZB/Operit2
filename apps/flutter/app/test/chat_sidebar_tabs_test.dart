@@ -1,12 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'support/compose_session_fixture.dart';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'package:operit2/ui/features/chat/viewmodel/ChatMessageLookupRequests.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:operit_ui/operit_ui.dart';
+import 'package:operit2/ui/common/OperitLogoMark.dart';
 import 'package:operit2/core/application/PluginHotReload.dart';
 import 'package:operit2/core/bridge/OperitRuntimeBridge.dart';
 import 'package:operit2/core/link/CoreLinkCodec.dart';
@@ -28,6 +31,7 @@ import 'package:operit2/ui/main/components/NavigationDrawerAppearance.dart';
 import 'package:operit2/ui/main/navigation/AppNavigationModels.dart';
 import 'package:operit2/ui/main/screens/ScreenRouteRegistry.dart';
 import 'package:operit2/ui/theme/OperitTheme.dart';
+import 'package:operit2/ui/window/DesktopWindowChrome.dart';
 import 'package:operit2/ui/main/navigation/ToolPkgCatalogChangeBus.dart';
 
 const _tabPreference = 'chat_sidebar_tab_v1';
@@ -37,7 +41,7 @@ const _workspaceKey = ValueKey('native-workspace-content');
 /// Covers real sidebar registrations, embedded routes, and validated host activation.
 void main() {
   testWidgets(
-    'desktop drawer expands before revealing content and fades before shrinking',
+    'desktop conversation panel animates beside a fixed navigation rail',
     (tester) async {
       final bridge = _registry();
       bridge.entries.removeWhere(
@@ -84,20 +88,20 @@ void main() {
       expect(launcher, findsNothing);
       await tester.pump(const Duration(milliseconds: 1));
       expect(drawer, findsOneWidget);
-      expect(tester.getTopLeft(content).dx, 280);
+      expect(tester.getTopLeft(content).dx, 336);
       await tester.pumpAndSettle();
-      expect(collapsed, findsNothing);
+      expect(collapsed, findsOneWidget);
       final firstSession = tester.state(launcher);
 
       expanded.value = false;
       await tester.pump();
       expect(collapsed, findsOneWidget);
       await tester.pump(const Duration(milliseconds: 159));
-      expect(tester.getTopLeft(content).dx, 280);
+      expect(tester.getTopLeft(content).dx, 336);
       await tester.pump(const Duration(milliseconds: 1));
       await tester.pump(const Duration(milliseconds: 140));
       expect(tester.getTopLeft(content).dx, greaterThan(56));
-      expect(tester.getTopLeft(content).dx, lessThan(280));
+      expect(tester.getTopLeft(content).dx, lessThan(336));
       await tester.pumpAndSettle();
       expect(tester.getTopLeft(content).dx, 56);
       expect(drawer, findsNothing);
@@ -127,6 +131,236 @@ void main() {
       await tester.pumpAndSettle();
     },
   );
+
+  testWidgets(
+    'desktop navigation stays fixed across chat and settings',
+    (tester) async {
+      final bridge = _registry();
+      final expanded = ValueNotifier(true);
+      final selectedRoute = ValueNotifier(
+        ScreenRouteRegistry.routeIdOf(ScreenRouteRegistry.aiChat),
+      );
+      final conversations = ValueNotifier(
+        const DrawerConversationState(loading: false),
+      );
+      addTearDown(expanded.dispose);
+      addTearDown(selectedRoute.dispose);
+      addTearDown(conversations.dispose);
+      await tester.pumpWidget(
+        _tabletSidebar(
+          bridge,
+          expanded,
+          conversations,
+          selectedRoute: selectedRoute,
+        ),
+      );
+      await tester.pumpAndSettle();
+      final rail = find.byKey(const ValueKey('desktop-primary-navigation'));
+      final originalRect = tester.getRect(rail);
+      final themeToggle = find.byKey(const ValueKey('desktop-theme-toggle'));
+      final themeToggleRect = tester.getRect(themeToggle);
+      expect(themeToggle.hitTestable(), findsOneWidget);
+      expect(themeToggleRect.size, const Size(40, 40));
+      expect(themeToggleRect.center.dx, originalRect.center.dx);
+      expect(
+        themeToggleRect.center.dy,
+        greaterThan(
+          tester.getCenter(find.byIcon(Icons.inventory_2_outlined)).dy,
+        ),
+      );
+      expect(
+        themeToggleRect.center.dy,
+        lessThan(tester.getCenter(find.byIcon(Icons.settings_outlined)).dy),
+      );
+      expect(find.byTooltip('切换黑夜模式'), findsOneWidget);
+      expect(originalRect.width, 56);
+      expect(find.byType(DrawerContent), findsOneWidget);
+      expect(find.byType(BottomSidebarAction), findsNothing);
+      expect(find.text('Operit'), findsOneWidget);
+      expect(find.byType(SidebarInfoCard), findsOneWidget);
+
+      await tester.tap(find.byIcon(Icons.settings_outlined));
+      await tester.pumpAndSettle();
+      expect(
+        selectedRoute.value,
+        ScreenRouteRegistry.routeIdOf(ScreenRouteRegistry.settings),
+      );
+      expect(find.byType(DrawerContent), findsNothing);
+      expect(tester.getRect(rail), originalRect);
+      expect(themeToggle.hitTestable(), findsOneWidget);
+      expect(tester.getRect(themeToggle), themeToggleRect);
+      expect(tester.getTopLeft(find.text('Desktop content')).dx, 57);
+
+      expanded.value = false;
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(Icons.chat_bubble_outline));
+      await tester.pumpAndSettle();
+      expect(expanded.value, isTrue);
+      expect(find.byType(DrawerContent), findsOneWidget);
+      expect(tester.getRect(rail), originalRect);
+      expect(themeToggle.hitTestable(), findsOneWidget);
+      expect(tester.getRect(themeToggle), themeToggleRect);
+      expect(tester.getTopLeft(find.text('Desktop content')).dx, 337);
+
+      await tester.tap(find.byIcon(Icons.chat_bubble_outline));
+      await tester.pumpAndSettle();
+      expect(expanded.value, isFalse);
+      expect(find.byType(DrawerContent), findsNothing);
+      expect(tester.getRect(rail), originalRect);
+      expect(tester.getTopLeft(find.text('Desktop content')).dx, 57);
+
+      await tester.tap(find.byIcon(Icons.chat_bubble_outline));
+      await tester.pumpAndSettle();
+      expect(expanded.value, isTrue);
+      expect(find.byType(DrawerContent), findsOneWidget);
+      expect(tester.getRect(rail), originalRect);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+    },
+    variant: TargetPlatformVariant({TargetPlatform.macOS}),
+  );
+
+  for (final initialRoute in [
+    ScreenRouteRegistry.aiChat,
+    ScreenRouteRegistry.settings,
+  ]) {
+    testWidgets(
+      'desktop new chat preserves collapsed sidebar from $initialRoute',
+      (tester) async {
+        final bridge = _registry();
+        final expanded = ValueNotifier(false);
+        final selectedRoute = ValueNotifier(
+          ScreenRouteRegistry.routeIdOf(initialRoute),
+        );
+        final conversations = ValueNotifier(
+          const DrawerConversationState(loading: false),
+        );
+        addTearDown(expanded.dispose);
+        addTearDown(selectedRoute.dispose);
+        addTearDown(conversations.dispose);
+        addTearDown(() => newChatIntroArmed.value = false);
+        await tester.pumpWidget(
+          _tabletSidebar(
+            bridge,
+            expanded,
+            conversations,
+            selectedRoute: selectedRoute,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.byIcon(Icons.add_comment_outlined));
+        await tester.pumpAndSettle();
+
+        expect(
+          bridge.calls.where((call) => call.methodName == 'createNewChat'),
+          hasLength(1),
+        );
+        expect(
+          selectedRoute.value,
+          ScreenRouteRegistry.routeIdOf(ScreenRouteRegistry.aiChat),
+        );
+        expect(expanded.value, isFalse);
+        expect(find.byType(DrawerContent), findsNothing);
+        expect(newChatIntroArmed.value, isTrue);
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpAndSettle();
+      },
+      variant: TargetPlatformVariant({TargetPlatform.macOS}),
+    );
+  }
+
+  for (final topInset in <double>[0, 24]) {
+    for (final pluginTab in <bool>[false, true]) {
+      testWidgets(
+        'desktop sidebar header stays aligned with the top bar '
+        '(top inset: $topInset, plugin tab: $pluginTab)',
+        (tester) async {
+          tester.view.devicePixelRatio = 1;
+          addTearDown(tester.view.resetDevicePixelRatio);
+          tester.view.padding = FakeViewPadding(top: topInset);
+          tester.view.viewPadding = FakeViewPadding(top: topInset);
+          addTearDown(tester.view.resetPadding);
+          addTearDown(tester.view.resetViewPadding);
+          final bridge = _registry();
+          bridge.preferences[_tabPreference] = pluginTab
+              ? chatSidebarTabIdentity('owner.first', 'history')
+              : UserPreferencesManager.CHAT_SIDEBAR_WORKSPACE_TAB;
+          final expanded = ValueNotifier(false);
+          final conversations = ValueNotifier(
+            const DrawerConversationState(loading: false),
+          );
+          addTearDown(expanded.dispose);
+          addTearDown(conversations.dispose);
+          await tester.pumpWidget(
+            _tabletSidebar(
+              bridge,
+              expanded,
+              conversations,
+              content: Column(
+                children: [
+                  ThemeTopBarChrome(
+                    title: const Text('Chat title'),
+                    contentColor: Colors.white,
+                    contentForeground: Colors.black,
+                    topPadding: topInset,
+                  ),
+                  const Expanded(child: SizedBox.expand()),
+                ],
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+          final title = find.text('Chat title');
+          final centerY = tester.getCenter(title).dy;
+          expect(
+            centerY,
+            closeTo(
+              DesktopContentPanel.contentInsets.top +
+                  topInset +
+                  ThemeTopBarChrome.toolbarHeight / 2,
+              0.01,
+            ),
+          );
+          expect(
+            tester.getCenter(find.byType(OperitLogoMark)).dy,
+            closeTo(centerY, 0.01),
+          );
+
+          expanded.value = true;
+          await tester.pumpAndSettle();
+          expect(
+            tester.getCenter(find.text('Operit')).dy,
+            closeTo(centerY, 0.01),
+          );
+          expect(
+            tester.getCenter(find.byTooltip('收起会话列表')).dy,
+            closeTo(centerY, 0.01),
+          );
+          expect(tester.getCenter(title).dy, closeTo(centerY, 0.01));
+          expect(tester.takeException(), isNull);
+
+          await tester.tap(find.byTooltip('收起会话列表'));
+          await tester.pumpAndSettle();
+          expect(
+            tester.getCenter(find.byType(OperitLogoMark)).dy,
+            closeTo(centerY, 0.01),
+          );
+          expect(tester.getCenter(title).dy, closeTo(centerY, 0.01));
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pumpAndSettle();
+        },
+        variant: TargetPlatformVariant({
+          TargetPlatform.android,
+          TargetPlatform.macOS,
+          TargetPlatform.windows,
+          TargetPlatform.linux,
+        }),
+      );
+    }
+  }
 
   testWidgets('desktop drawer cancels pending transitions on rapid toggles', (
     tester,
@@ -168,8 +402,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 280));
     await tester.pumpAndSettle();
     expect(find.byType(DrawerContent), findsOneWidget);
-    expect(find.byType(CollapsedDrawerContent), findsNothing);
-    expect(tester.getTopLeft(find.text('Desktop content')).dx, 280);
+    expect(find.byType(CollapsedDrawerContent), findsOneWidget);
+    expect(tester.getTopLeft(find.text('Desktop content')).dx, 336);
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pumpAndSettle();
   });
@@ -436,6 +670,32 @@ void main() {
       expect(() => chatSidebarActivation(malformed), throwsFormatException);
     }
   });
+
+  for (final type in [
+    'toolpkg.chat.searchMessages',
+    'toolpkg.chat.viewFavorites',
+  ]) {
+    test('$type requires an exact chat request', () {
+      expect(chatSidebarLookupRequest(null), isNull);
+      final request = chatSidebarLookupRequest({
+        'type': type,
+        'chatId': 'chat-a',
+      })!;
+      expect(request.chatId, 'chat-a');
+      expect(request.favoritesOnly, type == 'toolpkg.chat.viewFavorites');
+      for (final malformed in <Object?>[
+        {'type': type},
+        {'type': type, 'chatId': ' '},
+        {'type': type, 'chatId': 42},
+        {'type': type, 'chatId': 'chat-a', 'extra': true},
+      ]) {
+        expect(
+          () => chatSidebarLookupRequest(malformed),
+          throwsFormatException,
+        );
+      }
+    });
+  }
 
   test(
     'detached-window requests require exactly type and a nonblank chatId',
@@ -1292,6 +1552,42 @@ void main() {
     },
   );
 
+  for (final type in [
+    'toolpkg.chat.searchMessages',
+    'toolpkg.chat.viewFavorites',
+  ]) {
+    testWidgets(
+      'plugin $type validates and activates before requesting lookup',
+      (tester) async {
+        final bridge = _registry();
+        final activated = <String>[];
+        final activation = Completer<void>();
+        await tester.pumpWidget(
+          _host(
+            bridge,
+            onActivate: activated.add,
+            onActivateAsync: (_) => activation.future,
+          ),
+        );
+        await tester.pumpAndSettle();
+        await _openFirstTab(tester);
+        _launcher(tester).onActionResult!({'type': type, 'chatId': 'chat-a'});
+        await tester.pumpAndSettle();
+        expect(activated, ['chat-a']);
+        expect(ChatMessageLookupRequests.requests.value, isNull);
+        activation.complete();
+        await tester.pumpAndSettle();
+        final request = ChatMessageLookupRequests.requests.value!;
+        expect(request.chatId, 'chat-a');
+        expect(request.favoritesOnly, type == 'toolpkg.chat.viewFavorites');
+        ChatMessageLookupRequests.consume(request);
+        expect(bridge.historyReads, 1);
+        expect(bridge.catalogReads, 2);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
   testWidgets(
     'detached windows validate current metadata without activating the chat',
     (tester) async {
@@ -1556,10 +1852,85 @@ void main() {
       expect(find.byType(ToolPkgUiLauncherScreen), findsNothing);
     },
   );
+  for (final width in <double>[320, 520]) {
+    testWidgets(
+      'workspace preview arrow aligns with the group icon at width $width',
+      (tester) async {
+        await tester.binding.setSurfaceSize(Size(width, 800));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final bridge = _registry();
+        final histories = List.generate(
+          6,
+          (index) => core.ChatHistoryListItem.fromJson({
+            ..._chat('preview-$index').toJson(),
+            'pinned': false,
+          }),
+        );
+        await tester.pumpWidget(
+          _nativeDrawer(
+            bridge,
+            expanded: true,
+            currentChatId: null,
+            histories: histories,
+            onActivated: () {},
+          ),
+        );
+        await tester.pumpAndSettle();
+        final preview = find.byKey(
+          const ValueKey(
+            'history-limit:workspace:workspace-a::group:legacy-native-folder',
+          ),
+        );
+        final group = find.byKey(
+          const ValueKey(
+            'workspace-group:workspace:workspace-a::group:legacy-native-folder',
+          ),
+        );
+        final folder = find.descendant(
+          of: group,
+          matching: find.byIcon(Icons.folder_outlined),
+        );
+        expect(tester.getSize(preview).width, tester.getSize(group).width);
+        expect(find.text('展开更多 2'), findsOneWidget);
+        expect(
+          tester
+              .getCenter(
+                find.descendant(
+                  of: preview,
+                  matching: find.byIcon(Icons.expand_more),
+                ),
+              )
+              .dx,
+          closeTo(tester.getCenter(folder).dx, 0.01),
+        );
+
+        await tester.tap(find.text('展开更多 2'));
+        await tester.pumpAndSettle();
+        expect(find.text('Title preview-5'), findsOneWidget);
+        expect(
+          tester
+              .getCenter(
+                find.descendant(
+                  of: preview,
+                  matching: find.byIcon(Icons.expand_less),
+                ),
+              )
+              .dx,
+          closeTo(tester.getCenter(folder).dx, 0.01),
+        );
+        await tester.tap(find.text('收起'));
+        await tester.pumpAndSettle();
+        expect(find.text('Title preview-5'), findsNothing);
+        expect(find.text('展开更多 2'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
   for (final expanded in <bool>[true, false]) {
-    for (final source in <String?>['chat-a', null]) {
+    for (final source in <String?>['chat-a', 'chat-b', 'missing-chat', null]) {
       testWidgets(
-        '${expanded ? 'expanded' : 'collapsed'} native create forwards exact nullable source $source',
+        '${expanded ? 'expanded' : 'collapsed'} native create inherits only the selected workspace for $source',
         (tester) async {
           final bridge = _registry();
           var activations = 0;
@@ -1568,6 +1939,11 @@ void main() {
               bridge,
               expanded: expanded,
               currentChatId: source,
+              histories: [
+                _chat('other-chat', workspaceId: 'workspace-other'),
+                _chat('chat-a'),
+                _chat('chat-b', workspaceId: null),
+              ],
               onActivated: () => activations++,
             ),
           );
@@ -1583,8 +1959,9 @@ void main() {
           );
           expect(request.args, {
             'setAsCurrentChat': true,
-            'sourceChatId': source,
+            'sourceChatId': null,
             'parentChatId': null,
+            'workspaceId': source == 'chat-a' ? 'workspace-a' : null,
             'input': null,
           });
           expect(activations, 1);
@@ -1630,6 +2007,40 @@ void main() {
       },
     );
   }
+
+  testWidgets(
+    'collapsed creation respects committed plugin and workspace tab changes',
+    (tester) async {
+      final bridge = _registry();
+      bridge.preferences[_tabPreference] = chatSidebarTabIdentity(
+        'owner.first',
+        'history',
+      );
+      await tester.pumpWidget(
+        _nativeDrawer(
+          bridge,
+          expanded: false,
+          currentChatId: 'chat-a',
+          histories: [_chat('chat-a')],
+          onActivated: () {},
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(Icons.add_comment_outlined));
+      await tester.pumpAndSettle();
+      bridge.commitPreferences({
+        _tabPreference: UserPreferencesManager.CHAT_SIDEBAR_WORKSPACE_TAB,
+      });
+      await tester.tap(find.byIcon(Icons.add_comment_outlined));
+      await tester.pumpAndSettle();
+      final requests = bridge.calls
+          .where((call) => call.methodName == 'createNewChat')
+          .toList();
+      expect(requests, hasLength(2));
+      expect((requests[0].args as Map)['workspaceId'], isNull);
+      expect((requests[1].args as Map)['workspaceId'], 'workspace-a');
+    },
+  );
 
   testWidgets(
     'native row reordering uses only the approved generic canonical order arguments',
@@ -1733,8 +2144,10 @@ Widget _nativeDrawer(
                   ScreenRouteRegistry.routeIdOf(ScreenRouteRegistry.aiChat),
               appearance: _appearance,
               currentChatId: currentChatId,
+              histories: histories,
               bridge: bridge,
               onNavigationEntrySelected: (_) {},
+              onConversationNavigationPressed: onActivated,
               onConversationActivated: onActivated,
             ),
     ),
@@ -1860,21 +2273,24 @@ core.ToolPkgUiRoute _route(String owner) => core.ToolPkgUiRoute(
 );
 
 /// Decodes the generated canonical DTO while proving legacy metadata never enters tab state.
-core.ChatHistoryListItem _chat(String id, {String? title}) =>
-    core.ChatHistoryListItem.fromJson({
-      'id': id,
-      'title': title ?? 'Title $id',
-      'updatedAt': '2026-10-08T12:00:00Z',
-      'displayOrder': 3,
-      'workspaceId': 'workspace-a',
-      'workspaceName': 'Workspace A',
-      'locked': true,
-      'pinned': true,
-      'group': 'legacy-native-folder',
-      'parentChatId': null,
-      'characterCardName': 'legacy-card-not-forwarded',
-      'characterGroupId': 'legacy-subject-not-forwarded',
-    });
+core.ChatHistoryListItem _chat(
+  String id, {
+  String? title,
+  String? workspaceId = 'workspace-a',
+}) => core.ChatHistoryListItem.fromJson({
+  'id': id,
+  'title': title ?? 'Title $id',
+  'updatedAt': '2026-10-08T12:00:00Z',
+  'displayOrder': 3,
+  'workspaceId': workspaceId,
+  'workspaceName': workspaceId == null ? null : 'Workspace A',
+  'locked': true,
+  'pinned': true,
+  'group': 'legacy-native-folder',
+  'parentChatId': null,
+  'characterCardName': 'legacy-card-not-forwarded',
+  'characterGroupId': 'legacy-subject-not-forwarded',
+});
 
 /// Exercises generated catalog, preference, watch, and Compose render codecs.
 class _SidebarRegistryBridge extends OperitRuntimeBridge {
@@ -1909,6 +2325,7 @@ class _SidebarRegistryBridge extends OperitRuntimeBridge {
   final List<core.ToolPkgUiRoute> routes;
   final List<core.ChatHistoryListItem> chats;
   final Map<String, String> preferences = {};
+  final Map<String, Object?> directoryPreferences = {};
   final List<CoreCallRequest> calls = [];
   final List<Map<String, Object?>> renderedStates = [];
   final Set<String> disabledOwners = {};
@@ -1934,6 +2351,23 @@ class _SidebarRegistryBridge extends OperitRuntimeBridge {
   }
 
   /// Implements only calls made by the production embedded sidebar and preferences.
+  List<Map<String, Object?>> _workspaceValues() {
+    final workspaces = <String, Map<String, Object?>>{};
+    for (final chat in chats) {
+      final id = chat.workspaceId;
+      final name = chat.workspaceName;
+      if (id == null || name == null) continue;
+      workspaces[id] = <String, Object?>{
+        'id': id,
+        'name': name,
+        'folders': <Object?>[],
+        'createdAt': 0,
+        'updatedAt': 0,
+      };
+    }
+    return workspaces.values.toList(growable: false);
+  }
+
   @override
   Future<Uint8List> callBytes(CoreCallRequest request) async {
     calls.add(request);
@@ -1941,11 +2375,32 @@ class _SidebarRegistryBridge extends OperitRuntimeBridge {
     Object? value;
     switch (request.methodName) {
       case 'getPreferences':
-        expect(args['fileName'], _preferenceFile);
-        value = <String, String>{
-          for (final key in (args['keys'] as List).cast<String>())
-            if (preferences[key] case final String stored) key: stored,
-        };
+        final fileName = args['fileName'];
+        if (fileName == _preferenceFile) {
+          value = <String, String>{
+            for (final key in (args['keys'] as List).cast<String>())
+              if (preferences[key] case final String stored) key: stored,
+          };
+        } else if (fileName == 'sidebar_dock.preferences.json') {
+          value = <String, Object?>{
+            for (final key in (args['keys'] as List).cast<String>())
+              if (directoryPreferences.containsKey(key))
+                key: directoryPreferences[key],
+          };
+        } else {
+          throw StateError('Unexpected preference file: $fileName');
+        }
+      case 'getPreference':
+        expect(args['fileName'], 'sidebar_dock.preferences.json');
+        value = directoryPreferences[args['key']];
+      case 'setPreference':
+        expect(args['fileName'], 'sidebar_dock.preferences.json');
+        directoryPreferences[args['key'] as String] = args['value'];
+        value = null;
+      case 'removePreference':
+        expect(args['fileName'], 'sidebar_dock.preferences.json');
+        directoryPreferences.remove(args['key']);
+        value = null;
       case 'setPreferences':
         expect(args['fileName'], _preferenceFile);
         commitPreferences({
@@ -1953,6 +2408,8 @@ class _SidebarRegistryBridge extends OperitRuntimeBridge {
           ...(args['values'] as Map).cast<String, String>(),
         });
         value = null;
+      case 'listWorkspaces':
+        value = _workspaceValues();
       case 'getToolPkgPublicApiOwners':
         value = [
           {
@@ -2007,7 +2464,13 @@ class _SidebarRegistryBridge extends OperitRuntimeBridge {
   @override
   Stream<CoreEvent> watchStream(CoreWatchRequest request) {
     if (request.propertyName == 'preferencesFlow') {
-      expect((request.args as Map)['fileName'], _preferenceFile);
+      final fileName = (request.args as Map)['fileName'];
+      if (fileName == 'sidebar_dock.preferences.json') {
+        return Stream<CoreEvent>.value(
+          _event(request, Map<String, Object?>.of(directoryPreferences)),
+        );
+      }
+      expect(fileName, _preferenceFile);
       late final StreamController<CoreEvent> controller;
       controller = StreamController<CoreEvent>(
         onListen: () => controller.add(
@@ -2017,6 +2480,9 @@ class _SidebarRegistryBridge extends OperitRuntimeBridge {
       );
       _preferenceWatches[request] = controller;
       return controller.stream;
+    }
+    if (request.propertyName == 'allWorkspacesFlow') {
+      return Stream<CoreEvent>.value(_event(request, _workspaceValues()));
     }
     if (request.propertyName == 'chatHistoryListItemsFlow') {
       historyReads += 1;
@@ -2251,8 +2717,10 @@ class _PreparationBridge extends OperitRuntimeBridge {
 Widget _tabletSidebar(
   _SidebarRegistryBridge bridge,
   ValueNotifier<bool> expanded,
-  ValueNotifier<DrawerConversationState> conversations,
-) => OperitTheme(
+  ValueNotifier<DrawerConversationState> conversations, {
+  Widget content = const Text('Desktop content'),
+  ValueNotifier<String>? selectedRoute,
+}) => OperitTheme(
   initialThemePreferenceSnapshot:
       UserPreferencesManager.defaultThemePreferenceSnapshot,
   initialThemeIsReady: false,
@@ -2262,11 +2730,11 @@ Widget _tabletSidebar(
     localizationsDelegates: AppLocalizations.localizationsDelegates,
     supportedLocales: AppLocalizations.supportedLocales,
     home: Scaffold(
-      body: ValueListenableBuilder<bool>(
-        valueListenable: expanded,
-        builder: (_, open, _) => TabletLayout(
+      body: AnimatedBuilder(
+        animation: Listenable.merge([expanded, ?selectedRoute]),
+        builder: (_, _) => TabletLayout(
           bridge: bridge,
-          content: const Text('Desktop content'),
+          content: content,
           navigationEntries: const [
             NavigationEntrySpec(
               entryId: 'main.ai_chat',
@@ -2291,15 +2759,25 @@ Widget _tabletSidebar(
             ),
           ],
           pluginSidebarEntries: const [],
-          selectedRouteId: ScreenRouteRegistry.routeIdOf(
-            ScreenRouteRegistry.aiChat,
-          ),
+          selectedRouteId:
+              selectedRoute?.value ??
+              ScreenRouteRegistry.routeIdOf(ScreenRouteRegistry.aiChat),
           drawerConversationState: conversations,
-          isTabletSidebarExpanded: open,
+          isTabletSidebarExpanded: expanded.value,
           tabletSidebarWidth: 280,
           collapsedTabletSidebarWidth: 56,
-          onNavigationEntrySelected: (_) {},
-          onConversationActivated: () {},
+          onExpandSidebar: () => expanded.value = true,
+          onCollapseSidebar: () => expanded.value = false,
+          onNavigationEntrySelected: (entry) {
+            selectedRoute?.value = entry.entryId == 'main.settings'
+                ? ScreenRouteRegistry.routeIdOf(ScreenRouteRegistry.settings)
+                : entry.routeId;
+          },
+          onConversationActivated: () {
+            selectedRoute?.value = ScreenRouteRegistry.routeIdOf(
+              ScreenRouteRegistry.aiChat,
+            );
+          },
         ),
       ),
     ),

@@ -1002,24 +1002,24 @@ impl ChatHistoryDelegate {
     }
 
     #[allow(non_snake_case)]
-    /// Loads messages used when inserting or refreshing conversation summaries.
+    /// Loads visible messages after the latest summary within the insertion target range.
     pub fn loadMessagesForSummaryInsertion(
         &self,
         chatId: String,
         beforeTimestampExclusive: Option<i64>,
         upToTimestampInclusive: Option<i64>,
     ) -> Vec<ChatMessage> {
-        self.getRuntimeChatHistory(chatId)
+        self.chatHistoryManager
+            .loadMessagesAfterLatestSummaryInRange(
+                chatId,
+                beforeTimestampExclusive,
+                upToTimestampInclusive,
+            )
+            .expect("ChatHistoryManager.loadMessagesAfterLatestSummaryInRange must succeed")
             .into_iter()
             .filter(|message| {
-                beforeTimestampExclusive
-                    .map(|ts| message.timestamp < ts)
-                    .unwrap_or(true)
-            })
-            .filter(|message| {
-                upToTimestampInclusive
-                    .map(|ts| message.timestamp <= ts)
-                    .unwrap_or(true)
+                message.displayMode
+                    != operit_model::ChatMessageDisplayMode::ChatMessageDisplayMode::HIDDEN_PLACEHOLDER
             })
             .collect()
     }
@@ -1236,7 +1236,16 @@ impl ChatHistoryDelegate {
                 .currentChatIdFlow()
                 .map_err(|error| error.to_string())?;
             if let Some(chatId) = selected {
-                self.openChatHistory(chatId, false)?;
+                let exists = self.chatHistoryManager.chatExists(chatId.clone())
+                    .map_err(|error| error.to_string())?;
+                if !exists && self.chatHistoryManager.chatIsDeleted(&chatId)
+                    .map_err(|error| error.to_string())?
+                {
+                    self.chatHistoryManager.clearCurrentChatId()
+                        .map_err(|error| error.to_string())?;
+                } else {
+                    self.openChatHistory(chatId, false)?;
+                }
             }
         }
         self.isInitialized = true;
@@ -1344,6 +1353,7 @@ impl ChatHistoryDelegate {
         setAsCurrentChat: bool,
         sourceChatId: Option<String>,
         parentChatId: Option<String>,
+        workspaceId: Option<String>,
         input: Option<Value>,
     ) -> Result<String, String> {
         self.createChatDraft(
@@ -1352,6 +1362,7 @@ impl ChatHistoryDelegate {
             setAsCurrentChat,
             sourceChatId,
             parentChatId,
+            workspaceId,
             None,
             input,
         )
@@ -1366,6 +1377,7 @@ impl ChatHistoryDelegate {
         setAsCurrentChat: bool,
         sourceChatId: Option<String>,
         parentChatId: Option<String>,
+        workspaceId: Option<String>,
         sourceMessageTimestamp: Option<i64>,
         input: Option<Value>,
     ) -> Result<String, String> {
@@ -1390,9 +1402,32 @@ impl ChatHistoryDelegate {
         if isBranch && source.is_none() {
             return Err("Branch creation requires a source chat".to_string());
         }
-        let workspaceId = source.as_ref().and_then(|chat| chat.workspaceId.clone());
+        let inheritedWorkspaceId = source
+            .as_ref()
+            .and_then(|chat| chat.workspaceId.clone());
+        let requestedWorkspaceId = workspaceId.map(|id| id.trim().to_string());
+        if requestedWorkspaceId.as_deref() == Some("") {
+            return Err("workspace id must not be blank".to_string());
+        }
+        let workspaceId = match (requestedWorkspaceId, inheritedWorkspaceId) {
+            (Some(requested), Some(inherited)) if requested != inherited => {
+                return Err(format!(
+                    "source chat workspace does not match requested workspace: {inherited} != {requested}"
+                ));
+            }
+            (Some(requested), _) => Some(requested),
+            (None, inherited) => inherited,
+        };
+        let parentChatId = parentChatId.or_else(|| {
+            if isBranch {
+                sourceChatId.clone()
+            } else {
+                None
+            }
+        });
         if let Some(id) = &parentChatId {
-            self.chatHistoryManager.loadChatHistory(id.clone())
+            self.chatHistoryManager
+                .loadChatHistory(id.clone())
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| format!("Parent chat does not exist: {id}"))?;
         }
@@ -1615,6 +1650,7 @@ impl ChatHistoryDelegate {
             true,
             Some(sourceChatId.clone()),
             Some(sourceChatId),
+            None,
             upToMessageTimestamp,
             None,
         )
@@ -1646,19 +1682,26 @@ impl ChatHistoryDelegate {
     }
 
     #[allow(non_snake_case)]
+    /// Clears the parent relationship through the shared history repository.
+    pub fn promoteChatToRoot(&mut self, chatId: String) -> Result<(), String> {
+        self.chatHistoryManager
+            .promoteChatToRoot(chatId)
+            .map_err(|error| error.to_string())
+    }
+
+    #[allow(non_snake_case)]
     /// Releases owner state before deleting an unlocked conversation and its in-memory projection.
     pub async fn deleteChatHistory(
         &mut self,
         service: &EnhancedAIService,
         chatId: String,
     ) -> Result<bool, String> {
-        self.requireChatExists(&chatId)?;
         let canDelete = self
             .chatHistoryManager
             .canDeleteChatHistory(chatId.clone())
             .map_err(|error| error.to_string())?;
         if !canDelete {
-            return Err(format!("Chat is locked: {chatId}"));
+            return Err(format!("Chat is locked or does not exist: {chatId}"));
         }
         let api = ChatConfigurationApi::ready(&service.tool_handler).await;
         self.prepareChatForDestructiveMutation(chatId.clone());
@@ -1670,6 +1713,19 @@ impl ChatHistoryDelegate {
         if !deleted {
             return Err(format!("Core conversation deletion failed: {chatId}"));
         }
+        self.clearDeletedChatState(chatId)?;
+        Ok(true)
+    }
+
+    /// Clears local projections of a committed deletion without invoking configuration owners again.
+    pub(crate) fn clearDeletedChatState(&mut self, chatId: String) -> Result<(), String> {
+        if self.chatHistoryManager.currentChatIdFlow()
+            .map_err(|error| error.to_string())?
+            .as_ref() == Some(&chatId)
+        {
+            self.chatHistoryManager.clearCurrentChatId()
+                .map_err(|error| error.to_string())?;
+        }
         if self.currentChatIdFlow.value().as_ref() == Some(&chatId) {
             self.currentChatIdFlow.set_value(None);
             self.clearCurrentChatHistoryInMemory();
@@ -1679,7 +1735,7 @@ impl ChatHistoryDelegate {
         });
         self.clearChatFlow(&chatId);
         self.finishDestructiveHistoryMutation(chatId);
-        Ok(true)
+        Ok(())
     }
 
     #[allow(non_snake_case)]
@@ -1917,7 +1973,7 @@ impl ChatHistoryDelegate {
         } else if selection.starts_with("content://") {
             // Keep compatibility with callers that submit a raw authorized tree URI.
             Some(operit_tools::files::MountRegistry::MountSource {
-                namespace: "/mnt/android/documents".into(),
+                namespace: "/virtual/android/documents".into(),
                 backend: "android_documents".into(),
                 root: selection.into(),
                 name: "Documents".into(),
@@ -2479,9 +2535,9 @@ impl ChatHistoryDelegate {
         beforeTimestamp: Option<i64>,
         afterTimestamp: Option<i64>,
         chatIdOverride: Option<String>,
-    ) {
+    ) -> Option<ChatMessage> {
         let Some(chatId) = chatIdOverride.or_else(|| self.currentChatIdFlow.value()) else {
-            return;
+            return None;
         };
         let isCurrentChat = self.currentChatIdFlow.value().as_ref() == Some(&chatId);
         let persistedSummaryMessage = self
@@ -2493,28 +2549,14 @@ impl ChatHistoryDelegate {
                 afterTimestamp,
             )
             .expect("ChatHistoryManager.addSummaryMessageBetweenSliceNeighbors must succeed");
-        let Some(_) = persistedSummaryMessage else {
-            return;
+        let Some(persisted) = persistedSummaryMessage else {
+            return None;
         };
         if isCurrentChat {
             self.reloadCurrentChatDisplayHistory(chatId);
         }
+        Some(persisted)
     }
-
-    #[allow(non_snake_case)]
-    /// Returns whether the current token pressure requires summarization.
-    pub fn shouldGenerateSummary(
-        &self,
-        messages: Vec<ChatMessage>,
-        currentTokens: i64,
-        maxTokens: i32,
-    ) -> bool {
-        !messages.is_empty() && currentTokens >= i64::from(maxTokens)
-    }
-
-    #[allow(non_snake_case)]
-    /// Placeholder hook for summarizing chat memory.
-    pub fn summarizeMemory(&self, _messages: Vec<ChatMessage>) {}
 
     #[allow(non_snake_case)]
     /// Finds the insertion position after the latest AI message.

@@ -28,7 +28,7 @@ impl HostRuntimePeerService {
 
     /// Starts bounded, independent connection attempts; established channels monitor themselves.
     pub(super) fn startAvailabilityWorker(&self) -> Result<(), CoreLinkError> {
-        let mut worker = self.state.availability.lock().map_err(|_| error("Peer availability lock poisoned"))?;
+        let mut worker = self.state.availability.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if worker.is_some() { return Ok(()); }
         let scheduler = self.state.host.hostRuntimeTaskSchedulerHost.clone()
             .ok_or_else(|| error("Host scheduler is not installed"))?;
@@ -37,9 +37,11 @@ impl HostRuntimePeerService {
         let (stop, mut stopped) = oneshot::channel();
         let (done, finished) = oneshot::channel();
         scheduler.scheduleHostRuntimeAsyncTask("peer-availability", Box::new(move || Box::pin(async move {
+            // The subscription shares the Host browser with manual scans and lives only as long as this worker.
+            let _discovery = state.upgrade().and_then(|state| HostRuntimePeerService { state }.subscribeDiscovery());
             let mut pending = FuturesUnordered::<LocalBoxFuture<'static, (String, Result<(), CoreLinkError>)>>::new();
             let mut connecting = BTreeSet::new();
-            let mut policyRevokedUntil = BTreeMap::<String, std::time::Instant>::new();
+            let mut policyRevokedUntil = BTreeMap::<String, u64>::new();
             let mut tick = tasks.waitForHostRuntimeDelay(0);
             let mut lastPeer = None;
             loop {
@@ -51,7 +53,7 @@ impl HostRuntimePeerService {
                             connecting.remove(&node);
                             if let Err(error) = result {
                                 if error.code == "PEER_CONNECTION_REVOKED" {
-                                    policyRevokedUntil.insert(node.clone(), std::time::Instant::now() + std::time::Duration::from_millis(POLICY_REVOKED_BACKOFF_MS));
+                                    policyRevokedUntil.insert(node.clone(), tasks.monotonicTimeMillis().unwrap_or(0).saturating_add(POLICY_REVOKED_BACKOFF_MS));
                                 }
                                 if let Some(state) = state.upgrade() {
                                     HostRuntimePeerService { state }.refreshPeerAvailability(&node);
@@ -71,7 +73,7 @@ impl HostRuntimePeerService {
                                 continue;
                             }
                         };
-                        let now = std::time::Instant::now();
+                        let now = tasks.monotonicTimeMillis().unwrap_or(0);
                         policyRevokedUntil.retain(|_, until| *until > now);
                         // Round-robin admission prevents unreachable peers from monopolizing dial slots.
                         let mut peers = peers;
@@ -93,7 +95,9 @@ impl HostRuntimePeerService {
                             let service = service.clone();
                             pending.push(Box::pin(async move {
                                 // The acquisition carries its own connect deadline.
-                                let result = service.acquireChannel(&node).await.map(drop);
+                                let result = crate::fault_isolation::link(
+                                    &format!("connect peer={node}"), service.acquireChannel(&node),
+                                ).await.map(drop);
                                 (node, result)
                             }));
                         }
@@ -109,7 +113,7 @@ impl HostRuntimePeerService {
 
     /// Cancels connection establishment and waits without retaining the worker state lock.
     pub(super) async fn stopAvailabilityWorker(&self) {
-        let worker = self.state.availability.lock().unwrap().take();
+        let worker = self.state.availability.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
         if let Some(AvailabilityWorker { stop, done }) = worker {
             let _ = stop.send(());
             let _ = done.await;

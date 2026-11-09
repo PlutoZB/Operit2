@@ -9,6 +9,7 @@ use operit_model::ModelConfigData::{
     ModelBuiltinTool, ModelCapabilities, ModelContextSpec, ModelRequestSpec, ModelSummarySettings,
     ResolvedModelConfig,
 };
+use operit_model::ModelThinking::ThinkingLevel;
 
 use super::super::i18n::TuiText;
 use super::super::theme;
@@ -23,8 +24,7 @@ pub(crate) enum MainFocus {
     EnableSummary,
     SummaryDetails,
     StructuredTools,
-    ThinkingConfigurations,
-    ThinkingOption,
+    Thinking,
     BuiltinTool(usize),
 }
 
@@ -32,8 +32,6 @@ pub(crate) enum MainFocus {
 pub(crate) enum SummaryFocus {
     EnableSummary,
     TokenThreshold,
-    ByMessageCount,
-    MessageCountThreshold,
 }
 
 #[derive(Clone, PartialEq)]
@@ -62,8 +60,6 @@ pub(crate) struct EditorState {
     // Summary
     pub(crate) enable_summary: bool,
     pub(crate) summary_token_threshold: String,
-    pub(crate) enable_summary_by_message_count: bool,
-    pub(crate) summary_message_count_threshold: String,
 
     // Builtin tools
     pub(crate) builtin_tools: Vec<ModelBuiltinTool>,
@@ -72,10 +68,10 @@ pub(crate) struct EditorState {
     pub(crate) supports_structured_tools: bool,
     pub(crate) enable_claude_1h_prompt_cache: bool,
 
-    // Thinking
-    pub(crate) thinking_configurations: String,
-    pub(crate) thinking_option_id: String,
-    pub(crate) thinking_options: Vec<String>,
+    // Thinking: the levels the model offers and the one its requests use.
+    pub(crate) thinking_levels: Vec<ThinkingLevel>,
+    pub(crate) thinking_level: Option<ThinkingLevel>,
+    pub(crate) thinking_level_changed: bool,
 
     // UI state
     pub(crate) level: EditorLevel,
@@ -107,17 +103,12 @@ impl EditorState {
             max_context_length: format!("{:.0}", config.context.maxContextLength),
             enable_summary: config.summary.enableSummary,
             summary_token_threshold: config.summary.summaryTokenThreshold.to_string(),
-            enable_summary_by_message_count: config.summary.enableSummaryByMessageCount,
-            summary_message_count_threshold: format!(
-                "{}",
-                config.summary.summaryMessageCountThreshold
-            ),
             builtin_tools: config.builtinTools.clone(),
             supports_structured_tools: config.request.supportsStructuredTools,
             enable_claude_1h_prompt_cache: config.request.enableClaude1hPromptCache,
-            thinking_configurations: config.thinkingConfigurations.clone(),
-            thinking_option_id: config.thinkingOptionId.clone(),
-            thinking_options: Vec::new(),
+            thinking_levels: Vec::new(),
+            thinking_level: config.thinkingLevel,
+            thinking_level_changed: false,
             level: EditorLevel::Main,
             focus_index: 0,
             editing_field: false,
@@ -139,20 +130,33 @@ impl EditorState {
             items.push(MainFocus::SummaryDetails);
         }
         items.push(MainFocus::StructuredTools);
-        items.push(MainFocus::ThinkingConfigurations);
-        items.push(MainFocus::ThinkingOption);
+        if !self.thinking_levels.is_empty() {
+            items.push(MainFocus::Thinking);
+        }
         items.extend((0..self.builtin_tools.len()).map(MainFocus::BuiltinTool));
         items
+    }
+
+    /// Moves the thinking level to the next one the model offers, wrapping around.
+    pub(crate) fn cycle_thinking_level(&mut self) {
+        if self.thinking_levels.is_empty() {
+            return;
+        }
+        let next = match self
+            .thinking_level
+            .and_then(|level| self.thinking_levels.iter().position(|offered| *offered == level))
+        {
+            Some(index) => (index + 1) % self.thinking_levels.len(),
+            None => 0,
+        };
+        self.thinking_level = Some(self.thinking_levels[next]);
+        self.thinking_level_changed = true;
     }
 
     pub(crate) fn summary_focus_items(&self) -> Vec<SummaryFocus> {
         let mut items = vec![SummaryFocus::EnableSummary];
         if self.enable_summary {
             items.push(SummaryFocus::TokenThreshold);
-            items.push(SummaryFocus::ByMessageCount);
-            if self.enable_summary_by_message_count {
-                items.push(SummaryFocus::MessageCountThreshold);
-            }
         }
         items
     }
@@ -192,15 +196,9 @@ impl EditorState {
             summary: ModelSummarySettings {
                 enableSummary: self.enable_summary,
                 summaryTokenThreshold: self.summary_token_threshold.parse().unwrap_or(4096.0),
-                enableSummaryByMessageCount: self.enable_summary_by_message_count,
-                summaryMessageCountThreshold: self
-                    .summary_message_count_threshold
-                    .parse()
-                    .unwrap_or(10),
             },
             builtin_tools: self.builtin_tools.clone(),
-            thinking_configurations: self.thinking_configurations.clone(),
-            thinking_option_id: self.thinking_option_id.clone(),
+            thinking_level: self.thinking_level.filter(|_| self.thinking_level_changed),
         }
     }
 
@@ -241,28 +239,28 @@ impl EditorState {
             text,
         );
 
-        items.push(ListItem::new(vec![Line::from(Span::styled(
-            "── Thinking ──",
-            Style::default().fg(theme::ACCENT_DIM),
-        ))]));
-        self.push_edit_item(
-            &mut items,
-            MainFocus::ThinkingOption,
-            "Thinking option",
-            &self.thinking_option_id,
-        );
-        if !self.thinking_options.is_empty() {
+        if !self.thinking_levels.is_empty() {
             items.push(ListItem::new(vec![Line::from(Span::styled(
-                format!("Available options: {}", self.thinking_options.join(", ")),
+                "── Thinking ──",
+                Style::default().fg(theme::ACCENT_DIM),
+            ))]));
+            let current = match self.thinking_level {
+                Some(level) => level.name(),
+                None => "-",
+            };
+            self.push_edit_item(&mut items, MainFocus::Thinking, "Thinking level", current);
+            items.push(ListItem::new(vec![Line::from(Span::styled(
+                format!(
+                    "Enter cycles: {}",
+                    self.thinking_levels
+                        .iter()
+                        .map(|level| level.name())
+                        .collect::<Vec<_>>()
+                        .join(" / ")
+                ),
                 Style::default().fg(theme::TEXT_SUBTLE),
             ))]));
         }
-        self.push_edit_item(
-            &mut items,
-            MainFocus::ThinkingConfigurations,
-            "Thinking rules JSON",
-            &self.thinking_configurations,
-        );
         self.push_toggle_item(
             &mut items,
             MainFocus::DirectImage,
@@ -561,77 +559,6 @@ impl EditorState {
                     Style::default().fg(theme::TEXT_MUTED),
                 ))]));
             }
-
-            // Enable Summary By Message Count toggle
-            let is_focused = self.focused_summary_item() == Some(SummaryFocus::ByMessageCount);
-            if is_focused {
-                items.push(ListItem::new(vec![Line::from(Span::styled(
-                    format!(
-                        "{}: {}",
-                        text.config_editor_by_message_count(),
-                        if self.enable_summary_by_message_count {
-                            text.config_yes()
-                        } else {
-                            text.config_no()
-                        }
-                    ),
-                    Style::default()
-                        .bg(theme::ACCENT_BG)
-                        .fg(theme::TEXT)
-                        .add_modifier(Modifier::BOLD),
-                ))]));
-            } else {
-                items.push(ListItem::new(vec![Line::from(Span::styled(
-                    format!(
-                        "{}: {}",
-                        text.config_editor_by_message_count(),
-                        if self.enable_summary_by_message_count {
-                            text.config_yes()
-                        } else {
-                            text.config_no()
-                        }
-                    ),
-                    if self.enable_summary_by_message_count {
-                        Style::default().fg(theme::TEXT)
-                    } else {
-                        Style::default().fg(theme::TEXT_MUTED)
-                    },
-                ))]));
-            }
-
-            if self.enable_summary_by_message_count {
-                let is_focused =
-                    self.focused_summary_item() == Some(SummaryFocus::MessageCountThreshold);
-                if is_focused {
-                    if self.editing_field {
-                        items.push(ListItem::new(vec![Self::editing_value_line(
-                            text.config_editor_message_count_threshold(),
-                            &self.summary_message_count_threshold,
-                        )]));
-                    } else {
-                        items.push(ListItem::new(vec![Line::from(Span::styled(
-                            format!(
-                                "{}: {}",
-                                text.config_editor_message_count_threshold(),
-                                self.summary_message_count_threshold
-                            ),
-                            Style::default()
-                                .bg(theme::ACCENT_BG)
-                                .fg(theme::TEXT)
-                                .add_modifier(Modifier::BOLD),
-                        ))]));
-                    }
-                } else {
-                    items.push(ListItem::new(vec![Line::from(Span::styled(
-                        format!(
-                            "{}: {}",
-                            text.config_editor_message_count_threshold(),
-                            self.summary_message_count_threshold
-                        ),
-                        Style::default().fg(theme::TEXT_MUTED),
-                    ))]));
-                }
-            }
         }
 
         items
@@ -645,6 +572,6 @@ pub(crate) struct EditorChanges {
     pub(crate) request: ModelRequestSpec,
     pub(crate) summary: ModelSummarySettings,
     pub(crate) builtin_tools: Vec<ModelBuiltinTool>,
-    pub(crate) thinking_configurations: String,
-    pub(crate) thinking_option_id: String,
+    /// The thinking level picked in the editor; `None` when it was left as it was.
+    pub(crate) thinking_level: Option<ThinkingLevel>,
 }

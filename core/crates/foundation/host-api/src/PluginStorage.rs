@@ -128,6 +128,9 @@ pub enum StorageRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         merge: Option<StoragePreferencesMergeDescriptor>,
     },
+    /// Persists the complete numbered migration contract before accessing owner data.
+    #[serde(rename = "preferences_schema")]
+    PreferencesSchema { handle: String, schema: StoragePreferencesSchema },
     #[serde(rename = "preferences_data")]
     PreferencesData { handle: String },
     #[serde(rename = "preferences_begin_edit")]
@@ -182,6 +185,9 @@ pub enum StorageRequest {
         after: Option<String>,
         limit: u32,
     },
+    /// Reads committed object changes after an opaque local cursor; null captures the current head.
+    #[serde(rename = "changes")]
+    Changes { handle: String, after: Option<String>, limit: u32 },
     #[serde(rename = "commit")]
     Commit {
         handle: String,
@@ -313,6 +319,26 @@ pub struct StorageMergeDescriptor {
 pub struct StorageSqlRow {
     pub columns: Vec<String>,
     pub values: Vec<StorageSqlValue>,
+}
+
+/// Carries the current value (or deletion) for one changed object identity.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorageObjectChange {
+    pub collection: String,
+    pub key: String,
+    pub entry: Option<StorageValueEntry>,
+}
+
+/// Pages a bounded local change journal, including synchronization and conflict-merge writes.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct StorageChangePage {
+    pub cursor: String,
+    pub reset: bool,
+    #[serde(rename = "hasMore")]
+    pub has_more: bool,
+    pub changes: Vec<StorageObjectChange>,
 }
 
 /// Reports one statement's affected rows and exact int64 insertion identity.
@@ -459,6 +485,29 @@ pub enum StoragePreferenceEdit {
     SetObjectField { key: String, field: String, value: Value },
 }
 
+/// A portable format migration. Step n converts format n to n+1 on data and transactions.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoragePreferencesSchema {
+    pub version: u32,
+    pub steps: Vec<Vec<StoragePreferencesMigrationRule>>,
+}
+
+/// Pure migration operations executed by the shared native migration context.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StoragePreferencesMigrationRule {
+    RenameKey { from: String, to: String },
+    RenameField { key: String, from: String, to: String },
+    SplitObject { key: String, fields: std::collections::BTreeMap<String, String> },
+    SplitRecords { key: String, prefix: String, identity: String },
+    DropKey { key: String },
+    /// Sets a field when the named object exists; absence remains absence.
+    SetObjectField { key: String, field: String, value: Value },
+    /// Decodes legacy JSON strings; already decoded values remain valid inputs.
+    DecodeJson { key: String },
+}
+
 /// Carries a complete typed preference snapshot independently of object collection versions.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -495,4 +544,5 @@ pub enum StorageResponse {
     GetMany(Vec<Option<StorageValueEntry>>),
     List(Vec<StorageKeyValueEntry>),
     Commit(StorageCommitResult),
+    Changes(StorageChangePage),
 }

@@ -38,6 +38,21 @@ void main() {
     },
   );
 
+  testWidgets('optional probe and scroll failures do not abort a visit', (
+    tester,
+  ) async {
+    final browser = _Browser()
+      ..failProbe = true
+      ..failScroll = true;
+    final registry = RuntimeWebVisitRegistry(sessions: browser);
+    final response = registry.visitWeb(request());
+    await tester.pump();
+    browser.finish('session-1');
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    expect((await _resolve(tester, response)).result?.content, 'Page content');
+  });
+
   testWidgets(
     'a workspace attaching late presents a running visit exactly once',
     (tester) async {
@@ -74,6 +89,40 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
     expect((await _resolve(tester, response)).success, isTrue);
   });
+
+  testWidgets(
+    'two concurrent visits both return and close their own sessions',
+    (tester) async {
+      final browser = _Browser()..ready = 'loading';
+      final registry = RuntimeWebVisitRegistry(sessions: browser);
+      final first = registry.visitWeb(request('first'));
+      final second = registry.visitWeb(request('second'));
+      await tester.pump();
+      expect(
+        registry.sessionFor('first')?.browserSession?.sessionId,
+        'session-1',
+      );
+      expect(
+        registry.sessionFor('second')?.browserSession?.sessionId,
+        'session-2',
+      );
+      browser.finish('session-2');
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      final secondResult = await _resolve(tester, second);
+      expect(secondResult.requestId, 'second');
+      expect(secondResult.success, isTrue);
+      expect(browser.closed, ['session-2']);
+      expect(registry.sessionFor('first'), isNotNull);
+      browser.finish('session-1');
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      final firstResult = await _resolve(tester, first);
+      expect(firstResult.requestId, 'first');
+      expect(firstResult.success, isTrue);
+      expect(browser.closed, ['session-2', 'session-1']);
+    },
+  );
 
   testWidgets(
     'explicit cancellation closes only the requested concurrent visit',
@@ -218,6 +267,8 @@ RuntimeBrowserSessionInfo _info(String id) => RuntimeBrowserSessionInfo(
 class _Browser extends BrowserSessions {
   int count = 0;
   String ready = 'complete';
+  bool failProbe = false;
+  bool failScroll = false;
   String? agent;
   Map<String, String>? headers;
   Completer<RuntimeBrowserSessionInfo>? creation;
@@ -280,6 +331,16 @@ class _Browser extends BrowserSessions {
     String script,
   ) async {
     if (evaluation != null) return evaluation!.future;
+    if ((failProbe && script.contains('readyState: document.readyState')) ||
+        (failScroll && script.contains('window.scrollTo'))) {
+      return RuntimeBrowserCommandResult(
+        success: false,
+        session: _info(sessionId),
+        sessions: [],
+        resultJson: 'null',
+        error: 'WebKit evaluation failed',
+      );
+    }
     final Object? value;
     if (script.contains('readyState: document.readyState')) {
       value = jsonEncode({'readyState': ready, 'url': 'https://example.com'});

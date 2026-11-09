@@ -1,4 +1,5 @@
 pub mod server;
+mod connector;
 use futures_util::{SinkExt, StreamExt};
 use operit_host_native_scheduler::NativeHostRuntimeTaskSchedulerHost;
 pub use server::NativeHttpServerHost;
@@ -33,7 +34,7 @@ pub struct NativeHttpHost {
     httpClients: Arc<Mutex<BTreeMap<HttpClientPolicy, AsyncClient>>>,
 }
 
-/// Identifies the connection pool for an exact buffered HTTP request policy.
+/// Identifies the shared connection pool for an exact HTTP request policy.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct HttpClientPolicy {
     connectTimeoutSeconds: u64,
@@ -261,6 +262,7 @@ impl NativeHttpHost {
             streams.insert(streamId.clone(), cancelSender.clone());
         }
         let streams = self.byteStreams.clone();
+        let clients = self.httpClients.clone();
         let taskStreamId = streamId.clone();
         let spawnResult = NativeHostRuntimeTaskSchedulerHost::new().scheduleNetworkAsyncTask(
             "native-http-stream",
@@ -268,6 +270,7 @@ impl NativeHttpHost {
                 Box::pin(async move {
                     let result = executeHttpByteStream(
                         request,
+                        clients,
                         cancelReceiver,
                         onOpened,
                         onResponse,
@@ -352,46 +355,19 @@ impl HttpStreamHost for NativeHttpHost {
 #[allow(non_snake_case)]
 async fn executeHttpByteStream(
     request: HttpRequestData,
+    clients: Arc<Mutex<BTreeMap<HttpClientPolicy, AsyncClient>>>,
     mut cancelReceiver: tokio::sync::watch::Receiver<bool>,
     onOpened: HttpStreamOpenedCallback,
     onResponse: Option<HttpStreamResponseCallback>,
     onChunk: HttpStreamChunkCallback,
 ) -> HostResult<()> {
-    let method = Method::from_bytes(request.method.as_bytes())
-        .map_err(|error| HostError::new(error.to_string()))?;
-    let client = buildHttpStreamClient(
-        request.connectTimeoutSeconds,
-        request.readTimeoutSeconds,
-        request.followRedirects,
-        request.ignoreSsl,
-        &request.proxyHost,
-        request.proxyPort,
-    )?;
-    let mut httpRequest = client.request(method, request.url);
-    httpRequest = httpRequest.headers(headersToReqwest(&request.headers)?);
-    if !request.fileParts.is_empty() || !request.formFields.is_empty() {
-        let mut form = reqwest::multipart::Form::new();
-        for (name, value) in request.formFields {
-            form = form.text(name, value);
-        }
-        for file in request.fileParts {
-            let part = reqwest::multipart::Part::bytes(file.content)
-                .file_name(file.fileName)
-                .mime_str(&file.contentType)
-                .map_err(httpError)?;
-            form = form.part(file.fieldName, part);
-        }
-        httpRequest = httpRequest.multipart(form);
-    } else if !request.body.is_empty() {
-        httpRequest = httpRequest.body(request.body);
-    }
     let mut response = tokio::select! {
         changed = cancelReceiver.changed() => {
             changed.map_err(|error| HostError::new(error.to_string()))?;
             return Ok(());
         }
-        response = httpRequest.send() => {
-            response.map_err(httpError)?
+        response = sendHttpRequestAsync(request, clients) => {
+            response?
         }
     };
     if let Some(onResponse) = onResponse {
@@ -512,7 +488,7 @@ async fn downloadToFileAsync(
     } else if !request.body.is_empty() {
         httpRequest = httpRequest.body(request.body);
     }
-    let mut response = httpRequest.send().await.map_err(httpError)?;
+    let mut response = sendOnNetworkTask(httpRequest).await?;
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.map_err(httpError)?;
@@ -634,7 +610,17 @@ async fn sendHttpRequestAsync(
     } else if !request.body.is_empty() {
         httpRequest = httpRequest.body(request.body);
     }
-    httpRequest.send().await.map_err(httpError)
+    sendOnNetworkTask(httpRequest).await
+}
+
+/// Isolates request construction and HTTP handshaking from the caller's poll frame.
+/// Connection setup already uses the same cancellable task boundary; handshaking
+/// happens after that connector returns and must not re-enter the larger caller.
+async fn sendOnNetworkTask(request: reqwest::RequestBuilder) -> HostResult<reqwest::Response> {
+    connector::runTask(async move { request.send().await })
+        .await
+        .map_err(|error| HostError::new(error.to_string()))?
+        .map_err(httpError)
 }
 
 /// Preserves the network cause and timeout classification across the Host boundary.
@@ -819,6 +805,7 @@ fn validateDownloadRequest(request: &HttpDownloadRequest) -> HostResult<()> {
 
 /// Builds an asynchronous client for Host-owned streaming HTTP responses.
 #[allow(non_snake_case)]
+/// Builds a Host client whose connection setup has an independent cancellable poll stack.
 fn buildHttpStreamClient(
     connectTimeoutSeconds: u64,
     readTimeoutSeconds: u64,
@@ -827,7 +814,9 @@ fn buildHttpStreamClient(
     proxyHost: &str,
     proxyPort: u16,
 ) -> HostResult<AsyncClient> {
-    let mut builder = AsyncClient::builder().danger_accept_invalid_certs(ignoreSsl);
+    let mut builder = AsyncClient::builder()
+        .connector_layer(connector::ConnectionTaskLayer)
+        .danger_accept_invalid_certs(ignoreSsl);
     if connectTimeoutSeconds > 0 {
         builder = builder.connect_timeout(Duration::from_secs(connectTimeoutSeconds));
     }
@@ -929,7 +918,7 @@ async fn downloadOneFileAsync(
         request = request.header(RANGE, format!("bytes={retainedBytes}-"));
     }
     let mut response = tokio::select! {
-        response = request.send() => response.map_err(|error| HostError::new(error.to_string()))?,
+        response = sendOnNetworkTask(request) => response?,
         () = waitForDownloadCancellation(control) => {
             return Err(HostError::new(format!("HTTP download cancelled: {downloadId}")));
         }
@@ -1695,3 +1684,5 @@ mod tests {
 
 #[cfg(test)]
 mod response_stream_tests;
+
+mod stream;

@@ -18,6 +18,8 @@
 
 | 主题 | 内容 |
 | --- | --- |
+| [事务同步与迁移](transaction-sync-contract.md) | 设计草案：准则、定义、情况期望与细节 |
+| [事务模型](transaction-model.md) | 统一类型、事务运算、迁移等价与高阶事务 |
 | [持久化同步](sync-architecture.md) | 接收、重放、原子提交、日志查询与内存边界 |
 | [工作区文件同步](workspace-file-sync.md) | 同步范围、扫描、冲突与离线副本 |
 | [VFS 挂载](vfs-mounts.md) | 工作区外部目录及文档树 |
@@ -45,10 +47,12 @@ Compose 的执行模型与二进制协议维护在 [Compose runtime](../core/cra
 | [CLI 网络控制](cli-network-control.md) | 配对、角色、成员与审批命令 |
 | [TUI 无头管理](tui-headless-management.md) | 配置面板与后台 daemon |
 | [版本与发布](release-versioning.md) | 版本、渠道、产物与更新 |
+| [应用更新与应用管理](application-updates-and-package-tools.md) | App/CLI 共享更新、原生安装状态与各平台能力 |
 | [日志分级](logging-levels.md) | 日志级别、深度与查看入口 |
 | [GitHub OAuth](github-oauth-broker.md) | 登录事务、回调与凭证归属 |
 | [远程公告](remote-announcements.md) | 公告来源与展示 |
 | [Android Root](android-root-shell.md) | 授权、执行模式与命令生命周期 |
+| [Android 模块运行](android-module-architecture.md) | 模块应用入口、目录构建、共享 Core/Dart 与 Android Host 安装链 |
 | [Android 定时事件](android-host-event-schedules.md) | 调度、交接与失败诊断 |
 
 ## 桥接与性能

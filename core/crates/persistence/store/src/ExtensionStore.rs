@@ -247,6 +247,7 @@ impl ExtensionStore {
             "package" => "packages",
             "skill" => "skills",
             "mcp" => "mcp",
+            "a2a" => "a2a",
             _ => return Err(format!("Unknown extension kind: {kind}")),
         };
         validateScope(scope)?;
@@ -825,9 +826,7 @@ impl ExtensionStore {
 
     /// Reads the retired settings layout only while migrating a version-zero descriptor.
     fn legacySettingsStore(&self, record: &ExtensionRecord) -> Result<PreferencesDataStore, String> {
-        let path = recordPath(&record.kind, &record.id, &record.scope)?
-            .replace("/records/", "/settings/")
-            .replace(".json", ".preferences.json");
+        let path = legacySettingsPath(&record.kind, &record.id, &record.scope)?;
         let store = if record.scope == "space" {
             PreferencesDataStore::newWithStorage(self.storage.clone(), path)
         } else {
@@ -907,6 +906,16 @@ impl ExtensionStore {
             "skill" => {
                 if record.settings["visible"].as_bool().is_none() {
                     return Err("Skill visibility must be a boolean".to_string());
+                }
+            }
+            "a2a" => {
+                let agent = &record.settings["agent"];
+                if !record.sourceName.is_empty() || !agent.is_object()
+                    || agent["url"].as_str().is_none_or(|url| url.trim().is_empty())
+                    || agent["disabled"].as_bool().is_none()
+                    || !agent["headers"].is_object()
+                {
+                    return Err("Invalid A2A connection manifest".into());
                 }
             }
             "mcp" => {
@@ -1214,7 +1223,7 @@ impl ExtensionStore {
 }
 
 /// Creates a collision-resistant entity path without deriving filesystem paths from display names.
-fn recordPath(kind: &str, id: &str, scope: &str) -> Result<String, String> {
+pub fn recordPath(kind: &str, id: &str, scope: &str) -> Result<String, String> {
     ExtensionStore::root(kind, scope)?;
     if id.trim().is_empty() {
         return Err("Extension id cannot be empty".to_string());
@@ -1223,6 +1232,24 @@ fn recordPath(kind: &str, id: &str, scope: &str) -> Result<String, String> {
         "runtime/extensions/{scope}/records/{kind}-{:x}.json",
         Sha256::digest(id.as_bytes())
     ))
+}
+
+/// Resolves the retired settings namespace through the extension owner's storage scope.
+pub fn legacySettingsDirectory(scope: &str) -> Result<String, String> {
+    use operit_util::RuntimeStorageLayout::{EXTENSIONS_DEVICE, EXTENSIONS_SPACE};
+    let root = match scope {
+        "space" => EXTENSIONS_SPACE.path,
+        "device" => EXTENSIONS_DEVICE.path,
+        _ => return Err(format!("Unknown extension scope: {scope}")),
+    };
+    Ok(format!("{root}/settings"))
+}
+
+/// Resolves legacy settings with the exact same identity encoding as its owning record.
+pub fn legacySettingsPath(kind: &str, id: &str, scope: &str) -> Result<String, String> {
+    Ok(recordPath(kind, id, scope)?
+        .replace("/records/", "/settings/")
+        .replace(".json", ".preferences.json"))
 }
 
 /// Accepts only the two explicit installation scopes.

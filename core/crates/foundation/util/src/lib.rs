@@ -5,9 +5,11 @@ pub mod ArchiveUtil;
 pub mod AssetCopyUtils;
 pub mod ChainLogger;
 pub mod ChatMarkupRegex;
+#[cfg(feature = "full")]
 pub mod ChatUtils;
 pub mod ColorQrCodeUtil;
 pub mod CrashRecoveryState;
+#[cfg(feature = "full")]
 pub mod DocumentConversionUtil;
 pub mod FFmpegUtil;
 pub mod FileUtils;
@@ -23,6 +25,7 @@ pub mod LocaleUtils;
 pub mod LocationUtils;
 pub mod MarkdownRenderStream;
 pub mod MediaBase64Limiter;
+pub mod MediaLinkBuilder;
 pub mod MediaPoolManager;
 pub mod MediaRegistration;
 pub mod NetworkUtils;
@@ -39,6 +42,7 @@ pub mod SkillRepoZipPoolManager;
 pub mod StreamingJsonXmlConverter;
 pub mod StructuredAssistantContentParser;
 pub mod TextSegmenter;
+#[cfg(feature = "full")]
 pub mod TokenCacheManager;
 pub mod TtsCleaner;
 pub mod TtsSegmenter;

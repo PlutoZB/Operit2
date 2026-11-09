@@ -6,6 +6,8 @@ package operit.plugin.sdk
 class OperitApplicationClient(private val client: OperitPluginSdkClient) {
     /** Watches `pluginLoadingProgressFlow` through the Core Link route. */
     fun pluginLoadingProgressFlow(): kotlinx.coroutines.flow.Flow<PluginLoadingProgress> = client.watchTyped("core/application", "pluginLoadingProgressFlow", mapOf<String, Any?>(), ::decodePluginLoadingProgress)
+    /** Calls `getExtensionCatalogSnapshot` through the Core Link route. */
+    suspend fun getExtensionCatalogSnapshot(): ExtensionCatalogSnapshot = client.callTyped("core/application", "getExtensionCatalogSnapshot", mapOf<String, Any?>(), ::decodeExtensionCatalogSnapshot)
 }
 
 /** Generated client for Core object `application.packageManager`. */
@@ -32,10 +34,6 @@ class OperitApplicationPackageManagerClient(private val client: OperitPluginSdkC
     suspend fun getToolPkgPluginContainerDetails(useEnglish: Boolean): List<ToolPkgContainerDetails> = client.callTyped("core/application.packageManager", "getToolPkgPluginContainerDetails", mapOf<String, Any?>("useEnglish" to useEnglish), ::decodeListToolPkgContainerDetails)
     /** Calls `getToolPkgContainerRuntimes` through the Core Link route. */
     suspend fun getToolPkgContainerRuntimes(): List<ToolPkgContainerRuntime> = client.callTyped("core/application.packageManager", "getToolPkgContainerRuntimes", mapOf<String, Any?>(), ::decodeListToolPkgContainerRuntime)
-    /** Calls `getToolPkgContainerOrder` through the Core Link route. */
-    suspend fun getToolPkgContainerOrder(): List<String> = client.callTyped("core/application.packageManager", "getToolPkgContainerOrder", mapOf<String, Any?>(), ::decodeListString)
-    /** Calls `setToolPkgContainerOrder` through the Core Link route. */
-    suspend fun setToolPkgContainerOrder(packageNames: List<String>): Unit = client.callTyped("core/application.packageManager", "setToolPkgContainerOrder", mapOf<String, Any?>("packageNames" to packageNames.map { item -> item }), ::decodeUnit)
     /** Calls `getToolPkgContainerDetails` through the Core Link route. */
     suspend fun getToolPkgContainerDetails(packageName: String, useEnglish: Boolean): ToolPkgContainerDetails? = client.callTyped("core/application.packageManager", "getToolPkgContainerDetails", mapOf<String, Any?>("packageName" to packageName, "useEnglish" to useEnglish), ::decodeNullableToolPkgContainerDetails)
     /** Calls `readToolPkgLogoBytes` through the Core Link route. */

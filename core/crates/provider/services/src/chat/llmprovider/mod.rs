@@ -24,10 +24,11 @@ pub mod GeminiProvider;
 pub mod KimiProvider;
 #[path = "LlmRetryPolicy.rs"]
 pub mod LlmRetryPolicy;
-#[path = "MediaLinkBuilder.rs"]
-pub mod MediaLinkBuilder;
 #[path = "MediaLinkParser.rs"]
 pub mod MediaLinkParser;
+
+/// Re-exports the canonical media-link builders now shared with the tool layer.
+pub use operit_util::MediaLinkBuilder;
 #[path = "MimoProvider.rs"]
 pub mod MimoProvider;
 #[path = "MistralProvider.rs"]
@@ -62,14 +63,14 @@ pub mod RequestConcurrencyRegistry;
 pub mod SlidingWindowRateLimiter;
 #[path = "StreamingResponseLines.rs"]
 mod StreamingResponseLines;
+#[path = "ProviderHttp.rs"]
+mod ProviderHttp;
 #[path = "StructuredToolCallBridge.rs"]
 pub mod StructuredToolCallBridge;
-#[path = "ThinkingConfiguration.rs"]
-pub mod ThinkingConfiguration;
+#[path = "ThinkingDialect.rs"]
+pub mod ThinkingDialect;
 #[path = "ToolPkgJsAiProviderService.rs"]
 pub mod ToolPkgJsAiProviderService;
-#[path = "UnsafeModelSsl.rs"]
-pub mod UnsafeModelSsl;
 
 #[cfg(test)]
 #[path = "../../../../tests/ProviderMediaTestSupport.rs"]

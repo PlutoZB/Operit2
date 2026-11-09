@@ -1,5 +1,4 @@
-use operit_host_api::PluginStorage::{StoragePreferencesMergeCatalog, StoragePreferencesMergeDescriptor, StoragePreferencesMergeKey, StoragePreferencesMergeReference, StoragePreferencesMergeProjection};
-use operit_store::PreferenceMerge::PreferenceMergeStore;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -19,7 +18,7 @@ use super::ThemePreferenceSnapshot::{
 };
 
 pub(super) const THEME_CONFIG_PREFIX: &str = "theme_config_";
-const ACTIVE_THEME_CONFIG_ID_KEY: &str = "active_theme_config_id";
+pub(super) const ACTIVE_THEME_CONFIG_ID_KEY: &str = "active_theme_config_id";
 
 /// Stores one independent named appearance configuration with a complete Flutter snapshot.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -47,40 +46,6 @@ pub struct ThemeConfigManager {
 }
 
 impl ThemeConfigManager {
-    /// Declares this owner's catalog and references using the shared merge contract.
-    pub(crate) fn spaceMergeStore() -> PreferenceMergeStore {
-        let path = operit_util::RuntimeStorageLayout::USER_PREFERENCES_PATH;
-        PreferenceMergeStore {
-            path: path.to_string(),
-            encrypted: false,
-            storageVersion: Some(4),
-            decode: Some(super::UserPreferencesManager::UserPreferencesManager::decodeSyncedEntry),
-            merge: StoragePreferencesMergeDescriptor {
-                version: 1,
-                catalog: Some(StoragePreferencesMergeCatalog {
-                    key_prefix: THEME_CONFIG_PREFIX.to_string(),
-                    key_suffix: "".to_string(),
-                    identity_field: "id".to_string(),
-                    name_field: "name".to_string(),
-                    ignored_fields: vec!["createdAt".to_string(), "updatedAt".to_string()],
-                    retired_keys: vec![],
-                }),
-                references: vec![StoragePreferencesMergeReference {
-                    key: StoragePreferencesMergeKey::Exact { key: ACTIVE_THEME_CONFIG_ID_KEY.to_string() },
-                    path: vec![],
-                    target: path.to_string(),
-                }],
-                projection: Some(StoragePreferencesMergeProjection {
-                    selection_key: ACTIVE_THEME_CONFIG_ID_KEY.to_string(),
-                    source_field: "snapshot".to_string(),
-                    fields: super::ThemePreferenceSnapshot::snapshotFields()
-                        .map(|field| (field.json_key.to_string(), field.preference_key.to_string())).collect(),
-                    retired_keys: vec!["use_system_theme".to_string()],
-                }),
-            },
-        }
-    }
-
     /// Opens ordinary user preferences through the owning runtime's actual storage host.
     pub fn new(storageHost: Arc<dyn RuntimeStorageHost>) -> Self {
         Self {
@@ -353,6 +318,59 @@ fn commitAppearance(
     writeThemePreferenceSnapshot(preferences, snapshot)?;
     writeState(preferences, &state)?;
     Ok(updated)
+}
+
+/// Adopts old ordinary preferences during the versioned startup migration only.
+pub(super) fn migrateUnboundAppearance(
+    preferences: &mut Preferences,
+) -> Result<(), PreferencesDataStoreError> {
+    let mut state = readCatalogState(preferences)?;
+    if let Some(id) = &state.activeThemeConfigId {
+        // The selected theme owns its mode and appearance, including old global overrides.
+        writeThemePreferenceSnapshot(preferences, &findConfig(&state, id)?.snapshot)?;
+        return Ok(());
+    }
+    let initial = super::ThemePreferenceSnapshot::migrationThemeDefaults()?;
+    let normalize = |mut snapshot: BTreeMap<String, Value>| {
+        let style = snapshot
+            .remove("chatStyle")
+            .unwrap_or(Value::String("cursor".into()));
+        for role in ["userChatStyle", "aiChatStyle"] {
+            snapshot
+                .entry(role.to_string())
+                .or_insert_with(|| style.clone());
+        }
+        snapshot
+    };
+    let snapshot = normalize(readThemePreferenceSnapshot(preferences, &initial)?);
+    let id = if let Some(config) = state
+        .configs
+        .iter()
+        .find(|config| normalize(config.snapshot.clone()) == snapshot)
+    {
+        config.id.clone()
+    } else {
+        let id = Uuid::new_v4().to_string();
+        let now = tryCurrentTimeMillis().map_err(PreferencesDataStoreError::Message)?;
+        let name = match preferences
+            .get(&stringPreferencesKey("app_language"))
+            .and_then(Value::as_str)
+        {
+            Some(language) if language.starts_with("zh") => "默认主题",
+            _ => "Default theme",
+        };
+        state.configs.push(ThemeConfig {
+            id: id.clone(),
+            name: name.to_string(),
+            snapshot: snapshot.clone(),
+            createdAt: now,
+            updatedAt: now,
+        });
+        id
+    };
+    writeThemePreferenceSnapshot(preferences, &findConfig(&state, &id)?.snapshot)?;
+    state.activeThemeConfigId = Some(id);
+    writeState(preferences, &state)
 }
 
 /// Decodes saved configurations independently of the ordinary appearance being replaced.

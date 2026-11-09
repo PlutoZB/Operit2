@@ -31,6 +31,7 @@ class CoreApplicationService with WidgetsBindingObserver {
       StreamController<Object>.broadcast();
 
   bool _initialized = false;
+  bool _ownsRuntime = true;
   AppLifecycleState? _lastEmittedLifecycleState;
   KeepAliveLease? _coreResidency;
   Future<void>? _runtimeServicesStart;
@@ -46,7 +47,7 @@ class CoreApplicationService with WidgetsBindingObserver {
   }
 
   /// Installs process-level Core lifecycle listeners.
-  void initialize() {
+  void initialize({bool ownsRuntime = true}) {
     if (_initialized) {
       ClientLogger.v(
         'initialize skipped alreadyInitialized=true',
@@ -62,10 +63,14 @@ class CoreApplicationService with WidgetsBindingObserver {
       verboseLevel: VerboseLevel.level1,
     );
     _initialized = true;
-    OperitKeepAlive.instance.report.addListener(_handleResidencyChanged);
+    _ownsRuntime = ownsRuntime;
+    if (_ownsRuntime) {
+      OperitKeepAlive.instance.report.addListener(_handleResidencyChanged);
+    }
     PluginHotReload.register(_coreClients);
     WidgetsBinding.instance.addObserver(this);
     _runtimeManager.addListener(_handleRuntimeBootstrapChanged);
+    unawaited(_syncHostSubscriber());
     unawaited(_startRuntimeServices());
     ClientLogger.v(
       'initialize done elapsedMs=${stopwatch.elapsedMilliseconds}',
@@ -77,10 +82,11 @@ class CoreApplicationService with WidgetsBindingObserver {
   /// Forwards Flutter lifecycle changes through the normalized runtime event ingress.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed &&
-        _runtimeManager.runtimeConfigured) {
+    if (state == AppLifecycleState.resumed) {
       unawaited(_syncHostSubscriber());
-      unawaited(WorkActivityPresentationService.instance.refreshCapabilities());
+      if (_ownsRuntime) {
+        unawaited(WorkActivityPresentationService.instance.refreshCapabilities());
+      }
     }
     unawaited(_emitLifecycleEvent(state));
   }
@@ -187,15 +193,13 @@ class CoreApplicationService with WidgetsBindingObserver {
   /// Starts host subscriptions and configured node listeners outside the widget lifecycle.
   Future<void> _startRuntimeServicesOnce() async {
     final stopwatch = Stopwatch()..start();
-    if (!_runtimeManager.runtimeConfigured) {
-      ClientLogger.i(
-        'runtime services waiting for configuration',
-        tag: _logTag,
-      );
-      return;
-    }
     try {
       ClientLogger.attachPersistentStorage();
+      if (!_ownsRuntime) {
+        await _syncHostSubscriber();
+        AppNotificationService.instance.initialize();
+        return;
+      }
       ClientLogger.v(
         'runtime services start localConfirmed=${_runtimeManager.config.confirmed}',
         tag: _logTag,
@@ -213,13 +217,33 @@ class CoreApplicationService with WidgetsBindingObserver {
         return;
       }
       final deviceInfo = await RuntimeDeviceInfoProvider.current();
-      await _coreClients.server.runtimeRemoteLinkService.initializeDeviceInfo(
-        supplied: deviceInfo,
-      );
-      await _coreClients.server.runtimeRemoteLinkService
-          .updateCurrentDeviceUserName(
-            userName: _runtimeManager.activeIdentity.name,
+      Future<void> spaceStep(
+        String operation,
+        Future<void> Function() run,
+      ) async {
+        try {
+          await run();
+        } catch (error, stackTrace) {
+          ClientLogger.e(
+            operation,
+            tag: _logTag,
+            error: error,
+            stackTrace: stackTrace,
           );
+        }
+      }
+
+      await spaceStep('Initialize Space device presentation', () async {
+        await _coreClients.server.runtimeRemoteLinkService.initializeDeviceInfo(
+          supplied: deviceInfo,
+        );
+      });
+      await spaceStep('Update Space device user name', () async {
+        await _coreClients.server.runtimeRemoteLinkService
+            .updateCurrentDeviceUserName(
+              userName: _runtimeManager.activeIdentity.name,
+            );
+      });
       // 配置和监听生命周期归 runtime；Dart 只调用生成的类型化 Proxy。
       final peerService = _coreClients.server.runtimeRemoteLinkService;
       final config = await peerService.localHostConfig();
@@ -234,7 +258,9 @@ class CoreApplicationService with WidgetsBindingObserver {
       if (transports.isNotEmpty) {
         await peerService.startListening(transports: transports);
       }
-      await _coreClients.server.runtimeRemoteLinkService.startSpaceSync();
+      await spaceStep('Start Space synchronization', () async {
+        await _coreClients.server.runtimeRemoteLinkService.startSpaceSync();
+      });
       ClientLogger.i(
         'runtime services start done elapsedMs=${stopwatch.elapsedMilliseconds}',
         tag: _logTag,

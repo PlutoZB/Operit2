@@ -7,8 +7,11 @@ import android.util.Log
 import android.view.Display
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import dev.floating_windows.FloatingWindowsPlugin
 
 class MainActivity : FlutterActivity() {
+    /** Selects the runtime fixed by this APK's build configuration. */
+    val isExternalRuntime: Boolean get() = BuildConfig.OPERIT_EXTERNAL_RUNTIME
     companion object {
         private const val TAG = "OperitMainActivity"
         const val NOTIFICATION_ACTIVATION_EXTRA = "app.operit.notificationActivation"
@@ -50,6 +53,15 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         val runtimeHost = ensureRuntimeHost()
         val ownerSystem = ensureOwnerSystem(runtimeHost)
+        FloatingWindowsPlugin.setEngineConfigurer { childEngine ->
+            val childRouter = RuntimeMethodChannelRouter(this, runtimeHost, ownerSystem)
+            childRouter.configure(childEngine.dartExecutor.binaryMessenger)
+            childEngine.addEngineLifecycleListener(object : FlutterEngine.EngineLifecycleListener {
+                override fun onPreEngineRestart() {}
+                override fun onEngineWillDestroy() { childRouter.clear() }
+            })
+        }
+
         runtimeRouter = RuntimeMethodChannelRouter(this, runtimeHost, ownerSystem)
         runtimeRouter.configure(flutterEngine.dartExecutor.binaryMessenger)
         nativeCrashChannel = NativeCrashChannel(this)
@@ -97,7 +109,11 @@ class MainActivity : FlutterActivity() {
         recordNotificationActivation(intent)
     }
 
-    fun ensureHostEventRuntimeHandle(): Long = ensureRuntimeHost().ensureRuntimeHandle()
+    /** Rejects accidental local runtime creation from a module client process. */
+    fun ensureHostEventRuntimeHandle(): Long {
+        check(!isExternalRuntime) { "The module client does not own a local Core" }
+        return ensureRuntimeHost().ensureRuntimeHandle()
+    }
 
     fun handleRuntimeHostRequest(methodName: String, payloadJson: String): String {
         return ensureOwnerSystem(ensureRuntimeHost()).handleRuntimeHostRequest(methodName, payloadJson)

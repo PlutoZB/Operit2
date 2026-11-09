@@ -25,6 +25,8 @@ pub enum JsToolFacade {
     Promise,
     AsyncIterator,
     TerminalCallback,
+    TerminalRun,
+    TerminalWait,
     Storage,
 }
 
@@ -93,6 +95,7 @@ pub const JS_TOOL_BINDINGS: &[JsToolBinding] = &[
     JsToolBinding { namespace: "Chat", method: "updateGroup", target: BuiltinToolName::UpdateChatGroup, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[] },
     JsToolBinding { namespace: "Chat", method: "updatePinned", target: BuiltinToolName::UpdateChatPinned, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[] },
     JsToolBinding { namespace: "Chat", method: "updateLocked", target: BuiltinToolName::UpdateChatLocked, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[] },
+    JsToolBinding { namespace: "Chat", method: "promoteToRoot", target: BuiltinToolName::PromoteChatToRoot, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[] },
     JsToolBinding { namespace: "Chat", method: "reorder", target: BuiltinToolName::ReorderChats, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[] },
     JsToolBinding { namespace: "Files", method: "apply", target: BuiltinToolName::ApplyFile, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[] },
     JsToolBinding { namespace: "Files", method: "copy", target: BuiltinToolName::CopyFile, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[] },
@@ -163,6 +166,7 @@ pub const JS_TOOL_BINDINGS: &[JsToolBinding] = &[
     JsToolBinding { namespace: "System", method: "startApp", target: BuiltinToolName::StartApp, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[] },
     JsToolBinding { namespace: "System", method: "stopApp", target: BuiltinToolName::StopApp, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[] },
     JsToolBinding { namespace: "System", method: "toast", target: BuiltinToolName::Toast, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[] },
+    JsToolBinding { namespace: "System", method: "setClipboardText", target: BuiltinToolName::SetClipboardText, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[] },
     JsToolBinding { namespace: "System", method: "uninstallApp", target: BuiltinToolName::UninstallApp, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[] },
     JsToolBinding { namespace: "System", method: "usePackage", target: BuiltinToolName::UsePackage, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[] },
     JsToolBinding { namespace: "System.bluetooth", method: "accept", target: BuiltinToolName::BluetoothAccept, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[] },
@@ -196,6 +200,8 @@ pub const JS_TOOL_BINDINGS: &[JsToolBinding] = &[
     JsToolBinding { namespace: "System.terminal", method: "exec", target: BuiltinToolName::ExecuteInTerminalSession, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[] },
     JsToolBinding { namespace: "System.terminal", method: "execStreaming", target: BuiltinToolName::TerminalObserve, strict_arguments: false, facade: JsToolFacade::TerminalCallback, fixed_parameters: &[] },
     JsToolBinding { namespace: "System.terminal", method: "execStream", target: BuiltinToolName::TerminalObserve, strict_arguments: false, facade: JsToolFacade::AsyncIterator, fixed_parameters: &[] },
+    JsToolBinding { namespace: "System.terminal", method: "run", target: BuiltinToolName::TerminalObserve, strict_arguments: true, facade: JsToolFacade::TerminalRun, fixed_parameters: &[] },
+    JsToolBinding { namespace: "System.terminal", method: "wait", target: BuiltinToolName::TerminalObserve, strict_arguments: true, facade: JsToolFacade::TerminalWait, fixed_parameters: &[] },
     JsToolBinding { namespace: "System.terminal", method: "hiddenExec", target: BuiltinToolName::ExecuteHiddenTerminalCommand, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[] },
     JsToolBinding { namespace: "System.terminal", method: "info", target: BuiltinToolName::GetTerminalInfo, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[] },
     JsToolBinding { namespace: "System.terminal", method: "input", target: BuiltinToolName::InputInTerminalSession, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[] },

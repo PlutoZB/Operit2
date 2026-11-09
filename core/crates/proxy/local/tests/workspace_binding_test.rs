@@ -52,7 +52,7 @@ async fn flutter_workspace_binding_is_idempotent_and_errors_remain_recoverable()
                 let holder = proxy.chatRuntimeHolder();
                 let mut holder = holder.lock().await;
                 let core = holder.coreForTarget(target).unwrap();
-                core.createNewChat(true, None, None, None).await.unwrap();
+                core.createNewChat(true, None, None, None, None).await.unwrap();
                 core.chatHistoryDelegate
                     .currentChatIdFlow()
                     .value()
@@ -64,7 +64,7 @@ async fn flutter_workspace_binding_is_idempotent_and_errors_remain_recoverable()
                     "flutter-bind-first",
                     target,
                     "bindChatToWorkspace",
-                    toCoreValue(json!({"chatId": chat_id, "workspace": "/app/workspaces/project"}))
+                    toCoreValue(json!({"chatId": chat_id, "workspace": "/operitapp/workspaces/project"}))
                         .unwrap(),
                 ),
             )
@@ -90,7 +90,7 @@ async fn flutter_workspace_binding_is_idempotent_and_errors_remain_recoverable()
                 );
                 core.chatHistoryDelegate
                     .addMessageToChat(message, Some(chat_id.clone()));
-                core.createNewChat(true, Some(chat_id.clone()), None, None)
+                core.createNewChat(true, Some(chat_id.clone()), None, None, None)
                     .await
                     .unwrap();
                 let inherited_chat_id = core
@@ -105,24 +105,35 @@ async fn flutter_workspace_binding_is_idempotent_and_errors_remain_recoverable()
                     .unwrap()
                     .unwrap();
                 assert_eq!(inherited_workspace, workspace);
+                let mismatch_error = core
+                    .createNewChat(
+                        true,
+                        Some(inherited_chat_id.clone()),
+                        None,
+                        Some("missing-workspace".to_string()),
+                        None,
+                    )
+                    .await
+                    .expect_err("workspace mismatch must be rejected");
+                assert!(mismatch_error.contains("does not match"));
                 (workspace, inherited_chat_id)
             };
             assert_ne!(chat_id, inherited_chat_id);
 
             for (request_id, path, succeeds) in [
-                ("flutter-rebind", "/app/workspaces/project", true),
+                ("flutter-rebind", "/operitapp/workspaces/project", true),
                 (
                     "flutter-rebind-normalized",
-                    " /app/workspaces/project/ ",
+                    " /operitapp/workspaces/project/ ",
                     true,
                 ),
                 ("flutter-invalid-path", "relative/project", false),
                 (
                     "flutter-name-conflict",
-                    "/app/workspaces/other/project",
+                    "/operitapp/workspaces/other/project",
                     false,
                 ),
-                ("flutter-retry-after-error", "/app/workspaces/project", true),
+                ("flutter-retry-after-error", "/operitapp/workspaces/project", true),
             ] {
                 let response = CoreLinkSharedClient::call(
                     &proxy,
@@ -171,7 +182,7 @@ async fn flutter_workspace_binding_is_idempotent_and_errors_remain_recoverable()
                     target,
                     "bindChatToWorkspace",
                     toCoreValue(
-                        json!({"chatId": inherited_chat_id, "workspace": "/app/workspaces/extra"}),
+                        json!({"chatId": inherited_chat_id, "workspace": "/operitapp/workspaces/extra"}),
                     )
                     .unwrap(),
                 ),
@@ -192,7 +203,7 @@ async fn flutter_workspace_binding_is_idempotent_and_errors_remain_recoverable()
             assert_eq!(workspace.id, original_workspace.id);
             assert_eq!(workspace.folders.len(), 2);
             assert_eq!(workspace.folders[0], original_workspace.folders[0]);
-            assert_eq!(workspace.folders[1].path, "/app/workspaces/extra");
+            assert_eq!(workspace.folders[1].path, "/operitapp/workspaces/extra");
         })
         .await;
 }

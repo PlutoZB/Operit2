@@ -5,18 +5,23 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:operit_ui/operit_ui.dart';
 
+import '../../../l10n/generated/app_localizations.dart';
 import '../../../core/bridge/OperitRuntimeBridge.dart';
 import '../../../core/bridge/ProxyCoreRuntimeBridge.dart';
 import '../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;
 import '../../common/OperitLogoMark.dart';
+import '../../features/update/AppUpdateBadge.dart';
 import '../../features/chat/components/NewChatIntro.dart';
+import '../../theme/OperitTheme.dart';
 import '../navigation/AppNavigationModels.dart';
 import '../layout/SidebarDockController.dart';
 import '../layout/NavigationLayoutMetrics.dart';
 import '../screens/ScreenRouteRegistry.dart';
 import '../../common/components/SwipeActions.dart';
 import 'NavigationDrawerAppearance.dart';
+import 'SidebarMoreMenu.dart';
+import 'SidebarChatCreation.dart';
 
 class CollapsedDrawerContent extends StatelessWidget {
   /// Receives the real nullable chat source without decoding plugin configuration.
@@ -27,8 +32,10 @@ class CollapsedDrawerContent extends StatelessWidget {
     required this.selectedRouteId,
     required this.appearance,
     required this.onNavigationEntrySelected,
+    required this.onConversationNavigationPressed,
     required this.onConversationActivated,
     required this.currentChatId,
+    required this.histories,
     this.bridge = const ProxyCoreRuntimeBridge(),
   });
 
@@ -37,25 +44,30 @@ class CollapsedDrawerContent extends StatelessWidget {
   final String selectedRouteId;
   final NavigationDrawerAppearance appearance;
   final ValueChanged<NavigationEntrySpec> onNavigationEntrySelected;
+  final VoidCallback onConversationNavigationPressed;
   final VoidCallback onConversationActivated;
   final String? currentChatId;
+  final List<core_proxy.ChatHistoryListItem> histories;
   final OperitRuntimeBridge bridge;
-  static const double _topBarHeight = 64;
   static const EdgeInsets _collapsedItemPadding = EdgeInsets.symmetric(
     vertical: 2,
   );
 
-  /// Creates through the generic hook without reading any role or grouping preference.
+  /// Inherits the selected workspace only when the native sidebar tab is active.
   Future<void> _createConversation(BuildContext context) async {
-    final sourceChatId = currentChatId;
     newChatIntroArmed.value = true;
     try {
-      await GeneratedCoreProxyClients(
-        bridge,
-      ).chatRuntimeHolderMain.createNewChat(
+      final clients = GeneratedCoreProxyClients(bridge);
+      final workspaceId = await sidebarNewChatWorkspaceId(
+        clients: clients,
+        histories: histories,
+        currentChatId: currentChatId,
+      );
+      await clients.chatRuntimeHolderMain.createNewChat(
         setAsCurrentChat: true,
-        sourceChatId: sourceChatId,
+        sourceChatId: null,
         parentChatId: null,
+        workspaceId: workspaceId,
         input: null,
       );
       onConversationActivated();
@@ -91,6 +103,9 @@ class CollapsedDrawerContent extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final theme = OperitTheme.of(context);
+    final darkThemeActive = theme.isDark(context);
     final topPadding = MediaQuery.paddingOf(context).top;
     final bottomPadding = MediaQuery.paddingOf(context).bottom;
     return Column(
@@ -100,13 +115,15 @@ class CollapsedDrawerContent extends StatelessWidget {
             padding: EdgeInsets.zero,
             children: <Widget>[
               SizedBox(
-                height: topPadding + _topBarHeight,
+                height: topPadding + ThemeTopBarChrome.toolbarHeight,
                 child: Padding(
                   padding: EdgeInsets.only(top: topPadding),
                   child: Center(
-                    child: OperitLogoMark(
-                      size: 34,
-                      color: appearance.statusAvailableColor,
+                    child: AppUpdateBadge(
+                      child: OperitLogoMark(
+                        size: 34,
+                        color: appearance.statusAvailableColor,
+                      ),
                     ),
                   ),
                 ),
@@ -117,10 +134,14 @@ class CollapsedDrawerContent extends StatelessWidget {
                 child: Center(
                   child: _RoundDrawerButton(
                     selected:
-                        selectedRouteId == navigationEntries.first.routeId,
+                        selectedRouteId ==
+                        ScreenRouteRegistry.routeIdOf(
+                          ScreenRouteRegistry.aiChat,
+                        ),
                     appearance: appearance,
                     icon: Icons.chat_bubble_outline,
-                    onClick: onConversationActivated,
+                    tooltip: l10n.aiChat,
+                    onClick: onConversationNavigationPressed,
                   ),
                 ),
               ),
@@ -131,6 +152,7 @@ class CollapsedDrawerContent extends StatelessWidget {
                     selected: false,
                     appearance: appearance,
                     icon: Icons.add_comment_outlined,
+                    tooltip: '新建对话',
                     onClick: () => unawaited(_createConversation(context)),
                   ),
                 ),
@@ -179,7 +201,25 @@ class CollapsedDrawerContent extends StatelessWidget {
                     selected: selectedRouteId == _packageManagerRouteId,
                     appearance: appearance,
                     icon: Icons.inventory_2_outlined,
+                    tooltip: l10n.packageManager,
                     onClick: _openPackageManager,
+                  ),
+                ),
+              ),
+              Padding(
+                padding: _collapsedItemPadding,
+                child: Center(
+                  child: Builder(
+                    key: const ValueKey('desktop-theme-toggle'),
+                    builder: (buttonContext) => _RoundDrawerButton(
+                      selected: false,
+                      appearance: appearance,
+                      icon: darkThemeActive
+                          ? Icons.light_mode_outlined
+                          : Icons.dark_mode_outlined,
+                      tooltip: darkThemeActive ? '切换白天模式' : '切换黑夜模式',
+                      onClick: () => theme.toggle(buttonContext),
+                    ),
                   ),
                 ),
               ),
@@ -190,6 +230,7 @@ class CollapsedDrawerContent extends StatelessWidget {
                     selected: selectedRouteId == _settingsRouteId,
                     appearance: appearance,
                     icon: Icons.settings_outlined,
+                    tooltip: l10n.settings,
                     onClick: _openSettings,
                   ),
                 ),
@@ -229,10 +270,30 @@ class SidebarInfoCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ThemeSidebarInfoCard(
-      brandName: brandName,
-      appearance: appearance,
-      trailing: trailing,
+    return Padding(
+      padding: const EdgeInsetsDirectional.fromSTEB(20, 4, 14, 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: AppUpdateBadge(
+                child: Text(
+                  brandName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                    color: appearance.titleColor,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 0,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          ?trailing,
+        ],
+      ),
     );
   }
 }
@@ -242,10 +303,12 @@ class ConversationSearchField extends StatelessWidget {
     super.key,
     required this.controller,
     required this.appearance,
+    this.hintText = '搜索对话',
   });
 
   final TextEditingController controller;
   final NavigationDrawerAppearance appearance;
+  final String hintText;
 
   @override
   Widget build(BuildContext context) {
@@ -259,7 +322,7 @@ class ConversationSearchField extends StatelessWidget {
       ).textTheme.bodyMedium?.copyWith(color: appearance.titleColor),
       decoration: InputDecoration(
         isDense: true,
-        hintText: '搜索对话',
+        hintText: hintText,
         hintStyle: Theme.of(context).textTheme.bodyMedium?.copyWith(
           color: appearance.itemColor.withValues(alpha: 0.62),
         ),
@@ -324,7 +387,15 @@ class HistoryRail extends StatelessWidget {
   }
 }
 
-enum _ConversationQuickAction { rename, togglePinned, toggleLocked, delete }
+enum _ConversationQuickAction {
+  searchMessages,
+  viewFavorites,
+  rename,
+  bindWorkspace,
+  togglePinned,
+  toggleLocked,
+  delete,
+}
 
 class ConversationDrawerItem extends StatefulWidget {
   /// Creates a conversation row with separate menu and confirmed swipe deletions.
@@ -337,6 +408,7 @@ class ConversationDrawerItem extends StatefulWidget {
     required this.appearance,
     required this.onClick,
     required this.onRename,
+    required this.onBindWorkspace,
     required this.onTogglePinned,
     required this.onToggleLocked,
     required this.onDelete,
@@ -346,9 +418,10 @@ class ConversationDrawerItem extends StatefulWidget {
     required this.canAcceptDrop,
     required this.canDetach,
     required this.onDetach,
+    this.onSearchMessages,
+    this.onViewFavorites,
     this.nested = false,
     this.workspaceStyle = false,
-    this.childrenToggle,
   });
 
   final core_proxy.ChatHistoryListItem history;
@@ -357,7 +430,10 @@ class ConversationDrawerItem extends StatefulWidget {
   final bool isRunning;
   final NavigationDrawerAppearance appearance;
   final VoidCallback onClick;
+  final VoidCallback? onSearchMessages;
+  final VoidCallback? onViewFavorites;
   final VoidCallback onRename;
+  final VoidCallback onBindWorkspace;
   final VoidCallback onTogglePinned;
   final VoidCallback onToggleLocked;
   final VoidCallback onDelete;
@@ -371,9 +447,6 @@ class ConversationDrawerItem extends StatefulWidget {
   final VoidCallback onDetach;
   final bool nested;
   final bool workspaceStyle;
-
-  /// Expands native child conversations independently of activation and execution.
-  final Widget? childrenToggle;
 
   @override
   State<ConversationDrawerItem> createState() => _ConversationDrawerItemState();
@@ -428,8 +501,7 @@ class _ConversationDrawerItemState extends State<ConversationDrawerItem>
     final platform = Theme.of(context).platform;
     final touchPlatform =
         platform == TargetPlatform.android || platform == TargetPlatform.iOS;
-    final showActions =
-        active || selected || touchPlatform || widget.childrenToggle != null;
+    final showActions = active || selected || touchPlatform;
 
     return DragTarget<core_proxy.ChatHistoryListItem>(
       onWillAcceptWithDetails: (details) =>
@@ -524,24 +596,21 @@ class _ConversationDrawerItemState extends State<ConversationDrawerItem>
                 ),
               ),
             ),
-            action: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (widget.childrenToggle != null) widget.childrenToggle!,
-                _ConversationMoreMenuButton(
-                  history: history,
-                  selected: selected,
-                  appearance: appearance,
-                  compact: workspaceStyle,
-                  onRename: widget.onRename,
-                  onTogglePinned: widget.onTogglePinned,
-                  onToggleLocked: widget.onToggleLocked,
-                  onDelete: widget.onDelete,
-                  onMenuOpenChanged: (open) {
-                    if (mounted) setState(() => _menuOpen = open);
-                  },
-                ),
-              ],
+            action: _ConversationMoreMenuButton(
+              history: history,
+              selected: selected,
+              appearance: appearance,
+              compact: workspaceStyle,
+              onSearchMessages: widget.onSearchMessages,
+              onViewFavorites: widget.onViewFavorites,
+              onRename: widget.onRename,
+              onBindWorkspace: widget.onBindWorkspace,
+              onTogglePinned: widget.onTogglePinned,
+              onToggleLocked: widget.onToggleLocked,
+              onDelete: widget.onDelete,
+              onMenuOpenChanged: (open) {
+                if (mounted) setState(() => _menuOpen = open);
+              },
             ),
           ),
         );
@@ -763,141 +832,99 @@ class _ConversationMoreMenuButton extends StatelessWidget {
     required this.selected,
     required this.appearance,
     required this.onRename,
+    required this.onBindWorkspace,
     required this.onTogglePinned,
     required this.onToggleLocked,
     required this.onDelete,
     this.onMenuOpenChanged,
+    this.onSearchMessages,
+    this.onViewFavorites,
     this.compact = false,
   });
 
   final core_proxy.ChatHistoryListItem history;
   final bool selected;
   final NavigationDrawerAppearance appearance;
+  final VoidCallback? onSearchMessages;
+  final VoidCallback? onViewFavorites;
   final VoidCallback onRename;
+  final VoidCallback onBindWorkspace;
   final VoidCallback onTogglePinned;
   final VoidCallback onToggleLocked;
   final VoidCallback onDelete;
   final ValueChanged<bool>? onMenuOpenChanged;
   final bool compact;
 
-  PopupMenuItem<_ConversationQuickAction> _menuItem({
-    required _ConversationQuickAction value,
-    required IconData icon,
-    required String label,
-    required Color iconColor,
-    required Color textColor,
-  }) {
-    return PopupMenuItem<_ConversationQuickAction>(
-      value: value,
-      height: 32,
-      padding: const EdgeInsets.symmetric(horizontal: 10),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          Icon(icon, size: 14.5, color: iconColor),
-          const SizedBox(width: 9),
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 12.5,
-              fontWeight: FontWeight.w500,
-              color: textColor,
-              letterSpacing: -0.1,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
     final color =
         (selected ? appearance.selectedContentColor : appearance.itemColor)
             .withValues(alpha: 0.78);
-    final side = compact ? 20.0 : 24.0;
-    final itemIconColor = colorScheme.onSurfaceVariant.withValues(alpha: 0.85);
-    final itemTextColor = colorScheme.onSurface.withValues(alpha: 0.92);
-    final dangerColor = colorScheme.error.withValues(alpha: 0.90);
-
-    return SizedBox(
-      width: side,
-      height: side,
-      child: PopupMenuButton<_ConversationQuickAction>(
-        tooltip: '更多操作',
-        padding: EdgeInsets.zero,
-        borderRadius: BorderRadius.circular(6),
-        color: Color.alphaBlend(
-          colorScheme.surfaceContainerHighest.withValues(alpha: 0.75),
-          colorScheme.surface,
+    return SidebarMoreMenuButton<_ConversationQuickAction>(
+      compact: compact,
+      color: color,
+      onMenuOpenChanged: onMenuOpenChanged,
+      onSelected: (action) {
+        switch (action) {
+          case _ConversationQuickAction.searchMessages:
+            onSearchMessages?.call();
+          case _ConversationQuickAction.viewFavorites:
+            onViewFavorites?.call();
+          case _ConversationQuickAction.rename:
+            onRename();
+          case _ConversationQuickAction.bindWorkspace:
+            onBindWorkspace();
+          case _ConversationQuickAction.togglePinned:
+            onTogglePinned();
+          case _ConversationQuickAction.toggleLocked:
+            onToggleLocked();
+          case _ConversationQuickAction.delete:
+            onDelete();
+        }
+      },
+      actions: <SidebarMenuAction<_ConversationQuickAction>>[
+        if (onSearchMessages != null)
+          SidebarMenuAction(
+            value: _ConversationQuickAction.searchMessages,
+            icon: Icons.search_rounded,
+            label: AppLocalizations.of(context)!.messageLocatorSearchMessages,
+          ),
+        if (onViewFavorites != null)
+          SidebarMenuAction(
+            value: _ConversationQuickAction.viewFavorites,
+            icon: Icons.star_outline_rounded,
+            label: AppLocalizations.of(context)!.messageLocatorViewFavorites,
+          ),
+        const SidebarMenuAction(
+          value: _ConversationQuickAction.rename,
+          icon: Icons.edit_outlined,
+          label: '编辑标题',
         ),
-        elevation: 6,
-        shadowColor: Colors.black.withValues(alpha: 0.45),
-        offset: const Offset(0, 4),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(10),
-          side: BorderSide(
-            color: colorScheme.outlineVariant.withValues(alpha: 0.4),
-            width: 1,
-          ),
+        const SidebarMenuAction(
+          value: _ConversationQuickAction.bindWorkspace,
+          icon: Icons.folder_open_outlined,
+          label: '项目绑定',
         ),
-        constraints: const BoxConstraints(minWidth: 118, maxWidth: 138),
-        menuPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-        onOpened: () => onMenuOpenChanged?.call(true),
-        onCanceled: () => onMenuOpenChanged?.call(false),
-        child: ThemeHistoryMoreGlyph(
-          color: color,
-          side: side,
-          compact: compact,
+        SidebarMenuAction(
+          value: _ConversationQuickAction.togglePinned,
+          icon: history.pinned
+              ? Icons.push_pin_outlined
+              : Icons.push_pin_rounded,
+          label: history.pinned ? '取消置顶' : '置顶',
         ),
-        onSelected: (action) {
-          onMenuOpenChanged?.call(false);
-          switch (action) {
-            case _ConversationQuickAction.rename:
-              onRename();
-            case _ConversationQuickAction.togglePinned:
-              onTogglePinned();
-            case _ConversationQuickAction.toggleLocked:
-              onToggleLocked();
-            case _ConversationQuickAction.delete:
-              onDelete();
-          }
-        },
-        itemBuilder: (context) => <PopupMenuEntry<_ConversationQuickAction>>[
-          _menuItem(
-            value: _ConversationQuickAction.rename,
-            icon: Icons.edit_outlined,
-            label: '编辑标题',
-            iconColor: itemIconColor,
-            textColor: itemTextColor,
-          ),
-          _menuItem(
-            value: _ConversationQuickAction.togglePinned,
-            icon: history.pinned
-                ? Icons.push_pin_outlined
-                : Icons.push_pin_rounded,
-            label: history.pinned ? '取消置顶' : '置顶',
-            iconColor: itemIconColor,
-            textColor: itemTextColor,
-          ),
-          _menuItem(
-            value: _ConversationQuickAction.toggleLocked,
-            icon: history.locked ? Icons.lock_open_rounded : Icons.lock_rounded,
-            label: history.locked ? '解锁' : '锁定',
-            iconColor: itemIconColor,
-            textColor: itemTextColor,
-          ),
-          const PopupMenuDivider(height: 8),
-          _menuItem(
-            value: _ConversationQuickAction.delete,
-            icon: Icons.delete_outline_rounded,
-            label: '删除',
-            iconColor: dangerColor,
-            textColor: dangerColor,
-          ),
-        ],
-      ),
+        SidebarMenuAction(
+          value: _ConversationQuickAction.toggleLocked,
+          icon: history.locked ? Icons.lock_open_rounded : Icons.lock_rounded,
+          label: history.locked ? '解锁' : '锁定',
+        ),
+        const SidebarMenuAction(
+          value: _ConversationQuickAction.delete,
+          icon: Icons.delete_outline_rounded,
+          label: '删除',
+          dividerBefore: true,
+          danger: true,
+        ),
+      ],
     );
   }
 }
@@ -1090,12 +1117,14 @@ class _RoundDrawerButton extends StatelessWidget {
     required this.appearance,
     required this.icon,
     required this.onClick,
+    this.tooltip,
   });
 
   final bool selected;
   final NavigationDrawerAppearance appearance;
   final IconData icon;
   final VoidCallback? onClick;
+  final String? tooltip;
 
   /// Builds the compact plugin drag source and reorder drop target.
   @override
@@ -1110,6 +1139,7 @@ class _RoundDrawerButton extends StatelessWidget {
         shape: const CircleBorder(),
         child: IconButton(
           onPressed: onClick,
+          tooltip: tooltip,
           padding: EdgeInsets.zero,
           constraints: const BoxConstraints.tightFor(width: 40, height: 40),
           iconSize: 20,
@@ -1147,6 +1177,7 @@ class _DockedPluginRoundButton extends StatelessWidget {
       selected: selected,
       appearance: appearance,
       icon: entry.icon,
+      tooltip: entry.title,
       onClick: onClick,
     );
     if (controller == null ||

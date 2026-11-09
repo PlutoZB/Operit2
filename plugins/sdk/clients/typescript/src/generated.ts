@@ -8,6 +8,8 @@ export class OperitApplicationClient {
   public constructor(private readonly client: OperitPluginSdkClient) {}
   /** Watches `pluginLoadingProgressFlow` through the Core Link route. */
   public pluginLoadingProgressFlow(): AsyncIterable<models.PluginLoadingProgress> { return this.client.watchTyped<models.PluginLoadingProgress>("core/application", 'pluginLoadingProgressFlow', {}, (value) => models.decodePluginLoadingProgress(value)); }
+  /** Calls `getExtensionCatalogSnapshot` through the Core Link route. */
+  public getExtensionCatalogSnapshot(): Promise<models.ExtensionCatalogSnapshot> { return this.client.callTyped<models.ExtensionCatalogSnapshot>("core/application", 'getExtensionCatalogSnapshot', {}, (value) => models.decodeExtensionCatalogSnapshot(value)); }
 }
 
 /** Generated client for Core object `application.packageManager`. */
@@ -35,10 +37,6 @@ export class OperitApplicationPackageManagerClient {
   public getToolPkgPluginContainerDetails(useEnglish: boolean): Promise<Array<models.ToolPkgContainerDetails>> { return this.client.callTyped<Array<models.ToolPkgContainerDetails>>("core/application.packageManager", 'getToolPkgPluginContainerDetails', {'useEnglish': useEnglish}, (value) => (value as unknown[]).map((item) => models.decodeToolPkgContainerDetails(item))); }
   /** Calls `getToolPkgContainerRuntimes` through the Core Link route. */
   public getToolPkgContainerRuntimes(): Promise<Array<models.ToolPkgContainerRuntime>> { return this.client.callTyped<Array<models.ToolPkgContainerRuntime>>("core/application.packageManager", 'getToolPkgContainerRuntimes', {}, (value) => (value as unknown[]).map((item) => models.decodeToolPkgContainerRuntime(item))); }
-  /** Calls `getToolPkgContainerOrder` through the Core Link route. */
-  public getToolPkgContainerOrder(): Promise<Array<string>> { return this.client.callTyped<Array<string>>("core/application.packageManager", 'getToolPkgContainerOrder', {}, (value) => (value as unknown[]).map((item) => item as string)); }
-  /** Calls `setToolPkgContainerOrder` through the Core Link route. */
-  public setToolPkgContainerOrder(packageNames: Array<string>): Promise<void> { return this.client.call("core/application.packageManager", 'setToolPkgContainerOrder', {'packageNames': packageNames.map(item => item)}).then(() => undefined); }
   /** Calls `getToolPkgContainerDetails` through the Core Link route. */
   public getToolPkgContainerDetails(packageName: string, useEnglish: boolean): Promise<models.ToolPkgContainerDetails | null> { return this.client.callTyped<models.ToolPkgContainerDetails | null>("core/application.packageManager", 'getToolPkgContainerDetails', {'packageName': packageName, 'useEnglish': useEnglish}, (value) => value == null ? null : models.decodeToolPkgContainerDetails(value)); }
   /** Calls `readToolPkgLogoBytes` through the Core Link route. */

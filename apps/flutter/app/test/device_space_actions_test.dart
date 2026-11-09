@@ -19,6 +19,7 @@ class DeviceBridge extends JoinBridge {
     'updatedAt': 1,
   };
   Completer<Uint8List>? discovery;
+  Map<String, Object?>? discoveryArgs;
   Map<String, Object?>? pairingArgs;
   Map<String, Object?>? finishArgs;
   List<Map<String, Object?>> peers = [
@@ -35,6 +36,7 @@ class DeviceBridge extends JoinBridge {
     switch (request.methodName) {
       case 'discoverPeers':
         calls.add(request.methodName);
+        discoveryArgs = Map<String, Object?>.from(request.args as Map);
         if (discovery != null) return discovery!.future;
         return encodeCoreLink([0, peers]);
       case 'startPairing':
@@ -186,6 +188,7 @@ void main() {
     expect(find.byType(Switch), findsNothing);
     expect(find.byType(FilterChip), findsNothing);
     expect(bridge.calls.where((c) => c == 'discoverPeers').length, 1);
+    expect(bridge.discoveryArgs, {'timeoutMs': 5000});
     await tester.tap(find.byIcon(Icons.refresh_rounded));
     await tester.pumpAndSettle();
     expect(bridge.calls.where((c) => c == 'discoverPeers').length, 2);
@@ -215,7 +218,7 @@ void main() {
     expect(find.text('扫描中…'), findsOneWidget);
     expect(
       tester.widget<OutlinedButton>(find.byType(OutlinedButton)).onPressed,
-      isNull,
+      isNotNull,
     );
     discovery.complete(encodeCoreLink([0, <Object?>[]]));
     await tester.pumpAndSettle();
@@ -354,7 +357,10 @@ void main() {
     await tester.pumpAndSettle();
     discovery.completeError(StateError('Discovery unavailable'));
     await tester.pumpAndSettle();
-    expect(find.text('Bad state: Discovery unavailable'), findsOneWidget);
+    expect(
+      find.text('附近设备发现失败：Bad state: Discovery unavailable'),
+      findsOneWidget,
+    );
     expect(find.text('暂未发现附近设备'), findsNothing);
     expect(find.byIcon(Icons.error_outline_rounded), findsOneWidget);
     expect(
@@ -368,7 +374,10 @@ void main() {
     bridge.discovery = null;
     await tester.tap(find.byTooltip('刷新'));
     await tester.pumpAndSettle();
-    expect(find.text('Bad state: Discovery unavailable'), findsNothing);
+    expect(
+      find.text('附近设备发现失败：Bad state: Discovery unavailable'),
+      findsNothing,
+    );
     expect(find.text('我的 iPhone'), findsOneWidget);
     await dispose(tester, bridge);
   });

@@ -24,6 +24,37 @@
 	<string>????</string>
 	<key>CFBundleVersion</key>
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Operit ToolPkg</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array><string>app.operit.toolpkg</string></array>
+		</dict>
+	</array>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>app.operit.toolpkg</string>
+			<key>UTTypeDescription</key>
+			<string>Operit ToolPkg archive</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.zip-archive</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>toolpkg</string></array>
+			</dict>
+		</dict>
+	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSAppTransportSecurity</key>
@@ -40,13 +71,13 @@
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Operit uses your current location only when you request a location attachment.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Operit2 uses the camera to capture photos for chat attachments.</string>
+	<string>Operit2 uses the camera to scan device connection codes and capture photos for chat attachments.</string>
 	<key>NSBonjourServices</key>
 	<array>
-		<string>_operit._tcp</string>
+		<string>_operit-link._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Operit2 uses the local network to discover and connect to nearby Operit devices for Web Access.</string>
+	<string>Operit2 uses the local network to discover and connect to nearby devices in your device space.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Operit2 records speech for text recognition.</string>
 	<key>UIApplicationSceneManifest</key>

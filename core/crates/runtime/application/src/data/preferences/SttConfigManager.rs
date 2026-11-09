@@ -1,6 +1,4 @@
 #![allow(non_snake_case)]
-use operit_host_api::PluginStorage::{StoragePreferencesMergeCatalog, StoragePreferencesMergeDescriptor, StoragePreferencesMergeKey, StoragePreferencesMergeReference};
-use operit_store::PreferenceMerge::PreferenceMergeStore;
 
 use operit_host_api::TimeUtils::currentTimeMillis;
 use operit_local_models::LocalEngineManifest::LocalPlatformTarget;
@@ -30,46 +28,7 @@ impl SttConfigManager {
         path: impl Into<String>,
     ) -> PreferencesDataStore {
         PreferencesDataStore::newEncryptedWithStorage(storage, path)
-            .withSchema(Self::PREFERENCES_VERSION, Self::migratePreferences)
-    }
-
-    /// Decodes historical record encodings without running new-store initialization.
-    fn decodeSyncedEntry(entry: &mut operit_store::PreferencesDataStore::PreferencesSyncedEntry) -> Result<(), PreferencesDataStoreError> {
-        entry.decodeHistoricalValues(|version, values| {
-            if version > Self::PREFERENCES_VERSION {
-                return Err(PreferencesDataStoreError::SchemaVersionTooNew { actual: version, expected: Self::PREFERENCES_VERSION });
-            }
-            for version in version.max(1)..Self::PREFERENCES_VERSION { Self::migratePreferences(version, values)?; }
-            Ok(())
-        })
-    }
-
-    /// Declares this owner's catalog and references using the shared merge contract.
-    pub(crate) fn spaceMergeStore() -> PreferenceMergeStore {
-        let path = operit_util::RuntimeStorageLayout::STT_CONFIGS_PREFERENCES_PATH;
-        PreferenceMergeStore {
-            path: path.to_string(),
-            encrypted: true,
-            storageVersion: Some(2),
-            decode: Some(Self::decodeSyncedEntry),
-            merge: StoragePreferencesMergeDescriptor {
-                version: 1,
-                catalog: Some(StoragePreferencesMergeCatalog {
-                    key_prefix: "stt_config_".to_string(),
-                    key_suffix: "_json".to_string(),
-                    identity_field: "id".to_string(),
-                    name_field: "name".to_string(),
-                    ignored_fields: vec!["createdAt".to_string(), "updatedAt".to_string()],
-                    retired_keys: vec!["stt_config_list".to_string()],
-                }),
-                references: vec![StoragePreferencesMergeReference {
-                    key: StoragePreferencesMergeKey::Exact { key: "current_stt_config_id".to_string() },
-                    path: vec![],
-                    target: path.to_string(),
-                }],
-                projection: None,
-            },
-        }
+            .withMigration(Self::PREFERENCES_VERSION, Self::migration)
     }
 
     const PREFERENCES_VERSION: u32 = 2;
@@ -221,11 +180,18 @@ impl SttConfigManager {
     }
 
     /// Initializes schema bookkeeping and migrates encoded STT records in version one.
-    fn migratePreferences(
-        version: u32,
-        preferences: &mut Preferences,
+    fn migration(
+        from: u32,
+        context: &mut operit_store::Transaction::migration::Context,
     ) -> Result<(), PreferencesDataStoreError> {
-        match version {
+        if from == 1 {
+            operit_store::Transaction::Rule::DropKey {
+                key: "stt_config_list".into(),
+            }
+            .apply(context)
+            .map_err(PreferencesDataStoreError::Message)?;
+        }
+        context.map_preferences(from, &|version, preferences| match version {
             0 => Ok(()),
             1 => {
                 let records = preferences
@@ -250,11 +216,10 @@ impl SttConfigManager {
                     }
                     preferences.set(&stringPreferencesKey(&key), record);
                 }
-                preferences.remove(&Self::configListKey());
                 Ok(())
             }
             from => Err(PreferencesDataStoreError::MissingMigration { from, to: from + 1 }),
-        }
+        })
     }
 
     /// Returns every built-in STT provider catalog entry.

@@ -1,5 +1,4 @@
-use operit_host_api::PluginStorage::{StoragePreferencesMergeCatalog, StoragePreferencesMergeDescriptor};
-use operit_store::PreferenceMerge::PreferenceMergeStore;
+
 use std::path::PathBuf;
 
 use std::collections::HashSet;
@@ -7,24 +6,28 @@ use std::collections::HashSet;
 use thiserror::Error;
 
 use crate::data::preferences::ApiPreferences::ApiPreferences;
+use crate::data::preferences::ModelSpecResolver::{ModelSpecResolver, ResolvedThinking};
+use crate::services::ModelCatalogService;
 use operit_local_models::LocalEngineManifest::LocalPlatformTarget;
 use operit_local_models::LocalModelManifest::LocalModelKind;
 use operit_local_models::LocalModelRegistryStore::LocalModelRegistryStore;
 use operit_model::ModelCatalog::ModelCatalog;
 use operit_model::ModelConfigData::{
-    default_deepseek_provider, local_model_provider, ApiProviderType, AvailableProviderModel,
-    AvailableProviderModelSource, ModelCapabilities, ModelConfigDefaults, ModelContextSpec,
-    ModelProfile, ModelRequestSpec, ModelSummarySettings, ProviderCatalogEntry,
-    ProviderModelSummary, ProviderProfile, ResolvedModelConfig,
+    default_deepseek_model, default_deepseek_provider, ApiProviderType,
+    AvailableProviderModel, AvailableProviderModelSource, ModelCapabilities,
+    ModelCapabilityOverrides, ModelCatalogStatus, ModelConfigDefaults, ModelContextSpec,
+    ModelProfile, ModelRequestSpec, ModelSummarySettings, ProviderModelSummary, ProviderProfile,
+    ResolvedModelConfig,
 };
 use operit_model::ModelParameter::ModelParameter;
+use operit_model::ModelThinking::{
+    ModelThinkingSettings, ModelThinkingSpec, ThinkingLevel, ThinkingLevelOption,
+};
 use operit_providers::chat::llmprovider::ModelConfigConnectionTester::{
     ModelConfigConnectionTester, ModelConnectionTestReport,
 };
 use operit_providers::chat::llmprovider::ModelListFetcher::ModelListFetcher;
-use operit_providers::chat::llmprovider::ThinkingConfiguration::{
-    ThinkingConfigurationApplier, ThinkingControl, ThinkingSettingsDescriptor,
-};
+use operit_providers::chat::llmprovider::ThinkingDialect::ThinkingDialect;
 use operit_providers::runtime_support::ProviderRuntimeContext;
 use operit_store::PreferencesDataStore::{
     stringPreferencesKey, Flow, Preferences, PreferencesDataStore, PreferencesDataStoreError,
@@ -54,14 +57,12 @@ pub enum ModelConfigError {
     MissingModelRequestSpec(String),
     #[error("invalid provider type: {0}")]
     InvalidProviderType(String),
-    #[error("available provider model not found: {providerId}:{modelId}")]
-    AvailableProviderModelNotFound { providerId: String, modelId: String },
     #[error("model list fetch error: {0}")]
     ModelListFetch(String),
     #[error("connection test error: {0}")]
     ConnectionTest(String),
-    #[error("invalid thinking configuration: {0}")]
-    InvalidThinkingConfiguration(String),
+    #[error("invalid thinking level: {0}")]
+    InvalidThinkingLevel(String),
 }
 
 /// Reports the result of importing model configuration backup data.
@@ -88,58 +89,15 @@ impl ModelConfigManager {
         path: impl Into<String>,
     ) -> PreferencesDataStore {
         PreferencesDataStore::newEncryptedWithStorage(storage, path)
-            .withSchema(Self::PREFERENCES_VERSION, Self::migratePreferences)
-    }
-
-    /// Imports each historical provider value with its declared encoding and preserves its stable identity.
-    fn decodeSyncedEntry(entry: &mut operit_store::PreferencesDataStore::PreferencesSyncedEntry) -> Result<(), PreferencesDataStoreError> {
-        entry.decodeHistoricalValues(|version, values| {
-            if version > Self::PREFERENCES_VERSION {
-                return Err(PreferencesDataStoreError::SchemaVersionTooNew { actual: version, expected: Self::PREFERENCES_VERSION });
-            }
-            if version < 4 {
-                let records = values.iterEntries().filter(|(key, _)| key.starts_with("provider_") && *key != "provider_list")
-                    .map(|(key, value)| (key.to_owned(), value.clone())).collect::<Vec<_>>();
-                for (key, value) in records {
-                    let encoded: String = serde_json::from_value(value)?;
-                    let mut provider: ProviderProfile = serde_json::from_str(&encoded)?;
-                    if version < 3 {
-                        provider = Self::providerWithProviderOwnedThinkingRules(provider)
-                            .map_err(|error| PreferencesDataStoreError::Message(error.to_string()))?;
-                    }
-                    values.set(&stringPreferencesKey(&key), serde_json::to_value(provider)?);
+            .withMigration(Self::PREFERENCES_VERSION, |from,context| {
+                if from == 3 {
+                    operit_store::Transaction::Rule::DropKey {key:"provider_list".into()}.apply(context).map_err(PreferencesDataStoreError::Message)?;
                 }
-            }
-            values.remove(&Self::PROVIDER_LIST_KEY());
-            Ok(())
-        })
+                context.map_preferences(from,&Self::migratePreferences)
+            })
     }
 
-    /// Declares this owner's catalog and references using the shared merge contract.
-    pub(crate) fn spaceMergeStore() -> PreferenceMergeStore {
-        let path = operit_util::RuntimeStorageLayout::MODEL_CONFIGS_PREFERENCES_PATH;
-        PreferenceMergeStore {
-            path: path.to_string(),
-            encrypted: true,
-            storageVersion: Some(Self::PREFERENCES_VERSION),
-            decode: Some(Self::decodeSyncedEntry),
-            merge: StoragePreferencesMergeDescriptor {
-                version: 1,
-                catalog: Some(StoragePreferencesMergeCatalog {
-                    key_prefix: "provider_".to_string(),
-                    key_suffix: "".to_string(),
-                    identity_field: "id".to_string(),
-                    name_field: "name".to_string(),
-                    ignored_fields: vec!["createdAt".to_string(), "updatedAt".to_string()],
-                    retired_keys: vec!["provider_list".to_string()],
-                }),
-                references: vec![],
-                projection: None,
-            },
-        }
-    }
-
-    const PREFERENCES_VERSION: u32 = 5;
+    const PREFERENCES_VERSION: u32 = 8;
     pub const DEFAULT_PROVIDER_ID: &'static str = ModelConfigDefaults::DEFAULT_PROVIDER_ID;
     pub const DEFAULT_MODEL_ID: &'static str = ModelConfigDefaults::DEFAULT_MODEL_ID;
 
@@ -167,6 +125,40 @@ impl ModelConfigManager {
     /// Creates a manager using the default API data directory.
     pub fn default() -> Self {
         Self::new(ApiPreferences::data_dir())
+    }
+
+    /// Persists the default provider and model before a default function binding is used.
+    pub(crate) fn ensureDefaultModelConfig(&self) -> Result<(), ModelConfigError> {
+        let preferences = self.modelConfigDataStore.data()?;
+        match self.readProviderFromPreferences(&preferences, Self::DEFAULT_PROVIDER_ID) {
+            Ok(provider)
+                if provider
+                    .models
+                    .iter()
+                    .any(|model| model.id == Self::DEFAULT_MODEL_ID) =>
+            {
+                return Ok(());
+            }
+            Ok(_) | Err(ModelConfigError::ProviderNotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
+        self.modelConfigDataStore.try_edit_result(|preferences| {
+            let mut provider =
+                match self.readProviderFromPreferences(preferences, Self::DEFAULT_PROVIDER_ID) {
+                    Ok(provider) => provider,
+                    Err(ModelConfigError::ProviderNotFound(_)) => default_deepseek_provider(),
+                    Err(error) => return Err(error),
+                };
+            if !provider
+                .models
+                .iter()
+                .any(|model| model.id == Self::DEFAULT_MODEL_ID)
+            {
+                provider.models.push(default_deepseek_model());
+            }
+            Self::writeProvider(preferences, &provider)?;
+            Ok(())
+        })
     }
 
     /// Observes the ordered provider id list.
@@ -216,8 +208,9 @@ impl ModelConfigManager {
         let providers = self.getProviderProfiles()?;
         let mut summaries = Vec::new();
         for provider in providers {
+            let resolver = ModelSpecResolver::new(&provider);
             for model in &provider.models {
-                let resolved = self.resolveFromProfiles(&provider, model)?;
+                let resolved = resolver.resolve(model);
                 summaries.push(ProviderModelSummary {
                     providerId: provider.id.clone(),
                     providerName: provider.name.clone(),
@@ -225,7 +218,9 @@ impl ModelConfigManager {
                     endpoint: provider.endpoint.clone(),
                     modelId: model.id.clone(),
                     capabilities: resolved.capabilities,
+                    context: resolved.context,
                     pricing: resolved.pricing,
+                    thinking: resolved.thinking.spec,
                 });
             }
         }
@@ -268,12 +263,10 @@ impl ModelConfigManager {
         &self,
         provider: ProviderProfile,
     ) -> Result<ProviderProfile, ModelConfigError> {
-        let mut provider = Self::providerWithProviderOwnedThinkingRules(provider)?;
+        let mut provider = provider;
         if provider.providerType == ApiProviderType::OPENAI_CODEX {
             provider.endpoint = "https://chatgpt.com/backend-api/codex/responses".to_string();
         }
-        ThinkingConfigurationApplier::validate(&provider.thinkingConfigurations)
-            .map_err(ModelConfigError::InvalidThinkingConfiguration)?;
         self.modelConfigDataStore.try_edit_result(|preferences| {
             self.assertProviderExistsInPreferences(preferences, &provider.id)?;
             Self::assertProviderNameUniqueInPreferences(
@@ -292,9 +285,6 @@ impl ModelConfigManager {
         &self,
         provider: ProviderProfile,
     ) -> Result<ProviderProfile, ModelConfigError> {
-        let provider = Self::providerWithProviderOwnedThinkingRules(provider)?;
-        ThinkingConfigurationApplier::validate(&provider.thinkingConfigurations)
-            .map_err(ModelConfigError::InvalidThinkingConfiguration)?;
         if provider.id != Self::DEFAULT_PROVIDER_ID {
             return Err(ModelConfigError::ProviderNotFound(provider.id));
         }
@@ -316,101 +306,92 @@ impl ModelConfigManager {
         Ok(())
     }
 
-    /// Creates a model profile under an existing provider.
+    /// Creates a model profile under an existing provider from a user-entered model id.
     pub fn createProviderModel(
         &self,
         providerId: &str,
         modelId: String,
     ) -> Result<String, ModelConfigError> {
+        let provider = self.getProviderProfile(providerId)?;
+        let builtinTools = ModelSpecResolver::new(&provider)
+            .catalogSpec(&modelId)
+            .map(|spec| spec.builtinTools);
         self.updateProviderInternalResult(providerId, |mut provider| {
             Self::assertProviderModelDoesNotExist(&provider, &modelId)?;
-            let model = Self::newModelProfileWithResolvedSpecs(&provider, modelId.clone());
+            let mut model = ModelProfile::new(modelId.clone());
+            model.builtinToolsOverride = builtinTools.clone();
             provider.models.push(model);
             Ok(provider)
         })?;
         Ok(modelId)
     }
 
-    /// Lists live provider models first, then catalog history entries that were not fetched.
+    /// Lists the provider's live models first, then the other models the catalog lists for it.
+    ///
+    /// Each model is described as it would be once added. A catalog over a day old is
+    /// downloaded again first; when that download fails the copy in use describes the models
+    /// and `getModelCatalogStatus` reports the failure.
     pub fn getAvailableProviderModels(
         &self,
         providerId: &str,
     ) -> Result<Vec<AvailableProviderModel>, ModelConfigError> {
         let provider = self.getProviderProfile(providerId)?;
         if provider.providerType == ApiProviderType::LOCAL_MODEL {
+            let resolver = ModelSpecResolver::new(&provider);
             return Ok(provider
                 .models
                 .iter()
-                .map(|model| AvailableProviderModel {
-                    modelId: model.id.clone(),
-                    source: AvailableProviderModelSource::Local,
-                    pricing: model.pricingOverride.clone(),
-                    context: model.contextOverride.clone(),
-                    capabilities: model.capabilitiesOverride.clone(),
-                    builtinTools: model.builtinToolsOverride.clone().unwrap_or_default(),
-                    request: model.requestOverride.clone(),
-                })
+                .map(|model| resolver.configured(model, AvailableProviderModelSource::Local))
                 .collect());
         }
-        if provider.providerType == ApiProviderType::OPENAI_CODEX {
-            let providerCatalog = ModelCatalog::provider(&provider.providerTypeId)
-                .map_err(ModelConfigError::ModelListFetch)?;
-            return Ok(providerCatalog
-                .models
-                .iter()
-                .map(|catalogModel| AvailableProviderModel {
-                    modelId: catalogModel.modelId.clone(),
-                    source: AvailableProviderModelSource::Remote,
-                    pricing: catalogModel.pricing.clone(),
-                    context: catalogModel.context.clone(),
-                    capabilities: catalogModel.capabilities.clone(),
-                    builtinTools: catalogModel.builtinTools.clone(),
-                    request: catalogModel.request.clone(),
-                })
-                .collect());
-        }
-        let providerCatalog = ModelCatalog::provider(&provider.providerTypeId)
-            .map_err(ModelConfigError::ModelListFetch)?;
-        let remoteModels = ModelListFetcher::fetch(&provider, &providerCatalog)
-            .map_err(ModelConfigError::ModelListFetch)?;
+        ModelCatalogService::refreshCatalogIfStale();
+        let resolver = ModelSpecResolver::new(&provider);
         let mut models: Vec<AvailableProviderModel> = Vec::new();
         let mut seenModelIds = HashSet::new();
-        for remoteModel in remoteModels {
-            let model = Self::fetchedModelWithCatalogMetadata(remoteModel, &providerCatalog);
-            if seenModelIds.insert(model.modelId.to_ascii_lowercase()) {
-                models.push(model);
+        if provider.providerType != ApiProviderType::OPENAI_CODEX {
+            let providerCatalog = ModelCatalog::provider(&provider.providerTypeId)
+                .map_err(ModelConfigError::ModelListFetch)?;
+            let remoteModels = ModelListFetcher::fetch(&provider, &providerCatalog)
+                .map_err(ModelConfigError::ModelListFetch)?;
+            for remoteModel in remoteModels {
+                if seenModelIds.insert(remoteModel.modelId.to_ascii_lowercase()) {
+                    let listed = ModelSpecResolver::listedSpec(&remoteModel);
+                    models.push(resolver.available(
+                        remoteModel.modelId,
+                        AvailableProviderModelSource::Remote,
+                        listed,
+                    ));
+                }
             }
         }
-        for catalogModel in &providerCatalog.models {
-            if seenModelIds.insert(catalogModel.modelId.to_ascii_lowercase()) {
-                models.push(AvailableProviderModel {
-                    modelId: catalogModel.modelId.clone(),
-                    source: AvailableProviderModelSource::Catalog,
-                    pricing: catalogModel.pricing.clone(),
-                    context: catalogModel.context.clone(),
-                    capabilities: catalogModel.capabilities.clone(),
-                    builtinTools: catalogModel.builtinTools.clone(),
-                    request: catalogModel.request.clone(),
-                });
+        // The Codex plan serves no model list; its fixed list is what it serves.
+        let catalogSource = if provider.providerType == ApiProviderType::OPENAI_CODEX {
+            AvailableProviderModelSource::Remote
+        } else {
+            AvailableProviderModelSource::Catalog
+        };
+        for modelId in resolver.catalogModelIds() {
+            if seenModelIds.insert(modelId.to_ascii_lowercase()) {
+                models.push(resolver.available(modelId, catalogSource.clone(), None));
             }
         }
         Ok(models)
     }
 
-    /// Adds a provider model using catalog or remote availability metadata.
+    /// Adds a model chosen from `getAvailableProviderModels`, keeping what the provider's
+    /// model list said of it. Its settings follow the model catalog until the user sets them.
     pub fn addProviderModelFromAvailable(
         &self,
         providerId: &str,
-        modelId: String,
+        model: AvailableProviderModel,
     ) -> Result<String, ModelConfigError> {
-        let provider = self.getProviderProfile(providerId)?;
-        let availableModel = Self::completeAvailableProviderModel(
-            self.findAvailableProviderModel(&provider, &modelId)?,
-        );
+        let modelId = model.modelId.clone();
         self.updateProviderInternalResult(providerId, |mut provider| {
             Self::assertProviderModelDoesNotExist(&provider, &modelId)?;
-            let model = Self::modelProfileFromAvailable(&availableModel);
-            provider.models.push(model);
+            let mut profile = ModelProfile::new(modelId.clone());
+            profile.listed = model.listed.clone();
+            profile.builtinToolsOverride = Some(model.builtinTools.clone());
+            provider.models.push(profile);
             Ok(provider)
         })?;
         Ok(modelId)
@@ -485,27 +466,31 @@ impl ModelConfigManager {
         Ok(())
     }
 
-    /// Updates model capabilities for one provider/model pair.
+    /// Updates model capabilities for one provider/model pair. A value equal to what the
+    /// model inherits is not kept, so that capability keeps following the model catalog.
     pub fn updateCapabilitiesForModel(
         &self,
         providerId: &str,
         modelId: &str,
         capabilities: ModelCapabilities,
     ) -> Result<ModelProfile, ModelConfigError> {
-        let mut model = self.getModelProfile(providerId, modelId)?;
-        model.capabilitiesOverride = Some(capabilities);
+        let (provider, mut model) = self.findModel(providerId, modelId)?;
+        let inherited = ModelSpecResolver::new(&provider).inherited(&model);
+        model.capabilitiesOverride = ModelSpecResolver::capabilityOverrides(&inherited, &capabilities);
         self.updateModelProfile(providerId, model)
     }
 
-    /// Updates model context settings for one provider/model pair.
+    /// Updates the context window for one provider/model pair. The inherited window is not
+    /// kept, so the window keeps following the model catalog.
     pub fn updateContextForModel(
         &self,
         providerId: &str,
         modelId: &str,
         context: ModelContextSpec,
     ) -> Result<ModelProfile, ModelConfigError> {
-        let mut model = self.getModelProfile(providerId, modelId)?;
-        model.contextOverride = Some(context);
+        let (provider, mut model) = self.findModel(providerId, modelId)?;
+        let inherited = ModelSpecResolver::new(&provider).inherited(&model);
+        model.contextOverride = ModelSpecResolver::contextOverride(&inherited, context);
         self.updateModelProfile(providerId, model)
     }
 
@@ -521,16 +506,41 @@ impl ModelConfigManager {
         self.updateModelProfile(providerId, model)
     }
 
-    /// Updates request settings for one provider/model pair.
+    /// Updates request settings for one provider/model pair, keeping the values that differ
+    /// from what the model inherits.
     pub fn updateRequestForModel(
         &self,
         providerId: &str,
         modelId: &str,
         request: ModelRequestSpec,
     ) -> Result<ModelProfile, ModelConfigError> {
-        let mut model = self.getModelProfile(providerId, modelId)?;
-        model.requestOverride = Some(request);
+        let (provider, mut model) = self.findModel(providerId, modelId)?;
+        let inherited = ModelSpecResolver::new(&provider).inherited(&model);
+        model.requestOverride = ModelSpecResolver::requestOverrides(&inherited, &request);
         self.updateModelProfile(providerId, model)
+    }
+
+    /// Drops the pricing, context, capability, tool-format and thinking-control values the user
+    /// set for one model, so it takes the catalog's again.
+    pub fn clearModelSpecOverrides(
+        &self,
+        providerId: &str,
+        modelId: &str,
+    ) -> Result<ModelProfile, ModelConfigError> {
+        let mut model = self.getModelProfile(providerId, modelId)?;
+        Self::clearSpecOverrides(&mut model);
+        self.updateModelProfile(providerId, model)
+    }
+
+    /// Reports when this device last downloaded the model catalog and whether the last
+    /// download failed.
+    pub fn getModelCatalogStatus(&self) -> Result<ModelCatalogStatus, ModelConfigError> {
+        Ok(ModelCatalogService::catalogStatus())
+    }
+
+    /// Downloads the model catalog now and reports the result.
+    pub fn refreshModelCatalog(&self) -> Result<ModelCatalogStatus, ModelConfigError> {
+        Ok(ModelCatalogService::refreshCatalog())
     }
 
     /// Updates summary settings for one provider/model pair.
@@ -545,55 +555,72 @@ impl ModelConfigManager {
         self.updateModelProfile(providerId, model)
     }
 
-    /// Resolves provider thinking controls for a selected model.
-    pub fn getThinkingSettingsForProvider(
+    /// Describes the thinking levels one model offers and the level its requests use.
+    pub fn getThinkingSettingsForModel(
         &self,
         providerId: &str,
         modelId: &str,
-    ) -> Result<ThinkingSettingsDescriptor, ModelConfigError> {
-        let provider = self.getProviderProfile(providerId)?;
-        ThinkingConfigurationApplier::describe(
-            &provider.providerTypeId,
-            modelId,
-            &provider.endpoint,
-            &provider.thinkingConfigurations,
-        )
-        .map_err(ModelConfigError::InvalidThinkingConfiguration)
+    ) -> Result<ModelThinkingSettings, ModelConfigError> {
+        let (provider, model) = self.findModel(providerId, modelId)?;
+        let thinking = Self::resolvedThinking(&provider, &model);
+        Ok(Self::thinkingSettings(
+            &provider,
+            &model,
+            thinking,
+            self.recentThinkingLevel()?,
+        ))
     }
 
-    /// Updates the selected thinking option for one provider/model pair.
-    pub fn updateThinkingOptionForProvider(
+    /// Sets the thinking level of one model. Models the user never set one on carry the level
+    /// set last over to the nearest level they offer.
+    pub fn setThinkingLevelForModel(
         &self,
         providerId: &str,
         modelId: &str,
-        thinkingOptionId: String,
-    ) -> Result<ProviderProfile, ModelConfigError> {
-        let mut provider = self.getProviderProfile(providerId)?;
-        let descriptor = ThinkingConfigurationApplier::describe(
-            &provider.providerTypeId,
-            modelId,
-            &provider.endpoint,
-            &provider.thinkingConfigurations,
-        )
-        .map_err(ModelConfigError::InvalidThinkingConfiguration)?;
-        if descriptor.control != ThinkingControl::Levels && !thinkingOptionId.is_empty() {
-            return Err(ModelConfigError::InvalidThinkingConfiguration(
-                "thinking option is only valid for level-based controls".to_string(),
-            ));
-        }
-        if descriptor.control == ThinkingControl::Levels
-            && !thinkingOptionId.is_empty()
-            && !descriptor
-                .options
+        level: ThinkingLevel,
+    ) -> Result<ModelThinkingSettings, ModelConfigError> {
+        self.modelConfigDataStore.try_edit_result(|preferences| {
+            let provider = self.readProviderFromPreferences(preferences, providerId)?;
+            let mut provider = self.hydrateLocalProviderModels(provider)?;
+            let index = provider
+                .models
                 .iter()
-                .any(|option| option.id == thinkingOptionId)
-        {
-            return Err(ModelConfigError::InvalidThinkingConfiguration(format!(
-                "thinking option is not supported: {thinkingOptionId}"
-            )));
-        }
-        provider.thinkingOptionId = thinkingOptionId;
-        self.updateProviderProfile(provider)
+                .position(|model| model.id == modelId)
+                .ok_or_else(|| {
+                    ModelConfigError::ModelNotFound(format!("{providerId}:{modelId}"))
+                })?;
+            let model = &provider.models[index];
+            let thinking = Self::resolvedThinking(&provider, model);
+            let offered = Self::thinkingLevels(&provider, model, &thinking.spec);
+            if !offered.iter().any(|option| option.level == level) {
+                return Err(ModelConfigError::InvalidThinkingLevel(format!(
+                    "{providerId}:{modelId} does not take `{}`",
+                    level.name()
+                )));
+            }
+            provider.models[index].thinkingLevel = Some(level);
+            Self::writeProvider(preferences, &provider)?;
+            preferences.set(
+                &Self::RECENT_THINKING_LEVEL_KEY(),
+                serde_json::to_value(level)?,
+            );
+            Ok::<(), ModelConfigError>(())
+        })?;
+        self.getThinkingSettingsForModel(providerId, modelId)
+    }
+
+    /// Describes one model's thinking controls in place of what the catalog says, or with
+    /// `None` lets the catalog describe them again.
+    pub fn setThinkingOverrideForModel(
+        &self,
+        providerId: &str,
+        modelId: &str,
+        spec: Option<ModelThinkingSpec>,
+    ) -> Result<ModelThinkingSettings, ModelConfigError> {
+        let mut model = self.getModelProfile(providerId, modelId)?;
+        model.thinkingOverride = spec;
+        self.updateModelProfile(providerId, model)?;
+        self.getThinkingSettingsForModel(providerId, modelId)
     }
 
     /// Tests connectivity for one provider/model configuration.
@@ -705,8 +732,7 @@ impl ModelConfigManager {
                     } else {
                         newCount += 1;
                     }
-                    let provider = Self::providerWithProviderOwnedThinkingRules(provider.clone())?;
-                    Self::writeProvider(preferences, &provider)?;
+                    Self::writeProvider(preferences, provider)?;
                 }
 
                 Ok(ModelConfigImportResult {
@@ -719,24 +745,23 @@ impl ModelConfigManager {
             .map_err(|error: ModelConfigError| format!("模型配置备份恢复失败：{error}"))
     }
 
-    /// Resolves a model profile against its owning provider profile.
+    /// Resolves a model profile against its owning provider profile and the model catalog.
     fn resolveFromProfiles(
         &self,
         provider: &ProviderProfile,
         model: &ModelProfile,
     ) -> Result<ResolvedModelConfig, ModelConfigError> {
-        let pricing = model.pricingOverride.clone();
-        let context = model.contextOverride.clone().unwrap_or_default();
-        let capabilities = model.capabilitiesOverride.clone().unwrap_or_default();
+        let resolved = ModelSpecResolver::new(provider).resolve(model);
+        let pricing = resolved.pricing;
+        let context = resolved.context;
+        let capabilities = resolved.capabilities;
         let builtinTools = model.builtinToolsOverride.clone().unwrap_or_default();
-        let request = model.requestOverride.clone().unwrap_or_default();
-        let thinkingOptionId = Self::selectedThinkingOptionId(
-            &provider.providerTypeId,
-            &model.id,
-            &provider.endpoint,
-            &provider.thinkingConfigurations,
-            &provider.thinkingOptionId,
-        )?;
+        let request = resolved.request;
+        let thinkingLevel = Self::currentThinkingLevel(
+            &Self::thinkingLevels(provider, model, &resolved.thinking.spec),
+            model.thinkingLevel,
+            self.recentThinkingLevel()?,
+        );
 
         Ok(ResolvedModelConfig {
             providerId: provider.id.clone(),
@@ -759,73 +784,88 @@ impl ModelConfigManager {
             builtinTools,
             request,
             parameters: model.parameters.clone(),
-            thinkingConfigurations: provider.thinkingConfigurations.clone(),
-            thinkingOptionId,
+            thinking: resolved.thinking.spec,
+            thinkingLevel,
             summary: model.summary.clone(),
             localRuntime: model.localRuntime.clone(),
         })
     }
 
-    /// Removes catalog-only provider selectors from persisted provider-owned thinking rules.
-    fn providerWithProviderOwnedThinkingRules(
-        mut provider: ProviderProfile,
-    ) -> Result<ProviderProfile, ModelConfigError> {
-        provider.thinkingConfigurations =
-            Self::providerOwnedThinkingConfigurations(&provider.thinkingConfigurations)?;
-        Ok(provider)
+    /// Returns the preference key holding the thinking level the user set last, on any model.
+    fn RECENT_THINKING_LEVEL_KEY() -> operit_store::PreferencesDataStore::PreferencesKey {
+        stringPreferencesKey("thinking_recent_level")
     }
 
-    /// Encodes thinking rules without provider target fields.
-    fn providerOwnedThinkingConfigurations(
-        thinkingConfigurations: &str,
-    ) -> Result<String, ModelConfigError> {
-        let mut rules = serde_json::from_str::<Vec<serde_json::Value>>(thinkingConfigurations)?;
-        for rule in &mut rules {
-            if let Some(object) = rule.as_object_mut() {
-                object.remove("providers");
-                object.remove("providerTypeIds");
-            }
-        }
-        Ok(serde_json::to_string(&rules)?)
+    /// Reads the thinking level the user set last, `None` before the first one.
+    fn recentThinkingLevel(&self) -> Result<Option<ThinkingLevel>, ModelConfigError> {
+        let preferences = self.modelConfigDataStore.data()?;
+        preferences
+            .get(&Self::RECENT_THINKING_LEVEL_KEY())
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()
+            .map_err(ModelConfigError::from)
     }
 
-    /// Selects the persisted thinking option supported by a provider/model pair.
-    fn selectedThinkingOptionId(
-        providerTypeId: &str,
-        modelId: &str,
-        endpoint: &str,
-        thinkingConfigurations: &str,
-        currentOptionId: &str,
-    ) -> Result<String, ModelConfigError> {
-        let descriptor = ThinkingConfigurationApplier::describe(
-            providerTypeId,
-            modelId,
-            endpoint,
-            thinkingConfigurations,
-        )
-        .map_err(ModelConfigError::InvalidThinkingConfiguration)?;
-        if descriptor.control != ThinkingControl::Levels || descriptor.options.is_empty() {
-            return Ok(String::new());
-        }
-        if descriptor
-            .options
-            .iter()
-            .any(|option| option.id == currentOptionId)
+    /// Resolves the thinking controls of a configured model.
+    fn resolvedThinking(provider: &ProviderProfile, model: &ModelProfile) -> ResolvedThinking {
+        ModelSpecResolver::new(provider).resolve(model).thinking
+    }
+
+    /// Returns the levels a model offers through the API its provider speaks.
+    fn thinkingLevels(
+        provider: &ProviderProfile,
+        model: &ModelProfile,
+        spec: &ModelThinkingSpec,
+    ) -> Vec<ThinkingLevelOption> {
+        match ThinkingDialect::for_provider(&provider.providerTypeId, &provider.endpoint, &model.id)
         {
-            return Ok(currentOptionId.to_string());
+            Some(dialect) => dialect.levels(spec),
+            None => Vec::new(),
         }
-        Ok(descriptor.options[0].id.clone())
     }
 
-    /// Builds an independent model profile from selected availability metadata.
-    fn modelProfileFromAvailable(availableModel: &AvailableProviderModel) -> ModelProfile {
-        let mut model = ModelProfile::new(availableModel.modelId.clone());
-        model.pricingOverride = availableModel.pricing.clone();
-        model.contextOverride = availableModel.context.clone();
-        model.capabilitiesOverride = availableModel.capabilities.clone();
-        model.builtinToolsOverride = Some(availableModel.builtinTools.clone());
-        model.requestOverride = availableModel.request.clone();
-        model
+    /// Picks the level requests use: the level set on the model, else the level set last on
+    /// any model, else no thinking, each carried to the nearest level the model offers. The
+    /// carry-over is the user's choice (2026-11-04) so a level need not be set model by model.
+    fn currentThinkingLevel(
+        levels: &[ThinkingLevelOption],
+        chosen: Option<ThinkingLevel>,
+        recent: Option<ThinkingLevel>,
+    ) -> Option<ThinkingLevel> {
+        let offered = levels.iter().map(|option| option.level).collect::<Vec<_>>();
+        let wanted = match (chosen, recent) {
+            (Some(level), _) | (None, Some(level)) => level,
+            (None, None) => ThinkingLevel::Off,
+        };
+        wanted.nearestIn(&offered)
+    }
+
+    /// Describes a model's thinking for settings and the composer.
+    fn thinkingSettings(
+        provider: &ProviderProfile,
+        model: &ModelProfile,
+        thinking: ResolvedThinking,
+        recent: Option<ThinkingLevel>,
+    ) -> ModelThinkingSettings {
+        let levels = Self::thinkingLevels(provider, model, &thinking.spec);
+        let current = Self::currentThinkingLevel(&levels, model.thinkingLevel, recent);
+        ModelThinkingSettings {
+            spec: thinking.spec,
+            source: thinking.source,
+            catalog: thinking.catalog,
+            levels,
+            current,
+            chosen: model.thinkingLevel.is_some(),
+        }
+    }
+
+    /// Drops the spec values the user set; the prompt-cache choice has no catalog value and stays.
+    fn clearSpecOverrides(model: &mut ModelProfile) {
+        model.pricingOverride = None;
+        model.contextOverride = None;
+        model.capabilitiesOverride = ModelCapabilityOverrides::default();
+        model.requestOverride.supportsStructuredTools = None;
+        model.thinkingOverride = None;
     }
 
     /// Derives provider membership from complete records and validates their identities.
@@ -873,14 +913,6 @@ impl ModelConfigManager {
                     );
                     providerIds.push(provider.id);
                 }
-                let provider = local_model_provider();
-                if !providerIds.iter().any(|id| id == &provider.id) {
-                    preferences.set(
-                        &stringPreferencesKey(&format!("provider_{}", provider.id)),
-                        serde_json::to_string(&provider)?,
-                    );
-                    providerIds.push(provider.id);
-                }
                 preferences.set(
                     &Self::PROVIDER_LIST_KEY(),
                     serde_json::to_string(&providerIds)?,
@@ -888,24 +920,9 @@ impl ModelConfigManager {
                 Ok(())
             }
             1 => Ok(()),
-            2 => {
-                let providerIds = preferences
-                    .getTyped::<String>(&Self::PROVIDER_LIST_KEY())?
-                    .map(|encoded| serde_json::from_str::<Vec<String>>(&encoded))
-                    .transpose()?
-                    .unwrap_or_default();
-                for id in providerIds {
-                    let key = stringPreferencesKey(&format!("provider_{id}"));
-                    let Some(encoded) = preferences.getTyped::<String>(&key)? else {
-                        continue;
-                    };
-                    let provider: ProviderProfile = serde_json::from_str(&encoded)?;
-                    let provider = Self::providerWithProviderOwnedThinkingRules(provider)
-                        .map_err(|error| PreferencesDataStoreError::Message(error.to_string()))?;
-                    preferences.set(&key, serde_json::to_string(&provider)?);
-                }
-                Ok(())
-            }
+            // Provider thinking rules lost their provider selectors here; the step from
+            // version six drops the rules altogether.
+            2 => Ok(()),
             3 => {
                 let records = preferences
                     .iterEntries()
@@ -915,8 +932,10 @@ impl ModelConfigManager {
                     })
                     .collect::<Vec<_>>();
                 for (key, value) in records {
-                    let encoded = serde_json::from_value::<String>(value)?;
-                    let mut record: serde_json::Value = serde_json::from_str(&encoded)?;
+                    let mut record: serde_json::Value = match value {
+                        serde_json::Value::String(encoded) => serde_json::from_str(&encoded)?,
+                        record => record,
+                    };
                     for field in ["providerTypeId", "providerType"] {
                         let removed = record
                             .get(field)
@@ -970,6 +989,100 @@ impl ModelConfigManager {
                             .unwrap_or(false);
                         if removed {
                             record[field] = serde_json::json!(ApiProviderType::OTHER.name());
+                        }
+                    }
+                    preferences.set(&stringPreferencesKey(&key), record);
+                }
+                Ok(())
+            }
+            5 => {
+                // Pricing, context, capability and request values became what the user set,
+                // field by field, over the model catalog. Earlier builds copied them from the
+                // catalog when a model was added, so they are dropped and every model takes
+                // the catalog's again. The Claude prompt-cache choice has no catalog value
+                // and is kept.
+                let records = preferences
+                    .iterEntries()
+                    .filter_map(|(key, value)| {
+                        (key != "provider_list" && key.starts_with("provider_"))
+                            .then(|| (key.to_owned(), value.clone()))
+                    })
+                    .collect::<Vec<_>>();
+                for (key, mut record) in records {
+                    if let Some(models) = record
+                        .get_mut("models")
+                        .and_then(serde_json::Value::as_array_mut)
+                    {
+                        for model in models.iter_mut().filter_map(serde_json::Value::as_object_mut) {
+                            let promptCache = model
+                                .get("requestOverride")
+                                .and_then(|request| request.get("enableClaude1hPromptCache"))
+                                .and_then(serde_json::Value::as_bool)
+                                == Some(true);
+                            model.insert("pricingOverride".into(), serde_json::Value::Null);
+                            model.insert("contextOverride".into(), serde_json::Value::Null);
+                            model.insert("capabilitiesOverride".into(), serde_json::json!({}));
+                            model.insert(
+                                "requestOverride".into(),
+                                if promptCache {
+                                    serde_json::json!({ "enableClaude1hPromptCache": true })
+                                } else {
+                                    serde_json::json!({})
+                                },
+                            );
+                        }
+                    }
+                    preferences.set(&stringPreferencesKey(&key), record);
+                }
+                Ok(())
+            }
+            6 => {
+                // Thinking became a level set per model over the controls the catalog
+                // describes. Earlier builds kept a rule list and a chosen option per provider;
+                // both are dropped.
+                let records = preferences
+                    .iterEntries()
+                    .filter_map(|(key, value)| {
+                        (key != "provider_list" && key.starts_with("provider_"))
+                            .then(|| (key.to_owned(), value.clone()))
+                    })
+                    .collect::<Vec<_>>();
+                for (key, mut record) in records {
+                    if let Some(provider) = record.as_object_mut() {
+                        provider.remove("thinkingConfigurations");
+                        provider.remove("thinkingOptionId");
+                    }
+                    preferences.set(&stringPreferencesKey(&key), record);
+                }
+                Ok(())
+            }
+            7 => {
+                // Remove retired message-count controls from every model, preserving
+                // each user's summary switch, token threshold and all other settings.
+                let records = preferences
+                    .iterEntries()
+                    .filter_map(|(key, value)| {
+                        (key != "provider_list" && key.starts_with("provider_"))
+                            .then(|| (key.to_owned(), value.clone()))
+                    })
+                    .collect::<Vec<_>>();
+                for (key, value) in records {
+                    let mut record = match value {
+                        serde_json::Value::String(encoded) => serde_json::from_str(&encoded)?,
+                        record => record,
+                    };
+                    if let Some(models) = record
+                        .get_mut("models")
+                        .and_then(serde_json::Value::as_array_mut)
+                    {
+                        for model in models {
+                            if let Some(summary) = model
+                                .get_mut("summary")
+                                .and_then(serde_json::Value::as_object_mut)
+                            {
+                                summary.remove("enableSummaryByMessageCount");
+                                summary.remove("summaryMessageCountThreshold");
+                            }
                         }
                     }
                     preferences.set(&stringPreferencesKey(&key), record);
@@ -1112,118 +1225,6 @@ impl ModelConfigManager {
         }
         Ok(())
     }
-    fn findAvailableProviderModel(
-        &self,
-        provider: &ProviderProfile,
-        modelId: &str,
-    ) -> Result<AvailableProviderModel, ModelConfigError> {
-        if provider.providerType == ApiProviderType::LOCAL_MODEL {
-            return provider
-                .models
-                .iter()
-                .find(|model| model.id == modelId)
-                .map(|model| AvailableProviderModel {
-                    modelId: model.id.clone(),
-                    source: AvailableProviderModelSource::Local,
-                    pricing: model.pricingOverride.clone(),
-                    context: model.contextOverride.clone(),
-                    capabilities: model.capabilitiesOverride.clone(),
-                    builtinTools: model.builtinToolsOverride.clone().unwrap_or_default(),
-                    request: model.requestOverride.clone(),
-                })
-                .ok_or_else(|| ModelConfigError::AvailableProviderModelNotFound {
-                    providerId: provider.id.clone(),
-                    modelId: modelId.to_string(),
-                });
-        }
-        let providerCatalog = ModelCatalog::provider(&provider.providerTypeId)
-            .map_err(ModelConfigError::ModelListFetch)?;
-        if let Some(model) = providerCatalog
-            .models
-            .iter()
-            .find(|model| model.modelId.eq_ignore_ascii_case(modelId))
-        {
-            return Ok(AvailableProviderModel {
-                modelId: model.modelId.clone(),
-                source: AvailableProviderModelSource::Catalog,
-                pricing: model.pricing.clone(),
-                context: model.context.clone(),
-                capabilities: model.capabilities.clone(),
-                builtinTools: model.builtinTools.clone(),
-                request: model.request.clone(),
-            });
-        }
-        ModelListFetcher::fetch(provider, &providerCatalog)
-            .map_err(ModelConfigError::ModelListFetch)?
-            .into_iter()
-            .find(|model| model.modelId.eq_ignore_ascii_case(modelId))
-            .map(Self::completeAvailableProviderModel)
-            .ok_or_else(|| ModelConfigError::AvailableProviderModelNotFound {
-                providerId: provider.id.clone(),
-                modelId: modelId.to_string(),
-            })
-    }
-
-    /// Marks a live listing as fetched and applies catalog metadata when the IDs match.
-    fn fetchedModelWithCatalogMetadata(
-        remoteModel: AvailableProviderModel,
-        providerCatalog: &ProviderCatalogEntry,
-    ) -> AvailableProviderModel {
-        if let Some(catalogModel) = providerCatalog
-            .models
-            .iter()
-            .find(|model| model.modelId.eq_ignore_ascii_case(&remoteModel.modelId))
-        {
-            return Self::completeAvailableProviderModel(AvailableProviderModel {
-                modelId: catalogModel.modelId.clone(),
-                source: AvailableProviderModelSource::Remote,
-                pricing: catalogModel.pricing.clone(),
-                context: catalogModel.context.clone(),
-                capabilities: catalogModel.capabilities.clone(),
-                builtinTools: catalogModel.builtinTools.clone(),
-                request: catalogModel.request.clone(),
-            });
-        }
-        Self::completeAvailableProviderModel(remoteModel)
-    }
-
-    fn completeAvailableProviderModel(mut model: AvailableProviderModel) -> AvailableProviderModel {
-        if model.context.is_none() {
-            model.context = Some(ModelContextSpec::default());
-        }
-        if model.capabilities.is_none() {
-            model.capabilities = Some(ModelCapabilities::default());
-        }
-        if model.request.is_none() {
-            model.request = Some(ModelRequestSpec::default());
-        }
-        model
-    }
-
-    fn newModelProfileWithResolvedSpecs(
-        provider: &ProviderProfile,
-        modelId: String,
-    ) -> ModelProfile {
-        let mut model = ModelProfile::new(modelId.clone());
-        if let Ok(catalogModel) = ModelCatalog::model(&provider.providerTypeId, &modelId) {
-            model.pricingOverride = catalogModel.pricing;
-            model.contextOverride = catalogModel.context;
-            model.capabilitiesOverride = catalogModel.capabilities;
-            model.builtinToolsOverride = Some(catalogModel.builtinTools);
-            model.requestOverride = catalogModel.request;
-        }
-        if model.contextOverride.is_none() {
-            model.contextOverride = Some(ModelContextSpec::default());
-        }
-        if model.capabilitiesOverride.is_none() {
-            model.capabilitiesOverride = Some(ModelCapabilities::default());
-        }
-        if model.requestOverride.is_none() {
-            model.requestOverride = Some(ModelRequestSpec::default());
-        }
-        model
-    }
-
     fn assertProviderExists(&self, providerId: &str) -> Result<(), ModelConfigError> {
         let providerIds = self.getProviderIds()?;
         if providerIds.iter().any(|id| id == providerId) {
@@ -1298,17 +1299,11 @@ impl ModelConfigManager {
                     maxContextLength: model.localRuntime.llamaContextSize as f32 / 1000.0,
                 });
             }
-            if model.capabilitiesOverride.is_none() {
-                model.capabilitiesOverride = Some(ModelCapabilities {
-                    toolCall: true,
-                    ..ModelCapabilities::default()
-                });
+            if model.capabilitiesOverride.toolCall.is_none() {
+                model.capabilitiesOverride.toolCall = Some(true);
             }
-            if model.requestOverride.is_none() {
-                model.requestOverride = Some(ModelRequestSpec {
-                    supportsStructuredTools: false,
-                    ..ModelRequestSpec::default()
-                });
+            if model.requestOverride.supportsStructuredTools.is_none() {
+                model.requestOverride.supportsStructuredTools = Some(false);
             }
             models.push(model);
         }
@@ -1422,7 +1417,10 @@ mod tests {
         assert!(migrated
             .get(&stringPreferencesKey("provider_list"))
             .is_none());
-        assert_eq!(store.schemaVersion().unwrap(), 5);
+        assert_eq!(
+            store.schemaVersion().unwrap(),
+            ModelConfigManager::PREFERENCES_VERSION
+        );
         assert_eq!(store.data().unwrap(), migrated);
     }
 
@@ -1457,13 +1455,16 @@ mod tests {
         });
         host.writeBytes(path, &serde_json::to_vec(&legacy).unwrap())
             .unwrap();
+        let expectedMigrationStep = std::sync::atomic::AtomicU32::new(4);
         let store = CoreNodeStateStore::newWithStorage(host, path).withSchema(
             ModelConfigManager::PREFERENCES_VERSION,
-            |version, preferences| {
+            move |version, preferences| {
                 assert_eq!(
-                    version, 4,
-                    "an existing version-four file keeps its own arm"
+                    version,
+                    expectedMigrationStep.load(std::sync::atomic::Ordering::SeqCst),
+                    "an existing version-four file starts at its own arm"
                 );
+                expectedMigrationStep.store(version + 1, std::sync::atomic::Ordering::SeqCst);
                 ModelConfigManager::migratePreferences(version, preferences)
             },
         );
@@ -1483,7 +1484,10 @@ mod tests {
             ModelConfigManager::readProviderList(&migrated).unwrap(),
             vec!["openai", "iflow"]
         );
-        assert_eq!(store.schemaVersion().unwrap(), 5);
+        assert_eq!(
+            store.schemaVersion().unwrap(),
+            ModelConfigManager::PREFERENCES_VERSION
+        );
     }
 
     /// Cleans an iFlow record on an older file whose arms still parse full provider profiles.
@@ -1534,7 +1538,10 @@ mod tests {
             ModelConfigManager::readProviderList(&migrated).unwrap(),
             vec!["iflow"]
         );
-        assert_eq!(store.schemaVersion().unwrap(), 5);
+        assert_eq!(
+            store.schemaVersion().unwrap(),
+            ModelConfigManager::PREFERENCES_VERSION
+        );
     }
 
     #[test]
@@ -1568,16 +1575,17 @@ mod tests {
         });
         registry_store.write(&registry).unwrap();
         let manager = ModelConfigManager::new(root.clone());
-        let mut model = manager.getModelProfile("LOCAL_MODEL", &model_id).unwrap();
+        let provider_id = local_provider(&manager);
+        let mut model = manager.getModelProfile(&provider_id, &model_id).unwrap();
         assert!(!model.localRuntime.inferenceBindingKey.is_empty());
         model.localRuntime.llamaThreadCount = 7;
         model.localRuntime.llamaContextSize = 4096;
         manager
-            .updateModelProfile("LOCAL_MODEL", model.clone())
+            .updateModelProfile(&provider_id, model.clone())
             .unwrap();
         assert_eq!(
             manager
-                .getModelProfile("LOCAL_MODEL", &model_id)
+                .getModelProfile(&provider_id, &model_id)
                 .unwrap()
                 .localRuntime,
             model.localRuntime
@@ -1586,14 +1594,14 @@ mod tests {
             .unwrap()
             .create("remote-llm", "model-device")
             .unwrap();
-        let mut provider = manager.getProviderProfile("LOCAL_MODEL").unwrap();
+        let mut provider = manager.getProviderProfile(&provider_id).unwrap();
         let mut remote = ModelProfile::new("remote-model@revision".into());
         remote.localRuntime.inferenceBindingKey = "remote-llm".into();
         provider.models.push(remote.clone());
         manager.saveProviderToDataStore(&provider).unwrap();
         registry.installedModels.clear();
         registry_store.write(&registry).unwrap();
-        let models = manager.getProviderProfile("LOCAL_MODEL").unwrap().models;
+        let models = manager.getProviderProfile(&provider_id).unwrap().models;
         assert_eq!(models, vec![remote]);
         fs::remove_dir_all(root).unwrap();
     }
@@ -1620,7 +1628,8 @@ mod tests {
         });
         registry_store.write(&registry).unwrap();
         let manager = ModelConfigManager::new(root.clone());
-        let local = manager.getModelProfile("LOCAL_MODEL", &model_id).unwrap();
+        let provider_id = local_provider(&manager);
+        let local = manager.getModelProfile(&provider_id, &model_id).unwrap();
         assert!(!local.localRuntime.inferenceBindingKey.is_empty());
         operit_store::CoreNodeBindingStore::CoreNodeBindingStore::new(storage)
             .unwrap()
@@ -1631,13 +1640,13 @@ mod tests {
         remote.localRuntime.llamaThreadCount = 7;
         remote.localRuntime.llamaContextSize = 4096;
         manager
-            .updateModelProfile("LOCAL_MODEL", remote.clone())
+            .updateModelProfile(&provider_id, remote.clone())
             .unwrap();
 
         // A fresh read must preserve the selected device even with identical local weights.
         let reloaded = ModelConfigManager::new(root.clone());
         assert_eq!(
-            reloaded.getModelProfile("LOCAL_MODEL", &model_id).unwrap(),
+            reloaded.getModelProfile(&provider_id, &model_id).unwrap(),
             remote
         );
 
@@ -1646,21 +1655,21 @@ mod tests {
             .write(&LocalModelRegistrySnapshot::empty())
             .unwrap();
         assert_eq!(
-            reloaded.getModelProfile("LOCAL_MODEL", &model_id).unwrap(),
+            reloaded.getModelProfile(&provider_id, &model_id).unwrap(),
             remote
         );
         registry_store.write(&registry).unwrap();
         assert_eq!(
-            reloaded.getModelProfile("LOCAL_MODEL", &model_id).unwrap(),
+            reloaded.getModelProfile(&provider_id, &model_id).unwrap(),
             remote
         );
 
         // An explicit change back to this node remains possible.
         reloaded
-            .updateModelProfile("LOCAL_MODEL", local.clone())
+            .updateModelProfile(&provider_id, local.clone())
             .unwrap();
         assert_eq!(
-            reloaded.getModelProfile("LOCAL_MODEL", &model_id).unwrap(),
+            reloaded.getModelProfile(&provider_id, &model_id).unwrap(),
             local
         );
         fs::remove_dir_all(root).unwrap();
@@ -1676,10 +1685,9 @@ mod tests {
             .expect("build Tokio runtime");
         runtime.block_on(async {
             let manager = ModelConfigManager::new(root.clone());
+            let provider_id = local_provider(&manager);
             let providers = manager.getProviderProfiles().expect("provider profiles");
-            assert!(providers
-                .iter()
-                .any(|provider| provider.id == "LOCAL_MODEL"));
+            assert!(providers.iter().any(|provider| provider.id == provider_id));
         });
         fs::remove_dir_all(root).expect("remove model config test root");
     }
@@ -1689,6 +1697,12 @@ mod tests {
         let root = unique_test_root("create_local_provider_with_empty_endpoint");
         setup_test_runtime(root.clone());
         let manager = ModelConfigManager::new(root.clone());
+        // A fresh install lists no local models until the user adds the provider.
+        assert!(manager
+            .getProviderProfiles()
+            .expect("provider profiles")
+            .iter()
+            .all(|provider| provider.providerType != ApiProviderType::LOCAL_MODEL));
         let provider_id = manager
             .createProvider(
                 "Additional Local Models".to_string(),
@@ -1704,9 +1718,6 @@ mod tests {
         assert!(provider.endpoint.is_empty());
         let ids = manager.getProviderIds().expect("provider ids");
         assert!(ids.contains(&provider_id));
-        assert!(ids
-            .iter()
-            .any(|id| id == ApiProviderType::LOCAL_MODEL.name()));
 
         fs::remove_dir_all(root).expect("remove model config test root");
     }
@@ -1716,15 +1727,12 @@ mod tests {
         let root = unique_test_root("delete_and_recreate_local_provider");
         setup_test_runtime(root.clone());
         let manager = ModelConfigManager::new(root.clone());
-        let original_id = ApiProviderType::LOCAL_MODEL.name();
+        let original_id = local_provider(&manager);
         manager
-            .getProviderProfile(original_id)
-            .expect("initial local provider");
-        manager
-            .deleteProvider(original_id)
-            .expect("delete initial local provider");
+            .deleteProvider(&original_id)
+            .expect("delete first local provider");
         assert!(matches!(
-            manager.getProviderProfile(original_id),
+            manager.getProviderProfile(&original_id),
             Err(ModelConfigError::ProviderNotFound(_))
         ));
 
@@ -1732,8 +1740,7 @@ mod tests {
         assert!(!manager
             .getProviderIds()
             .expect("provider ids after reload")
-            .iter()
-            .any(|id| id == original_id));
+            .contains(&original_id));
         let provider_id = manager
             .createProvider(
                 "Local Models".to_string(),
@@ -1794,6 +1801,7 @@ mod tests {
     /// Verifies exported provider JSON restores a new provider with its API key.
     #[test]
     fn import_all_providers_from_backup_content_restores_provider() {
+        use operit_model::ModelConfigData::{ModelSummarySettings, ProviderProfile};
         let root = unique_test_root("import_all_providers_from_backup_content_restores_provider");
         setup_test_runtime(root.clone());
         let manager = ModelConfigManager::new(root.clone());
@@ -1803,7 +1811,12 @@ mod tests {
         provider.id = "restored_provider".to_string();
         provider.name = "Restored provider".to_string();
         provider.apiKey = "sk-restored".to_string();
-        let backup = serde_json::to_string(&vec![provider]).expect("serialize backup");
+        let mut backup = serde_json::to_value(vec![provider]).expect("serialize backup");
+        backup[0]["models"][0]["summary"] = serde_json::json!({
+            "enableSummary": false, "summaryTokenThreshold": 0.92,
+            "enableSummaryByMessageCount": true, "summaryMessageCountThreshold": 1
+        });
+        let backup = backup.to_string();
 
         let result = manager
             .importAllProvidersFromBackupContent(&backup)
@@ -1820,6 +1833,19 @@ mod tests {
                 .apiKey,
             "sk-restored"
         );
+        let restored = manager.getProviderProfile("restored_provider").unwrap();
+        assert_eq!(
+            serde_json::to_value(&restored.models[0].summary).unwrap(),
+            serde_json::to_value(ModelSummarySettings {
+                enableSummary: false,
+                summaryTokenThreshold: 0.92,
+            }).unwrap()
+        );
+        let exported: Vec<ProviderProfile> = serde_json::from_str(
+            &manager.exportAllProviders().expect("export imported settings")
+        ).unwrap();
+        let exported = exported.iter().find(|provider| provider.id == "restored_provider").unwrap();
+        assert_eq!(exported.models[0].summary, restored.models[0].summary);
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1927,7 +1953,7 @@ mod tests {
         let error = manager
             .addProviderModelFromAvailable(
                 ModelConfigManager::DEFAULT_PROVIDER_ID,
-                ModelConfigManager::DEFAULT_MODEL_ID.to_string(),
+                available_model(ModelConfigManager::DEFAULT_MODEL_ID, None),
             )
             .expect_err("duplicate available model id should be rejected");
         assert!(matches!(error, ModelConfigError::ModelAlreadyExists { .. }));
@@ -1943,6 +1969,308 @@ mod tests {
         assert_eq!(count, 1);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// Keeps only the capability values that differ from what the provider list said.
+    #[test]
+    fn capability_updates_keep_only_values_that_differ_from_inherited() {
+        use operit_model::ModelConfigData::{ModelCapabilities, ModelListedSpec};
+        let root = unique_test_root("capability_updates_keep_only_differing_values");
+        setup_test_runtime(root.clone());
+        let manager = ModelConfigManager::new(root.clone());
+        let listed = ModelListedSpec {
+            capabilities: Some(ModelCapabilities {
+                directImage: true,
+                toolCall: true,
+                ..ModelCapabilities::default()
+            }),
+            ..ModelListedSpec::default()
+        };
+        manager
+            .addProviderModelFromAvailable(
+                ModelConfigManager::DEFAULT_PROVIDER_ID,
+                available_model("listed-test-model", Some(listed)),
+            )
+            .expect("add listed model");
+
+        let model = manager
+            .updateCapabilitiesForModel(
+                ModelConfigManager::DEFAULT_PROVIDER_ID,
+                "listed-test-model",
+                ModelCapabilities {
+                    directImage: true,
+                    toolCall: false,
+                    ..ModelCapabilities::default()
+                },
+            )
+            .expect("update capabilities");
+        assert_eq!(model.capabilitiesOverride.directImage, None);
+        assert_eq!(model.capabilitiesOverride.toolCall, Some(false));
+
+        let resolved = manager
+            .getResolvedModelConfig(ModelConfigManager::DEFAULT_PROVIDER_ID, "listed-test-model")
+            .expect("resolve listed model");
+        assert!(resolved.capabilities.directImage);
+        assert!(!resolved.capabilities.toolCall);
+
+        let model = manager
+            .clearModelSpecOverrides(ModelConfigManager::DEFAULT_PROVIDER_ID, "listed-test-model")
+            .expect("clear overrides");
+        assert!(!model.hasSpecOverrides());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Drops the spec values earlier builds copied from the catalog and keeps the prompt-cache choice.
+    #[test]
+    fn schema_five_migration_drops_copied_model_specs() {
+        use operit_model::ModelConfigData::ProviderProfile;
+        use operit_store::PreferencesDataStore::{stringPreferencesKey, CoreNodeStateStore};
+        let root = unique_test_root("schema_five_model_specs");
+        let host: Arc<dyn RuntimeStorageHost> =
+            Arc::new(TestRuntimeStorageHost { root: root.clone() });
+        let path = "runtime/config/model-schema-five.preferences.json";
+        let provider = ProviderProfile::new(
+            "anthropic".into(),
+            "Anthropic".into(),
+            ApiProviderType::ANTHROPIC,
+            "https://api.anthropic.com/v1/messages".into(),
+        );
+        let mut record = serde_json::to_value(&provider).unwrap();
+        record["models"] = serde_json::json!([{
+            "id": "claude-sonnet-5",
+            "pricingOverride": null,
+            "contextOverride": {"maxContextLength": 200.0},
+            "capabilitiesOverride": {"directImage": false, "directAudio": false, "directVideo": false, "toolCall": false},
+            "builtinToolsOverride": [],
+            "requestOverride": {"supportsStructuredTools": false, "enableClaude1hPromptCache": true},
+            "parameters": [],
+            "summary": serde_json::to_value(
+                operit_model::ModelConfigData::ModelSummarySettings::default()
+            ).unwrap(),
+            "localRuntime": serde_json::to_value(
+                operit_model::ModelConfigData::LocalModelRuntimeSettings::default()
+            ).unwrap()
+        }]);
+        let legacy = serde_json::json!({
+            "__operit_preferences_schema_version": "5",
+            "provider_anthropic": record
+        });
+        host.writeBytes(path, &serde_json::to_vec(&legacy).unwrap())
+            .unwrap();
+        let expectedMigrationStep = std::sync::atomic::AtomicU32::new(5);
+        let store = CoreNodeStateStore::newWithStorage(host, path).withSchema(
+            ModelConfigManager::PREFERENCES_VERSION,
+            move |version, preferences| {
+                assert_eq!(
+                    version,
+                    expectedMigrationStep.load(std::sync::atomic::Ordering::SeqCst),
+                    "a version-five file starts at the spec reset"
+                );
+                expectedMigrationStep.store(version + 1, std::sync::atomic::Ordering::SeqCst);
+                ModelConfigManager::migratePreferences(version, preferences)
+            },
+        );
+        let migrated = store.data().unwrap();
+        let record = migrated
+            .get(&stringPreferencesKey("provider_anthropic"))
+            .unwrap();
+        let provider: ProviderProfile = serde_json::from_value(record.clone()).unwrap();
+        let model = &provider.models[0];
+        assert!(!model.hasSpecOverrides());
+        assert_eq!(model.requestOverride.enableClaude1hPromptCache, Some(true));
+        assert_eq!(
+            store.schemaVersion().unwrap(),
+            ModelConfigManager::PREFERENCES_VERSION
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Upgrades persisted settings once, keeping user choices and cleaning every provider.
+    #[test]
+    fn schema_seven_migration_removes_retired_summary_controls() {
+        use operit_store::PreferencesDataStore::{stringPreferencesKey, PreferencesDataStore};
+        let root = unique_test_root("schema_seven_summary_controls");
+        let host: Arc<dyn RuntimeStorageHost> =
+            Arc::new(TestRuntimeStorageHost { root: root.clone() });
+        let path = "runtime/config/model-schema-seven.preferences.json";
+        let provider = serde_json::json!({
+            "id": "custom",
+            "apiKey": "preserved-test-key",
+            "models": [
+                {"id": "enabled", "summary": {
+                    "enableSummary": true, "summaryTokenThreshold": 0.92,
+                    "enableSummaryByMessageCount": true, "summaryMessageCountThreshold": 1
+                }},
+                {"id": "disabled", "summary": {
+                    "enableSummary": false, "summaryTokenThreshold": 70,
+                    "enableSummaryByMessageCount": false, "summaryMessageCountThreshold": 16
+                }},
+                {"id": "without-summary"}
+            ]
+        });
+        let legacy = serde_json::json!({
+            "__operit_preferences_schema_version": "7",
+            "provider_custom": provider,
+            "provider_unindexed": provider.to_string(),
+            "unrelated_preference": "preserved"
+        });
+        host.writeBytes(path, &serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let store = ModelConfigManager::preferenceStore(host.clone(), path);
+        let migrated = store.data().unwrap();
+        let mut expected = provider;
+        for summary in expected["models"].as_array_mut().unwrap().iter_mut()
+            .filter_map(|model| model.get_mut("summary"))
+        {
+            let summary = summary.as_object_mut().unwrap();
+            summary.remove("enableSummaryByMessageCount");
+            summary.remove("summaryMessageCountThreshold");
+        }
+        for key in ["provider_custom", "provider_unindexed"] {
+            assert_eq!(migrated.get(&stringPreferencesKey(key)), Some(&expected));
+        }
+        assert_eq!(
+            migrated.get(&stringPreferencesKey("unrelated_preference")),
+            Some(&serde_json::json!("preserved"))
+        );
+        assert_eq!(store.schemaVersion().unwrap(), 8);
+        let reopened = PreferencesDataStore::newEncryptedWithStorage(host, path).withMigration(
+            ModelConfigManager::PREFERENCES_VERSION,
+            |_, _| panic!("a migrated store must not run migration again"),
+        );
+        assert_eq!(
+            reopened.data().unwrap().get(&stringPreferencesKey("provider_custom")),
+            Some(&expected)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn available_model(
+        modelId: &str,
+        listed: Option<operit_model::ModelConfigData::ModelListedSpec>,
+    ) -> operit_model::ModelConfigData::AvailableProviderModel {
+        operit_model::ModelConfigData::AvailableProviderModel {
+            modelId: modelId.to_string(),
+            source: operit_model::ModelConfigData::AvailableProviderModelSource::Remote,
+            catalogModelId: None,
+            pricing: None,
+            context: None,
+            capabilities: None,
+            builtinTools: Vec::new(),
+            request: None,
+            listed,
+        }
+    }
+
+    /// Creates a provider of installed local models, as the user does from New provider.
+    fn local_provider(manager: &ModelConfigManager) -> String {
+        manager
+            .createProvider(
+                "Local Models".to_string(),
+                ApiProviderType::LOCAL_MODEL.name().to_string(),
+                String::new(),
+            )
+            .expect("create local provider")
+    }
+
+    #[test]
+    fn thinking_levels_stay_per_model_and_carry_to_unset_models() {
+        use operit_model::ModelThinking::{ModelThinkingSpec, ThinkingLevel::*, ThinkingSpecSource};
+        let root = unique_test_root("thinking_levels_per_model");
+        setup_test_runtime(root.clone());
+        let manager = ModelConfigManager::new(root.clone());
+        let provider = ModelConfigManager::DEFAULT_PROVIDER_ID;
+        let graded = ModelConfigManager::DEFAULT_MODEL_ID;
+        let switch = manager
+            .createProviderModel(provider, "switch-only".to_string())
+            .expect("second model");
+        manager
+            .setThinkingOverrideForModel(
+                provider,
+                graded,
+                Some(ModelThinkingSpec {
+                    supported: true,
+                    toggle: true,
+                    efforts: vec![Low, High, Max],
+                    budget: None,
+                }),
+            )
+            .expect("describe graded model");
+        let described = manager
+            .setThinkingOverrideForModel(provider, &switch, Some(ModelThinkingSpec::switchable()))
+            .expect("describe switch-only model");
+        assert_eq!(described.source, ThinkingSpecSource::Declared);
+
+        // Nothing set yet: no thinking.
+        let fresh = manager.getThinkingSettingsForModel(provider, graded).unwrap();
+        assert_eq!(
+            fresh.levels.iter().map(|option| option.level).collect::<Vec<_>>(),
+            vec![Off, Low, High, Max]
+        );
+        assert_eq!((fresh.current, fresh.chosen), (Some(Off), false));
+
+        // A level set on one model carries to a model never set, as its nearest level.
+        let graded_high = manager
+            .setThinkingLevelForModel(provider, graded, High)
+            .expect("set high");
+        assert_eq!((graded_high.current, graded_high.chosen), (Some(High), true));
+        let carried = manager.getThinkingSettingsForModel(provider, &switch).unwrap();
+        assert_eq!((carried.current, carried.chosen), (Some(Enabled), false));
+
+        // A level set on the second model stays there and leaves the first alone.
+        manager
+            .setThinkingLevelForModel(provider, &switch, Off)
+            .expect("turn off");
+        assert_eq!(
+            manager
+                .getResolvedModelConfig(provider, &switch)
+                .unwrap()
+                .thinkingLevel,
+            Some(Off)
+        );
+        assert_eq!(
+            manager
+                .getResolvedModelConfig(provider, graded)
+                .unwrap()
+                .thinkingLevel,
+            Some(High)
+        );
+
+        // A level the model does not offer is refused.
+        assert!(matches!(
+            manager.setThinkingLevelForModel(provider, graded, Medium),
+            Err(ModelConfigError::InvalidThinkingLevel(_))
+        ));
+
+        // Clearing the description leaves a model the catalog does not know without levels.
+        let cleared = manager
+            .setThinkingOverrideForModel(provider, &switch, None)
+            .expect("clear description");
+        assert!(cleared.levels.is_empty());
+        assert_eq!(cleared.current, None);
+        fs::remove_dir_all(root).expect("remove model config test root");
+    }
+
+    #[test]
+    fn local_models_switch_thinking_on_and_off() {
+        use operit_model::ModelConfigData::{ModelProfile, ProviderProfile};
+        use operit_model::ModelThinking::{ThinkingLevel::*, ThinkingSpecSource};
+        let provider = ProviderProfile::new(
+            "local".to_string(),
+            "Local Models".to_string(),
+            ApiProviderType::LOCAL_MODEL,
+            String::new(),
+        );
+        let model = ModelProfile::new("qwen3@v1".to_string());
+        let thinking = ModelConfigManager::resolvedThinking(&provider, &model);
+        assert_eq!(thinking.source, ThinkingSpecSource::LocalRuntime);
+        assert_eq!(
+            ModelConfigManager::thinkingLevels(&provider, &model, &thinking.spec)
+                .iter()
+                .map(|option| option.level)
+                .collect::<Vec<_>>(),
+            vec![Off, Enabled]
+        );
     }
 
     fn unique_test_root(name: &str) -> std::path::PathBuf {
@@ -1992,6 +2320,11 @@ mod tests {
     }
 
     impl RuntimeStorageHost for TestRuntimeStorageHost {
+        fn openTransactionDatabase(&self, path: &str) -> HostResult<Box<dyn operit_host_api::RuntimeSqliteConnection>> {
+            operit_host_native_storage::NativeRuntimeStorageHost::new(self.root.join("runtime"), self.root.join(WORKSPACE_DIR_PATH))
+                .openTransactionDatabase(path)
+        }
+
         /// Flushes the existing test file through its backing filesystem.
         fn flushFile(&self, path: &str) -> operit_host_api::HostResult<()> {
             std::fs::OpenOptions::new().write(true).open(self.resolve(path)?)?.sync_all()?;

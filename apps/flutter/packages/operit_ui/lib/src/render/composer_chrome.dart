@@ -49,7 +49,7 @@ class ThemeClassicComposerTextEditor extends StatelessWidget {
     required this.hasDraftText,
     required this.transparentSurface,
     required this.settings,
-    required this.onSubmitted,
+    this.onSubmitted,
     required this.onToggleExpansion,
     required this.expandTooltip,
     required this.collapseTooltip,
@@ -63,7 +63,9 @@ class ThemeClassicComposerTextEditor extends StatelessWidget {
   final bool hasDraftText;
   final bool transparentSurface;
   final Widget settings;
-  final ValueChanged<String> onSubmitted;
+  // IME submission can mean candidate confirmation; chat composers send
+  // through hardware shortcuts or the send button instead of this callback.
+  final ValueChanged<String>? onSubmitted;
   final VoidCallback onToggleExpansion;
   final String expandTooltip;
   final String collapseTooltip;
@@ -146,11 +148,13 @@ class ThemeClassicComposerBody extends StatelessWidget {
     required this.editor,
     required this.attachment,
     required this.action,
+    this.actionWidth = 36,
   });
   final bool inputExpanded;
   final Widget editor;
   final Widget attachment;
   final Widget action;
+  final double actionWidth;
   @override
   Widget build(BuildContext context) => AnimatedSize(
     duration: const Duration(milliseconds: 340),
@@ -162,7 +166,7 @@ class ThemeClassicComposerBody extends StatelessWidget {
       children: <Widget>[
         Expanded(child: editor),
         ThemeComposerHorizontalVisibility(
-          width: 86,
+          width: 50 + actionWidth,
           height: 36,
           visible: !inputExpanded,
           alignment: AlignmentDirectional.centerEnd,
@@ -190,12 +194,19 @@ class ThemeComposerModelIdentity extends StatelessWidget {
     required this.chevronColor,
     required this.expanded,
     this.logoBuilder,
-  });
+    this.badge,
+    this.badgeColor,
+  }) : assert(badge == null || badgeColor != null, 'a badge needs a color');
   final String label;
   final TextStyle style;
   final Color chevronColor;
   final bool expanded;
   final Widget Function(double size)? logoBuilder;
+
+  /// A short note after the label, such as the model's thinking level; `null`
+  /// shows none.
+  final String? badge;
+  final Color? badgeColor;
 
   @override
   Widget build(BuildContext context) {
@@ -253,10 +264,28 @@ class ThemeComposerModelIdentity extends StatelessWidget {
         child: SizedBox(width: markSize, height: markSize, child: child),
       ),
     );
+    final badgeText = badge;
+    final badgeStyle = style.copyWith(
+      color: badgeColor,
+      fontWeight: FontWeight.w600,
+    );
+    var badgeWidth = 0.0;
+    if (badgeText != null) {
+      final badgeProbe = TextPainter(
+        text: TextSpan(text: badgeText, style: badgeStyle),
+        textDirection: Directionality.of(context),
+        maxLines: 1,
+      )..layout();
+      badgeWidth = badgeProbe.width + 5;
+      badgeProbe.dispose();
+    }
     return LayoutBuilder(
       builder: (context, constraints) {
         final reserved =
-            (logoBuilder != null ? markSize + 4 : 0) + 4 + markSize;
+            (logoBuilder != null ? markSize + 4 : 0) +
+            4 +
+            markSize +
+            badgeWidth;
         if (!constraints.maxWidth.isFinite) {
           throw StateError('Composer model selector requires bounded width');
         }
@@ -285,6 +314,19 @@ class ThemeComposerModelIdentity extends StatelessWidget {
                 ),
               ),
             ),
+            if (badgeText != null) ...<Widget>[
+              const SizedBox(width: 5),
+              Text(
+                badgeText,
+                maxLines: 1,
+                style: badgeStyle,
+                strutStyle: StrutStyle.fromTextStyle(
+                  badgeStyle,
+                  forceStrutHeight: true,
+                  height: 1,
+                ),
+              ),
+            ],
             const SizedBox(width: 4),
             mark(
               AnimatedRotation(
@@ -424,7 +466,7 @@ class ThemeComposerTextEditor extends StatelessWidget {
     required this.hintText,
     required this.inputExpanded,
     required this.readOnly,
-    required this.onSubmitted,
+    this.onSubmitted,
     required this.onToggleExpansion,
     required this.expandTooltip,
     required this.collapseTooltip,
@@ -436,7 +478,9 @@ class ThemeComposerTextEditor extends StatelessWidget {
   final String hintText;
   final bool inputExpanded;
   final bool readOnly;
-  final ValueChanged<String> onSubmitted;
+  // IME submission can mean candidate confirmation; chat composers send
+  // through hardware shortcuts or the send button instead of this callback.
+  final ValueChanged<String>? onSubmitted;
   final VoidCallback onToggleExpansion;
   final String expandTooltip;
   final String collapseTooltip;

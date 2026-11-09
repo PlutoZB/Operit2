@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -48,6 +48,11 @@ impl AppleFileSystemHost {
 }
 
 impl FileSystemHost for AppleFileSystemHost {
+    /// Keeps the descriptor open for repeated log appends.
+    fn openAppendFile(&self, path: &str) -> HostResult<Box<dyn operit_host_api::FileAppendHandle>> {
+        self.validatePath(path, "path")?;
+        operit_host_native_common::NativeFileAppendHandle::open(path)
+    }
     fn envLabel(&self) -> &str {
         applePlatformName()
     }
@@ -113,6 +118,26 @@ impl FileSystemHost for AppleFileSystemHost {
         fs::read(path).map_err(HostError::from)
     }
 
+    fn readFileBytesRange(&self, path: &str, offset: u64, length: usize) -> HostResult<Vec<u8>> {
+        self.validateReadableFile(path)?;
+        let mut file = File::open(path)?;
+        file.seek(SeekFrom::Start(offset))?;
+        let mut buffer = vec![0u8; length];
+        let mut read = 0;
+        loop {
+            let readCount = file.read(&mut buffer[read..])?;
+            if readCount == 0 {
+                break;
+            }
+            read += readCount;
+            if read == buffer.len() {
+                break;
+            }
+        }
+        buffer.truncate(read);
+        Ok(buffer)
+    }
+
     fn writeFile(&self, path: &str, content: &str, append: bool) -> HostResult<()> {
         self.validatePath(path, "path")?;
         ensure_parent_directory(path)?;
@@ -132,6 +157,14 @@ impl FileSystemHost for AppleFileSystemHost {
         self.validatePath(path, "path")?;
         ensure_parent_directory(path)?;
         fs::write(path, content).map_err(HostError::from)
+    }
+
+    fn appendFileBytes(&self, path: &str, content: &[u8]) -> HostResult<()> {
+        self.validatePath(path, "path")?;
+        ensure_parent_directory(path)?;
+        let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
+        file.write_all(content)?;
+        Ok(())
     }
 
     fn deleteFile(&self, path: &str, recursive: bool) -> HostResult<()> {
@@ -512,7 +545,7 @@ fn appleEnvironmentDescriptor() -> HostEnvironmentDescriptor {
         displayName: appleDisplayName().to_string(),
         platform: appleHostPlatform(),
         privilege: HostPrivilege::Normal,
-        isolation: HostIsolation::OsAppSandbox,
+        isolation: crate::sandbox::processIsolation(),
         pathStyleDescriptionEn:
             "Use absolute Apple platform paths such as /Users/Name/Documents or an app sandbox path."
                 .to_string(),
@@ -588,6 +621,27 @@ fn appleEnvironmentDescriptor() -> HostEnvironmentDescriptor {
     };
     #[cfg(target_os = "macos")]
     {
+        let sandboxed = descriptor.isolation == HostIsolation::OsAppSandbox;
+        descriptor.pathStyleDescriptionEn = if sandboxed {
+            "Use absolute macOS paths. Files outside the app container require user-selected folder authorization; child processes remain sandboxed."
+        } else {
+            "Use absolute macOS paths such as /Users/Name/project. This process does not use App Sandbox; the current user account and macOS privacy permissions still apply."
+        }.to_string();
+        descriptor.pathStyleDescriptionCn = if sandboxed {
+            "使用 macOS 绝对路径。应用容器外的文件需要用户选择文件夹授权，子进程仍受系统沙盒限制。"
+        } else {
+            "使用 macOS 绝对路径，例如 /Users/Name/project。当前进程未启用 App Sandbox，仍受当前账号和 macOS 隐私权限限制。"
+        }.to_string();
+        if !sandboxed {
+            descriptor.workspaceRoots = vec![operit_host_api::WorkspaceRootDescriptor {
+                id: "macos.filesystem".to_string(),
+                displayName: "macOS 文件系统".to_string(),
+                vfsRoot: "/virtual/macos".to_string(),
+                physicalRoot: "/".to_string(),
+            }];
+            descriptor.pathStyleDescriptionEn.push_str(" The full native filesystem is exposed at /virtual/macos in VFS.");
+            descriptor.pathStyleDescriptionCn.push_str(" 完整本机文件系统在 VFS 中对应 /virtual/macos。");
+        }
         descriptor.capabilities.push("screen.capture".to_string());
         descriptor.structuredCapabilities.push(HostCapability {
             id: "screen.capture".to_string(),
@@ -599,11 +653,13 @@ fn appleEnvironmentDescriptor() -> HostEnvironmentDescriptor {
     descriptor
 }
 
-#[cfg(target_os = "ios")]
-/// Returns the iOS notification permission required for background application alerts.
+/// Registers notification authorization with the shared Apple host permission UI.
 fn appleOnboardingRequirements() -> Vec<HostOnboardingRequirement> {
+    if !cfg!(any(target_os = "ios", target_os = "macos")) {
+        return Vec::new();
+    }
     vec![HostOnboardingRequirement {
-        id: "ios.notifications".to_string(),
+        id: format!("{}.notifications", applePlatformName()),
         title: "通知".to_string(),
         description: "允许 Operit 在 AI 回复完成或工具等待批准时发送系统通知。".to_string(),
         capabilityIds: vec!["system.notifications.send".to_string()],
@@ -611,12 +667,6 @@ fn appleOnboardingRequirements() -> Vec<HostOnboardingRequirement> {
         status: HostRequirementStatus::Missing,
         action: HostRequirementAction::RuntimePermission,
     }]
-}
-
-#[cfg(not(target_os = "ios"))]
-/// Returns no notification onboarding requirements for the current Apple host.
-fn appleOnboardingRequirements() -> Vec<HostOnboardingRequirement> {
-    Vec::new()
 }
 
 fn appleHostPlatform() -> HostPlatform {
@@ -817,6 +867,26 @@ fn bytes_to_search_line(bytes: &[u8]) -> String {
 mod file_open_tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
+    #[test]
+    fn notificationsParticipateInUnifiedHostAuthorization() {
+        let descriptor = appleEnvironmentDescriptor();
+        let requirements = descriptor.onboardingRequirements;
+        assert_eq!(requirements.len(), 1);
+        let requirement = &requirements[0];
+        assert_eq!(requirement.id, format!("{}.notifications", descriptor.id));
+        assert_eq!(requirement.capabilityIds, vec!["system.notifications.send"]);
+        assert!(requirement.isRequired);
+        assert!(matches!(requirement.status, HostRequirementStatus::Missing));
+        assert!(matches!(
+            requirement.action,
+            HostRequirementAction::RuntimePermission
+        ));
+        assert!(descriptor
+            .capabilities
+            .contains(&"system.notifications.send".to_string()));
+    }
 
     #[test]
     fn opensValidatedFileThroughOwnerAndPreservesErrors() {

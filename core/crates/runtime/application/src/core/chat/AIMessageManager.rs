@@ -17,11 +17,10 @@ use operit_model::PromptFunctionType::PromptFunctionType;
 use operit_model::PromptTurn::{PromptTurn, PromptTurnKind};
 use operit_providers::chat::enhance::InputProcessor::{InputProcessor, ProcessUserInputRequest};
 use operit_providers::chat::llmprovider::AIService::{AiServiceError, SharedAiResponseStream};
-use operit_providers::chat::llmprovider::MediaLinkBuilder::MediaLinkBuilder;
 use operit_providers::chat::llmprovider::MediaLinkParser::MediaLinkParser;
 use operit_providers::chat::EnhancedAIService::{
-    EnhancedAIService, MessageCancellationToken, ResumeRequest, SendMessageCallbacks,
-    SendMessageOptions, SendMessageRuntime,
+    ChatGuidanceInbox, EnhancedAIService, MessageCancellationToken, ResumeRequest,
+    SendMessageCallbacks, SendMessageOptions, SendMessageRuntime,
 };
 use operit_providers::runtime_support::ChatConfigurationResult;
 use operit_store::CoreNodeIdentityStore::CoreNodeIdentityStore;
@@ -30,11 +29,16 @@ use operit_util::stream::RevisableTextStream::with_event_channel_shared;
 use operit_util::stream::Stream::Stream;
 use operit_util::AppLogger::AppLogger;
 use operit_util::ChainLogger::{self, PLUGIN_CHAIN, RECEIVE_CHAIN, SEND_CHAIN};
+use operit_util::ChatMarkupRegex::ChatMarkupRegex;
 use operit_util::ImagePoolManager::ImagePoolManager;
+use operit_util::MediaLinkBuilder::MediaLinkBuilder;
 use operit_util::MediaPoolManager::MediaPoolManager;
 
 const DEFAULT_CHAT_KEY: &str = "__DEFAULT_CHAT__";
 const MESSAGE_PROCESS_TIMING_TAG: &str = "MessageProcessTiming";
+/// Bounds the appended review independently of the model-generated summary.
+const MAX_CONVERSATION_REVIEW_ENTRIES: usize = 100;
+const CONVERSATION_REVIEW_HEAD_ENTRIES: usize = 30;
 
 pub struct AIMessageManager;
 
@@ -61,6 +65,7 @@ pub struct BuildUserMessageContentRequest {
 pub struct SendMessageRequest<'a> {
     pub chatConfiguration: ChatConfigurationResult,
     pub enhancedAiService: &'a mut EnhancedAIService,
+    pub guidanceInbox: Option<ChatGuidanceInbox>,
     pub chatId: Option<String>,
     pub messageContent: String,
     pub chatHistory: Vec<ChatMessage>,
@@ -183,15 +188,20 @@ pub fn logMessageTiming(stage: &str, startTimeMs: MessageTiming, details: Option
 }
 
 impl AIMessageManager {
-    /// Records display identity and the actual author, without persisting execution configuration.
+    /// Records execution ownership and the assistant's display identity separately.
     pub fn applyConfigurationIdentity(message: &mut ChatMessage, configuration: &ChatConfigurationResult) {
-        message.pluginExtensions.insert(
-            "host.chat.identity".into(),
-            serde_json::json!({
-                "title": configuration.profile.name,
-                "avatarUri": configuration.profile.avatarUri,
-            }),
-        );
+        if message.sender == "ai" {
+            message.pluginExtensions.insert(
+                "host.chat.identity".into(),
+                serde_json::json!({
+                    "title": configuration.profile.name,
+                    "avatarUri": configuration.profile.avatarUri,
+                }),
+            );
+        } else {
+            // The configured participant receives user input; it did not author it.
+            message.pluginExtensions.remove("host.chat.identity");
+        }
         message.pluginExtensions.insert(
             configuration.extensionOwner.clone(),
             serde_json::json!({ "participantId": configuration.profile.id }),
@@ -396,6 +406,7 @@ impl AIMessageManager {
 
         let mut options = SendMessageOptions::new();
         options.cancellationToken = Some(cancellationToken);
+        options.guidanceInbox = request.guidanceInbox;
         options.message = request.messageContent;
         options.chatId = request.chatId;
         options.chatHistory = memoryForRequest;
@@ -488,7 +499,7 @@ impl AIMessageManager {
                         }),
                     )
                 {
-                    Self::cancelOperationForId(&chatKey, Some(operationId)).await;
+                    Self::cancelOperationForId(&chatKey, Some(operationId)).await?;
                     return Err(AiServiceError::RequestFailed(error.to_string()));
                 }
                 ChainLogger::verbose_with_level(
@@ -515,7 +526,11 @@ impl AIMessageManager {
     pub async fn summarizeMemory(
         enhancedAiService: &mut EnhancedAIService,
         messages: Vec<ChatMessage>,
-        autoContinue: bool) -> Result<Option<ChatMessage>, operit_providers::chat::llmprovider::AIService::AiServiceError>
+        autoContinue: bool,
+        chatId: String,
+        configuration: &ChatConfigurationResult,
+        progress: Option<operit_providers::chat::enhance::ConversationService::SummaryProgressCallback>,
+    ) -> Result<Option<ChatMessage>, operit_providers::chat::llmprovider::AIService::AiServiceError>
     {
         let lastSummaryIndex = messages
             .iter()
@@ -559,24 +574,18 @@ impl AIMessageManager {
             (role, format!("#{}: {cleanedContent}", index + 1))
         }).collect::<Vec<_>>();
 
+        let startTime = ChatMessageTimestampAllocator::currentTimeMillis();
         let summary = enhancedAiService
-            .generateSummary(conversationToSummarize, previousSummary)
+            .generateSummaryForConfiguration(conversationToSummarize, previousSummary, chatId, configuration, progress)
             .await?;
+        let endTime = ChatMessageTimestampAllocator::currentTimeMillis();
         if summary.trim().is_empty() {
             return Ok(None);
         }
 
         let mut summaryWithQuotes = summary.trim().to_string();
-        if !conversationReviewEntries.is_empty() {
-            summaryWithQuotes.push_str("\n\n【对话回顾】\n");
-            for (speaker, content) in conversationReviewEntries {
-                summaryWithQuotes.push_str("- ");
-                summaryWithQuotes.push_str(&speaker);
-                summaryWithQuotes.push_str(": ");
-                summaryWithQuotes.push_str(&content);
-                summaryWithQuotes.push('\n');
-            }
-        }
+        // Keep the review in the same language as the summary prompt.
+        appendConversationReview(&mut summaryWithQuotes, &conversationReviewEntries, false);
 
         let finalSummary = if autoContinue {
             format!(
@@ -587,6 +596,9 @@ impl AIMessageManager {
             summaryWithQuotes.trim_end().to_string()
         };
 
+        let estimatedInputTokens = (summaryWithQuotes.len() * 3 / 2).max(1) as i64;
+        let estimatedOutputTokens = (finalSummary.len() / 2).max(1) as i64;
+
         Ok(Some(ChatMessage {
             sender: "summary".to_string(),
             parts: vec![operit_model::MessagePart::MessagePart::markdown(
@@ -596,6 +608,11 @@ impl AIMessageManager {
             )],
             timestamp: ChatMessageTimestampAllocator::next(),
             roleName: "system".to_string(),
+            inputTokens: estimatedInputTokens,
+            outputTokens: estimatedOutputTokens,
+            waitDurationMs: (endTime - startTime).max(1),
+            sentAt: startTime,
+            completedAt: endTime,
             ..ChatMessage::new("summary".to_string())
         }))
     }
@@ -626,39 +643,16 @@ impl AIMessageManager {
     }
 
     #[allow(non_snake_case)]
+    /// Automatic summaries depend only on the configured context token threshold.
     pub fn shouldGenerateSummary(
-        messages: Vec<ChatMessage>,
         currentTokens: i64,
         maxTokens: i32,
         tokenUsageThreshold: f64,
         enableSummary: bool,
-        enableSummaryByMessageCount: bool,
-        summaryMessageCountThreshold: i32,
     ) -> bool {
-        if !enableSummary {
-            return false;
-        }
-        if maxTokens > 0 {
-            let usageRatio = currentTokens as f64 / f64::from(maxTokens);
-            if usageRatio >= tokenUsageThreshold {
-                return true;
-            }
-        }
-        if enableSummaryByMessageCount {
-            let lastSummaryIndex = messages
-                .iter()
-                .rposition(|message| message.sender == "summary");
-            let relevantMessages = match lastSummaryIndex {
-                Some(index) => &messages[index + 1..],
-                None => messages.as_slice(),
-            };
-            let userAiMessagesSinceLastSummary = relevantMessages
-                .iter()
-                .filter(|message| message.sender == "user")
-                .count() as i32;
-            return userAiMessagesSinceLastSummary >= summaryMessageCountThreshold;
-        }
-        false
+        enableSummary
+            && maxTokens > 0
+            && currentTokens as f64 / f64::from(maxTokens) >= tokenUsageThreshold
     }
 
     /// Projects history using persisted participant identities and the owner's explicit history policy.
@@ -801,8 +795,22 @@ impl AIMessageManager {
         enableDirectAudioProcessing: bool,
         enableDirectVideoProcessing: bool,
     ) -> Result<String, String> {
+        // A synchronized attachment has a device-independent VFS locator. Resolve
+        // that exact shared path locally before considering its original host path.
+        let replica = fileSystemHost.and_then(|host| {
+            let path = attachment.fileToolPath();
+            if !["/operitapp/outputs/", "/operitapp/workspaces/", "/operitapp/data/data/chat_attachments/", "/app/workspaces/", "/app/outputs/", "/app/data/data/chat_attachments/"].iter().any(|root| path.starts_with(root)) { return None; }
+            let storage = operit_store::RuntimeStorageHost::defaultRuntimeStorageHostOption()?;
+            let mapper = operit_tools::files::PathMapper::PathMapper::new(storage.runtimeRootDir()?, storage.workspaceRootDir()?, storage);
+            let physical = mapper.resolve(&path).ok()?.nativePath().ok()?;
+            let found = host.fileExists(&physical).ok()?;
+            if !found.exists || found.isDirectory || found.size != attachment.fileSize { return None; }
+            let mut local = attachment.clone(); local.filePath = physical;
+            Some(local)
+        });
+        let attachment = replica.as_ref().unwrap_or(attachment);
         let currentNodeId = CoreNodeIdentityStore::localNodeId();
-        if !attachment.isLocalToNode(currentNodeId.as_deref()) {
+        if replica.is_none() && !attachment.isLocalToNode(currentNodeId.as_deref()) {
             // File hosts and media pools are node-local. Preserve the source locator instead
             // of attempting to open a remote path (especially fatal for audio/video).
             return Ok(format!(
@@ -973,7 +981,7 @@ impl AIMessageManager {
         {
             attributes.push_str(&format!(" node_id=\"{}\"", escape(nodeId)));
         }
-        if toolPath.starts_with("/app/data/temp/clean_on_exit/") {
+        if ["/app/", "/operitapp/", "/mnt/", "/virtual/"].iter().any(|root| toolPath.starts_with(root)) {
             attributes.push_str(&format!(" path=\"{}\"", escape(&toolPath)));
         }
         if attachment.fileSize > 0 {
@@ -1068,27 +1076,27 @@ impl AIMessageManager {
     }
 
     #[allow(non_snake_case)]
-    pub async fn cancelCurrentOperation() {
+    pub async fn cancelCurrentOperation() -> Result<(), AiServiceError> {
         let lock = LAST_ACTIVE_CHAT_KEY.get_or_init(|| Mutex::new(DEFAULT_CHAT_KEY.to_string()));
         let chatKey = lock
             .lock()
             .expect("last active chat key mutex poisoned")
             .clone();
-        Self::cancelOperation(chatKey).await;
+        Self::cancelOperation(chatKey).await
     }
 
     #[allow(non_snake_case)]
-    pub async fn cancelOperation(chatId: String) {
+    pub async fn cancelOperation(chatId: String) -> Result<(), AiServiceError> {
         let chatKey = if chatId.trim().is_empty() {
             DEFAULT_CHAT_KEY.to_string()
         } else {
             chatId
         };
-        Self::cancelOperationForId(&chatKey, None).await;
+        Self::cancelOperationForId(&chatKey, None).await
     }
 
     /// Takes ownership of the service before anything can close the response stream.
-    async fn cancelOperationForId(chatKey: &str, expectedOperationId: Option<u64>) {
+    async fn cancelOperationForId(chatKey: &str, expectedOperationId: Option<u64>) -> Result<(), AiServiceError> {
         let operation = {
             let mut operations = activeChatOperations()
                 .lock()
@@ -1101,7 +1109,7 @@ impl AIMessageManager {
             }
         };
         let Some((operationId, mut operation)) = operation else {
-            return;
+            return Ok(());
         };
         // Close the per-send gate immediately, including a send that has not yet
         // entered the provider or registered its execution context.
@@ -1121,7 +1129,7 @@ impl AIMessageManager {
         if let Some(stream) = operation.responseStream {
             stream.close();
         }
-        operation.enhancedAiService.cancelConversation().await;
+        let usageResult = operation.enhancedAiService.cancelConversation().await;
         ChainLogger::info(
             SEND_CHAIN,
             "send.cancel.done",
@@ -1130,16 +1138,23 @@ impl AIMessageManager {
                 ("operationId", operationId.to_string()),
             ],
         );
+        usageResult
     }
 
     #[allow(non_snake_case)]
-    pub async fn cancelAllOperations() {
+    pub async fn cancelAllOperations() -> Result<(), AiServiceError> {
         let operations = activeChatOperations()
             .lock()
             .expect("active chat operations mutex poisoned")
             .snapshot();
+        let mut errors = Vec::new();
         for (chatKey, operationId) in operations {
-            Self::cancelOperationForId(&chatKey, Some(operationId)).await;
+            if let Err(error) = Self::cancelOperationForId(&chatKey, Some(operationId)).await {
+                errors.push(format!("{chatKey}: {error}"));
+            }
+        }
+        if errors.is_empty() { Ok(()) } else {
+            Err(AiServiceError::RequestFailed(errors.join("; ")))
         }
     }
 }
@@ -1182,6 +1197,43 @@ fn remove_status_tags(input: &str) -> String {
         .to_string()
 }
 
+/// Keeps the earliest context and the latest exchanges, omitting the middle of long reviews.
+#[allow(non_snake_case)]
+fn appendConversationReview(summary: &mut String, entries: &[(String, String)], useEnglish: bool) {
+    if entries.is_empty() {
+        return;
+    }
+    summary.push_str(if useEnglish {
+        "\n\n【Conversation Review】\n"
+    } else {
+        "\n\n【对话回顾】\n"
+    });
+    let appendEntries = |summary: &mut String, entries: &[(String, String)]| {
+        for (speaker, content) in entries {
+            summary.push_str("- ");
+            summary.push_str(speaker);
+            summary.push_str(": ");
+            summary.push_str(content);
+            summary.push('\n');
+        }
+    };
+    if entries.len() <= MAX_CONVERSATION_REVIEW_ENTRIES {
+        appendEntries(summary, entries);
+        return;
+    }
+    let tailCount = MAX_CONVERSATION_REVIEW_ENTRIES - CONVERSATION_REVIEW_HEAD_ENTRIES;
+    appendEntries(summary, &entries[..CONVERSATION_REVIEW_HEAD_ENTRIES]);
+    let omittedCount = entries.len() - MAX_CONVERSATION_REVIEW_ENTRIES;
+    if useEnglish {
+        summary.push_str(&format!(
+            "- [...Middle messages omitted: {omittedCount}...]\n"
+        ));
+    } else {
+        summary.push_str(&format!("- [...中间省略 {omittedCount} 条消息...]\n"));
+    }
+    appendEntries(summary, &entries[entries.len() - tailCount..]);
+}
+
 #[allow(non_snake_case)]
 fn cleanSummarySourceMessage(message: &ChatMessage) -> String {
     let source = if message.sender == "ai" {
@@ -1189,7 +1241,7 @@ fn cleanSummarySourceMessage(message: &ChatMessage) -> String {
     } else {
         message.displayText()
     };
-    let mut cleaned = strip_tag_blocks(&source, "memory");
+    let mut cleaned = strip_tag_blocks(&ChatMarkupRegex::remove_meta_tags(&source), "memory");
     if message.sender == "ai" {
         cleaned = remove_thinking_content(&cleaned);
     }
@@ -1211,7 +1263,10 @@ fn summarySpeakerLabel(message: &ChatMessage) -> String {
 fn condenseUserForReview(text: &str) -> String {
     let pruned = strip_tag_blocks(
         &strip_tag_blocks(
-            &strip_tag_blocks(text, "workspace_attachment"),
+            &strip_tag_blocks(
+                &ChatMarkupRegex::remove_meta_tags(text),
+                "workspace_attachment",
+            ),
             "attachment",
         ),
         "reply_to",
@@ -1224,10 +1279,11 @@ fn condenseUserForReview(text: &str) -> String {
 fn condenseAssistantMessageForReview(message: &ChatMessage) -> String {
     let mut segments = Vec::<String>::new();
     for part in MessagePartCodec::orderedParts(&message.parts) {
+        let content = ChatMarkupRegex::remove_meta_tags(&part.content);
         let segment = match part.kind {
             MessagePartKind::Markdown | MessagePartKind::Status => {
                 let cleaned = strip_xml_tags(&strip_media_links(&strip_tag_blocks(
-                    &part.content,
+                    &content,
                     "memory",
                 )));
                 let condensed = condense_head_tail(&cleaned, 120, 48);
@@ -1235,10 +1291,10 @@ fn condenseAssistantMessageForReview(message: &ChatMessage) -> String {
             }
             MessagePartKind::Thinking => None,
             MessagePartKind::ToolCall => {
-                let tool_name = part
-                    .toolName
-                    .as_deref()
-                    .expect("tool-call parts require a tool name");
+                let tool_label = match &part.toolName {
+                    Some(name) => format!("工具: {name}"),
+                    None => "工具".to_string(),
+                };
                 let params = part
                     .attributes
                     .iter()
@@ -1247,7 +1303,11 @@ fn condenseAssistantMessageForReview(message: &ChatMessage) -> String {
                         format!(
                             "{}={}",
                             name,
-                            condense_head_tail(&strip_xml_tags(value), 72, 32)
+                            condense_head_tail(
+                                &strip_xml_tags(&ChatMarkupRegex::remove_meta_tags(value)),
+                                72,
+                                32,
+                            )
                         )
                     })
                     .collect::<Vec<_>>();
@@ -1256,13 +1316,13 @@ fn condenseAssistantMessageForReview(message: &ChatMessage) -> String {
                 } else {
                     format!(" {}", params.join("; "))
                 };
-                Some(format!("[工具: {tool_name}]{params_text}"))
+                Some(format!("[{tool_label}]{params_text}"))
             }
             MessagePartKind::ToolResult => {
-                let tool_name = part
-                    .toolName
-                    .as_deref()
-                    .expect("tool-result parts require a tool name");
+                let tool_label = match &part.toolName {
+                    Some(name) => format!("结果: {name}"),
+                    None => "结果".to_string(),
+                };
                 let status = part
                     .attributes
                     .get("status")
@@ -1272,7 +1332,7 @@ fn condenseAssistantMessageForReview(message: &ChatMessage) -> String {
                         _ => value.as_str(),
                     })
                     .unwrap_or("");
-                let result = condense_head_tail(&strip_xml_tags(&part.content), 140, 56);
+                let result = condense_head_tail(&strip_xml_tags(&content), 140, 56);
                 let status_text = if status.is_empty() {
                     String::new()
                 } else {
@@ -1283,7 +1343,7 @@ fn condenseAssistantMessageForReview(message: &ChatMessage) -> String {
                 } else {
                     format!(" {result}")
                 };
-                Some(format!("[结果: {tool_name}{status_text}]{result_text}"))
+                Some(format!("[{tool_label}{status_text}]{result_text}"))
             }
         };
         if let Some(segment) = segment {
@@ -1408,6 +1468,17 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+    /// Low context usage cannot trigger automatic summaries, even after many user turns.
+    #[test]
+    fn automatic_summary_requires_context_token_threshold() {
+        assert!(!AIMessageManager::shouldGenerateSummary(4_000, 200_000, 0.85, true));
+        assert!(!AIMessageManager::shouldGenerateSummary(169_999, 200_000, 0.85, true));
+        assert!(AIMessageManager::shouldGenerateSummary(170_000, 200_000, 0.85, true));
+        assert!(AIMessageManager::shouldGenerateSummary(200_000, 200_000, 0.85, true));
+        assert!(!AIMessageManager::shouldGenerateSummary(200_000, 200_000, 0.85, false));
+        assert!(!AIMessageManager::shouldGenerateSummary(4_000, 0, 0.85, true));
+    }
+
     /// Constructs an explicit descriptor for real history projection tests without a host runtime.
     fn historyConfiguration(isolate: bool, labelUsers: bool) -> ChatConfigurationResult {
         let profile = serde_json::json!({
@@ -1495,29 +1566,39 @@ mod tests {
             "executionData":{"profile":profile,"private":"Runtime only"}
         })).unwrap();
         configuration.extensionOwner = "configuration-owner".into();
-        let mut message = ChatMessage::new("ai".into());
-        AIMessageManager::applyConfigurationIdentity(&mut message,&configuration);
-        assert_eq!(serde_json::to_value(&message.pluginExtensions).unwrap(),serde_json::json!({
-            "configuration-owner":{"participantId":"author-id"},
-            "host.chat.identity":{"title":"Display name","avatarUri":null}
-        }));
+        for sender in ["ai", "user"] {
+            let mut message = ChatMessage::new(sender.into());
+            message.pluginExtensions.insert("host.chat.identity".into(),
+                serde_json::json!({"title":"Operit","avatarUri":null}));
+            AIMessageManager::applyConfigurationIdentity(&mut message, &configuration);
+            let mut expected = serde_json::json!({
+                "configuration-owner":{"participantId":"author-id"}
+            });
+            if sender == "ai" {
+                expected["host.chat.identity"] = serde_json::json!({
+                    "title":"Display name","avatarUri":null
+                });
+            }
+            assert_eq!(serde_json::to_value(&message.pluginExtensions).unwrap(), expected);
+        }
     }
 
     #[test]
     fn attachment_markup_keeps_the_source_node_and_portable_tool_path() {
         let mut attachment = AttachmentInfo::new(
-            "/device-b/runtime/temp/clean_on_exit/report.pdf".into(),
+            "/device-b/runtime/data/chat_attachments/chat-a/attachment-a/report.pdf".into(),
             "报价单\".pdf".into(),
             "application/pdf".into(),
             3,
         );
         attachment.nodeId = Some("core-b".into());
+        attachment.vfsPath = Some("/operitapp/outputs/family/.operit/attachments/id/report.pdf".into());
         let tag =
             AIMessageManager::buildAttachmentTag(&attachment, None, false, false, false).unwrap();
         assert!(tag.contains("node_id=\"core-b\""));
-        assert!(tag.contains("path=\"/app/data/temp/clean_on_exit/report.pdf\""));
+        assert!(tag.contains("path=\"/operitapp/outputs/family/.operit/attachments/id/report.pdf\""));
         assert!(tag.contains("filename=\"报价单&quot;.pdf\""));
-        assert!(tag.contains("id=\"/app/data/temp/clean_on_exit/report.pdf\""));
+        assert!(tag.contains("id=\"/operitapp/outputs/family/.operit/attachments/id/report.pdf\""));
         assert!(!tag.contains("/device-b/"));
     }
 
@@ -1525,7 +1606,7 @@ mod tests {
     fn remote_media_never_reads_the_current_file_host() {
         for mimeType in ["image/png", "audio/mpeg", "video/mp4"] {
             let mut attachment = AttachmentInfo::new(
-                "/device-b/runtime/temp/clean_on_exit/media".into(),
+                "/device-b/runtime/data/chat_attachments/chat-a/attachment-a/media".into(),
                 "media".into(),
                 mimeType.into(),
                 3,
@@ -1631,6 +1712,103 @@ mod tests {
         assert_eq!(turns[3].content, "after");
     }
 
+    /// Enforces a fixed review size even for chats with thousands of messages.
+    #[test]
+    fn summary_review_bounds_entries_and_omits_the_middle() {
+        for count in [0, 1, 100, 101, 10_000] {
+            let entries = (0..count)
+                .map(|index| ("user".to_string(), format!("entry-{index}")))
+                .collect::<Vec<_>>();
+            let mut summary = "Model summary".to_string();
+            appendConversationReview(&mut summary, &entries, false);
+            let retained = summary
+                .lines()
+                .filter_map(|line| line.strip_prefix("- user: "))
+                .collect::<Vec<_>>();
+            let indices = if count <= 100 {
+                (0..count).collect::<Vec<_>>()
+            } else {
+                (0..30).chain(count - 70..count).collect::<Vec<_>>()
+            };
+            assert_eq!(
+                retained,
+                indices
+                    .iter()
+                    .map(|index| format!("entry-{index}"))
+                    .collect::<Vec<_>>()
+            );
+            assert!(retained.len() <= MAX_CONVERSATION_REVIEW_ENTRIES);
+            if count == 0 {
+                assert_eq!(summary, "Model summary");
+            } else if count <= 100 {
+                assert!(!summary.contains("中间省略"));
+            } else {
+                assert!(summary.contains(&format!("中间省略 {} 条消息", count - 100)));
+                assert!(
+                    summary.len() < 3000,
+                    "the review must stay bounded at {count} entries"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn summary_review_localizes_the_omission_marker() {
+        let entries = vec![("AI".to_string(), "reply".to_string()); 101];
+        let mut summary = String::new();
+        appendConversationReview(&mut summary, &entries, true);
+        assert!(summary.contains("【Conversation Review】"));
+        assert!(summary.contains("Middle messages omitted: 1"));
+        assert!(!summary.contains("对话回顾"));
+        assert!(!summary.contains("省略"));
+    }
+
+    #[test]
+    fn summary_source_and_review_remove_meta_payloads_before_truncation() {
+        let payload = "SECRET".repeat(100);
+        let text = format!("前文<meta provider=\"openai:reasoning\">{payload}</meta>后文");
+        let assistant = ChatMessage::new_with_markdown("ai".to_string(), text.clone());
+        let user = ChatMessage::new_with_markdown("user".to_string(), text.clone());
+        assert_eq!(cleanSummarySourceMessage(&assistant), "前文 后文");
+        assert_eq!(cleanSummarySourceMessage(&user), "前文 后文");
+        assert_eq!(condenseAssistantMessageForReview(&assistant), "前文 后文");
+        assert_eq!(condenseUserForReview(&text), "前文 后文");
+        assert!(assistant.displayText().contains(&payload));
+    }
+
+    #[test]
+    fn summary_review_removes_meta_in_tool_parameters_and_results() {
+        let mut params = BTreeMap::new();
+        params.insert(
+            "query".to_string(),
+            "before<meta>SECRET_PARAM</meta>after".to_string(),
+        );
+        let message = ChatMessage::new_with_parts(
+            "ai".to_string(),
+            vec![
+                MessagePart::toolCall(
+                    "call".to_string(),
+                    0,
+                    "tool".to_string(),
+                    "search".to_string(),
+                    params,
+                ),
+                MessagePart::toolResult(
+                    "result".to_string(),
+                    1,
+                    Some("call".to_string()),
+                    "search".to_string(),
+                    "success".to_string(),
+                    "answer<meta>SECRET_RESULT</meta>done".to_string(),
+                ),
+            ],
+        );
+        let review = condenseAssistantMessageForReview(&message);
+        assert!(review.contains("query=before after"));
+        assert!(review.contains("answer done"));
+        assert!(!review.contains("SECRET"));
+    }
+
     /// Verifies summary review condenses structured tool results instead of dumping payloads.
     #[test]
     fn summary_review_condenses_structured_tool_result() {
@@ -1659,7 +1837,7 @@ mod tests {
 
 #[cfg(test)]
 mod cancellation_tests {
-    use super::{ChatOperationRegistry, MessageCancellationToken};
+    use super::{AIMessageManager, AttachmentInfo, ChatOperationRegistry, MessageCancellationToken};
     use std::sync::{Arc, Mutex};
 
     #[test]
@@ -1737,4 +1915,15 @@ mod cancellation_tests {
         assert_eq!(registry.take("second"), Some((secondId, "second-service")));
         assert!(registry.snapshot().is_empty());
     }
+    #[test]
+    fn output_attachment_uses_its_saved_vfs_locator_in_ai_metadata() {
+        let mut attachment = AttachmentInfo::new("/device-a/output/report.md".into(), "report.md".into(), "text/markdown".into(), 12);
+        attachment.vfsPath = Some("/operitapp/outputs/family/.operit/attachments/id/report.md".into());
+        attachment.nodeId = Some("source-node".into());
+        let tag = AIMessageManager::buildAttachmentTag(&attachment, None, false, false, false).unwrap();
+        assert!(tag.contains("path=\"/operitapp/outputs/family/.operit/attachments/id/report.md\""));
+        assert!(tag.contains("node_id=\"source-node\""));
+        assert!(!tag.contains("/device-a/"));
+    }
+
 }

@@ -734,79 +734,25 @@ struct ResolvedRuntimeCommand {
     args: Vec<String>,
 }
 
+/// Passes the configured stdio command to the host resolver verbatim instead
+/// of rewriting it through a managed-runtime allowlist. Explicit paths surface
+/// through `executablePath`; bare names rely on each host's command resolution
+/// (PATH lookup on desktop, rootfs PATH inside proot/iSH environments).
 #[allow(non_snake_case)]
 fn resolveMcpRuntimeCommand(
     command: &str,
     args: &[String],
 ) -> Result<ResolvedRuntimeCommand, String> {
-    let commandName = command
-        .trim()
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    match commandName.as_str() {
-        "node" | "node.exe" => Ok(ResolvedRuntimeCommand {
-            program: ManagedRuntimeProgram::Node,
-            executablePath: pathOverride(command, &["node", "node.exe"]),
-            args: args.to_vec(),
-        }),
-        "python" | "python.exe" | "python3" => Ok(ResolvedRuntimeCommand {
-            program: ManagedRuntimeProgram::Python,
-            executablePath: pathOverride(command, &["python", "python.exe", "python3"]),
-            args: args.to_vec(),
-        }),
-        "pnpm" | "pnpm.cmd" => Ok(ResolvedRuntimeCommand {
-            program: ManagedRuntimeProgram::Pnpm,
-            executablePath: pathOverride(command, &["pnpm", "pnpm.cmd"]),
-            args: args.to_vec(),
-        }),
-        "npx" | "npx.cmd" => {
-            let filteredArgs = args
-                .iter()
-                .filter(|arg| arg.as_str() != "-y" && arg.as_str() != "--yes")
-                .cloned()
-                .collect::<Vec<_>>();
-            let mut runtimeArgs = vec!["dlx".to_string()];
-            runtimeArgs.extend(filteredArgs);
-            Ok(ResolvedRuntimeCommand {
-                program: ManagedRuntimeProgram::Pnpm,
-                executablePath: None,
-                args: runtimeArgs,
-            })
-        }
-        "uv" | "uv.exe" => Ok(ResolvedRuntimeCommand {
-            program: ManagedRuntimeProgram::Uv,
-            executablePath: pathOverride(command, &["uv", "uv.exe"]),
-            args: args.to_vec(),
-        }),
-        "uvx" | "uvx.exe" => {
-            let mut runtimeArgs = vec!["tool".to_string(), "run".to_string()];
-            runtimeArgs.extend(args.iter().cloned());
-            Ok(ResolvedRuntimeCommand {
-                program: ManagedRuntimeProgram::Uv,
-                executablePath: None,
-                args: runtimeArgs,
-            })
-        }
-        _ => Err(format!(
-            "Unsupported MCP command '{command}'. Managed runtime supports node, python, uv, pnpm, npx, and uvx."
-        )),
+    let expanded = expandPath(command).trim().to_string();
+    if expanded.is_empty() {
+        return Err("MCP command must not be empty".to_string());
     }
-}
-
-#[allow(non_snake_case)]
-fn pathOverride(command: &str, wellKnownNames: &[&str]) -> Option<String> {
-    let expanded = expandPath(command);
-    let trimmed = expanded.trim();
-    if wellKnownNames
-        .iter()
-        .any(|name| trimmed.eq_ignore_ascii_case(name))
-    {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
+    let isExplicitPath = expanded.contains('/') || expanded.contains('\\');
+    Ok(ResolvedRuntimeCommand {
+        program: ManagedRuntimeProgram::Command(expanded.clone()),
+        executablePath: isExplicitPath.then(|| expanded.clone()),
+        args: args.to_vec(),
+    })
 }
 
 #[allow(non_snake_case)]
@@ -818,6 +764,10 @@ fn buildRuntimeEnv(service: &RegisteredService) -> BTreeMap<String, String> {
             .or_insert_with(|| format!("{cwd}/.npm-cache"));
     }
     env.entry("npm_config_prefer_offline".to_string())
+        .or_insert_with(|| "true".to_string());
+    // npx cold-cache install prompts hang headless stdio servers; npm honors
+    // this override instead of an interactive confirmation.
+    env.entry("npm_config_yes".to_string())
         .or_insert_with(|| "true".to_string());
     env.entry("UV_LINK_MODE".to_string())
         .or_insert_with(|| "copy".to_string());
@@ -1001,32 +951,26 @@ async fn initializeRemoteService(
     )
     .await?;
 
-    let listId = nextRequestId(active);
-    let listResponse = sendRemoteJsonRpc(
-        active
-            .remote
-            .as_mut()
-            .ok_or_else(|| "Remote MCP session is not attached".to_string())?,
-        json!({
-            "jsonrpc": "2.0",
-            "id": listId,
-            "method": "tools/list",
-            "params": {}
-        }),
-        Some(listId),
-        deadline.remainingMs()?,
-    )
-    .await?
-    .ok_or_else(|| "Remote MCP tools/list returned an empty response".to_string())?;
-    if listResponse.get("error").is_some() {
-        return Err(format!("MCP tools/list failed: {listResponse}"));
+    if active.remote.as_ref().is_some_and(|session| session.connectionType.eq_ignore_ascii_case("httpStream")) {
+        streamable_http::connectServerEvents(active.remote.as_mut().unwrap(), deadline).await?;
     }
-    active.tools = listResponse
-        .get("result")
-        .and_then(|result| result.get("tools"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+
+    let mut cursor = None;
+    let mut seen_cursors = BTreeSet::new();
+    active.tools.clear();
+    loop {
+        let list_id = nextRequestId(active);
+        let params = match &cursor { Some(cursor) => json!({"cursor": cursor}), None => json!({}) };
+        let response = sendRemoteJsonRpc(active.remote.as_mut().unwrap(),
+            json!({"jsonrpc": "2.0", "id": list_id, "method": "tools/list", "params": params}),
+            Some(list_id), deadline.remainingMs()?).await?
+            .ok_or("Remote MCP tools/list returned an empty response")?;
+        let (tools, next) = decodeToolPage(&response)?;
+        active.tools.extend(tools);
+        let Some(next) = next else { break; };
+        if !seen_cursors.insert(next.clone()) { return Err("MCP tools/list repeated a pagination cursor".to_string()); }
+        cursor = Some(next);
+    }
     deadline.remainingMs()?;
     active.ready = true;
     Ok(())
@@ -1088,19 +1032,38 @@ async fn initializeService(
     process
         .writeLines(&postInitializeMessages)
         .map_err(|error| error.to_string())?;
-    let listResponse = readJsonResponse(active, listId, deadline.remainingMs()?).await?;
-    if listResponse.get("error").is_some() {
-        return Err(format!("MCP tools/list failed: {listResponse}"));
+    let mut response = readJsonResponse(active, listId, deadline.remainingMs()?).await?;
+    let mut seen_cursors = BTreeSet::new();
+    active.tools.clear();
+    loop {
+        let (tools, next) = decodeToolPage(&response)?;
+        active.tools.extend(tools);
+        let Some(cursor) = next else { break; };
+        if !seen_cursors.insert(cursor.clone()) { return Err("MCP tools/list repeated a pagination cursor".to_string()); }
+        let id = nextRequestId(active);
+        active.process.as_ref().ok_or("Local MCP process is not attached")?
+            .writeLine(&json!({"jsonrpc":"2.0", "id":id, "method":"tools/list", "params":{"cursor":cursor}}).to_string())
+            .map_err(|error| error.to_string())?;
+        response = readJsonResponse(active, id, deadline.remainingMs()?).await?;
     }
-    active.tools = listResponse
-        .get("result")
-        .and_then(|result| result.get("tools"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
     deadline.remainingMs()?;
     active.ready = true;
     Ok(())
+}
+
+/// Validates one tools page without publishing a partially discovered server as ready.
+#[allow(non_snake_case)]
+fn decodeToolPage(response: &Value) -> Result<(Vec<Value>, Option<String>), String> {
+    if let Some(error) = response.get("error") { return Err(format!("MCP tools/list failed: {error}")); }
+    let result = response.get("result").ok_or("MCP tools/list response has no result")?;
+    let tools = result.get("tools").and_then(Value::as_array)
+        .ok_or("MCP tools/list result has no tools array")?.clone();
+    let cursor = match result.get("nextCursor") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(cursor)) => Some(cursor.clone()),
+        Some(_) => return Err("MCP tools/list nextCursor must be a string".to_string()),
+    };
+    Ok((tools, cursor))
 }
 
 #[allow(non_snake_case)]
@@ -1215,12 +1178,22 @@ async fn sendRemoteSseJsonRpc(
     let Some(expectedId) = expectedId else {
         return Ok(None);
     };
+    readRemoteSseResponse(session, expectedId, &deadline).await.map(Some)
+}
+
+/// Matches a delayed result on the existing event channel without replaying the request.
+#[allow(non_snake_case)]
+async fn readRemoteSseResponse(
+    session: &mut RemoteMcpSession,
+    expectedId: u64,
+    deadline: &StartupDeadline,
+) -> Result<Value, String> {
     let reader = session
         .sseReader
         .as_mut()
         .ok_or("Remote MCP SSE reader is not attached")?;
     loop {
-        let (event, data) = reader.next(&deadline).await?;
+        let (event, data) = reader.next(deadline).await?;
         if !event.is_empty() && event != "message" {
             continue;
         }
@@ -1231,7 +1204,7 @@ async fn sendRemoteSseJsonRpc(
         if parsed.get("id").and_then(Value::as_u64) == Some(expectedId)
             && (parsed.get("result").is_some() || parsed.get("error").is_some())
         {
-            return Ok(Some(parsed));
+            return Ok(parsed);
         }
     }
 }
@@ -1735,6 +1708,88 @@ mod startup_tests {
         assert_eq!(response["success"], false);
         assert_eq!(response["error"]["message"], serverError.to_string());
         assert_eq!(writes.lock().unwrap().len(), 1);
+    }
+
+    /// Passes every configured command through to the host command resolver
+    /// verbatim, so native stdio MCP servers start without an allowlist.
+    #[test]
+    fn commandsResolveThroughHostCommandResolverVerbatim() {
+        let runtime =
+            resolveMcpRuntimeCommand("wordcraft-cli", &["mcp".to_string()]).unwrap();
+        assert_eq!(runtime.program, ManagedRuntimeProgram::Command("wordcraft-cli".into()));
+        assert_eq!(runtime.executablePath, None);
+        assert_eq!(runtime.args, vec!["mcp".to_string()]);
+
+        let runtime = resolveMcpRuntimeCommand("node", &["server.js".to_string()]).unwrap();
+        assert_eq!(runtime.program, ManagedRuntimeProgram::Command("node".into()));
+        assert_eq!(runtime.executablePath, None);
+
+        let runtime = resolveMcpRuntimeCommand(
+            "npx",
+            &["-y".to_string(), "pkg".to_string()],
+        )
+        .unwrap();
+        assert_eq!(runtime.program, ManagedRuntimeProgram::Command("npx".into()));
+        assert_eq!(runtime.args, vec!["-y".to_string(), "pkg".to_string()]);
+
+        let runtime = resolveMcpRuntimeCommand("uvx", &["ruff".to_string()]).unwrap();
+        assert_eq!(runtime.program, ManagedRuntimeProgram::Command("uvx".into()));
+        assert_eq!(runtime.args, vec!["ruff".to_string()]);
+    }
+
+    /// Passes explicit executable paths straight through for hosts that validate
+    /// and launch them directly.
+    #[test]
+    fn explicitCommandPathsBypassPathLookup() {
+        let runtime = resolveMcpRuntimeCommand(
+            "/opt/tools/wordcraft-cli",
+            &["mcp".to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            runtime.program,
+            ManagedRuntimeProgram::Command("/opt/tools/wordcraft-cli".into())
+        );
+        assert_eq!(
+            runtime.executablePath,
+            Some("/opt/tools/wordcraft-cli".to_string())
+        );
+    }
+
+    /// Rejects blank commands before they reach the host resolver.
+    #[test]
+    fn blankCommandsStayRejected() {
+        assert!(resolveMcpRuntimeCommand("   ", &[]).is_err());
+    }
+
+    /// Auto-confirms npm-family install prompts so cold-cache npx startups do
+    /// not hang a headless stdio server waiting on an invisible confirmation.
+    #[test]
+    fn runtimeEnvAutoConfirmsNpmInstallPrompts() {
+        let service = RegisteredService {
+            name: "test-env".to_string(),
+            serviceType: "stdio".to_string(),
+            command: "npx".to_string(),
+            args: Vec::new(),
+            cwd: None,
+            endpoint: None,
+            connectionType: None,
+            bearerToken: None,
+            headers: BTreeMap::new(),
+            description: String::new(),
+            env: BTreeMap::from([(
+                "npm_config_yes".to_string(),
+                "false".to_string(),
+            )]),
+            startupGate: Arc::new(tokio::sync::Mutex::new(())),
+        };
+        let env = buildRuntimeEnv(&service);
+        assert_eq!(env["npm_config_yes"], "false");
+        assert_eq!(env["npm_config_prefer_offline"], "true");
+
+        let mut overrideService = service.clone();
+        overrideService.env = BTreeMap::new();
+        assert_eq!(buildRuntimeEnv(&overrideService)["npm_config_yes"], "true");
     }
 }
 

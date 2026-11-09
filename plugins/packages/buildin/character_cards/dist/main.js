@@ -141,7 +141,7 @@ __export(main_exports, {
   onMemoryCommand: () => onMemoryCommand,
   onMemoryInterval: () => onMemoryInterval,
   onMemoryMessagePersisted: () => onMemoryMessagePersisted,
-  onMemoryRecallPromptFinalize: () => onMemoryRecallPromptFinalize,
+  onMemoryRecallPromptInput: () => onMemoryRecallPromptInput,
   onServiceInitialize: () => onServiceInitialize,
   onTagCommand: () => onTagCommand,
   parseActivePromptCommand: () => parseActivePromptCommand,
@@ -1312,6 +1312,521 @@ function rebuildMemoryEmbeddings(ownerKey, repository2) {
   return repository2.rebuildMemoryEmbeddings(ownerKey);
 }
 
+// src/search/usearch.ts
+var VectorIndex = class _VectorIndex {
+  constructor(wasm, pointer, dimensions) {
+    this.wasm = wasm;
+    this.pointer = pointer;
+    this.dimensions = dimensions;
+    this.closed = false;
+  }
+  static open(dimensions) {
+    return __async(this, null, function* () {
+      let instance;
+      instance = yield ToolPkg.wasm.open("usearch", {
+        env: { emscripten_notify_memory_growth() {
+        } },
+        wasi_snapshot_preview1: {
+          clock_time_get(_clock, _precision, pointer) {
+            new DataView(instance.memory().buffer).setBigUint64(pointer, BigInt(Date.now()) * 1000000n, true);
+            return 0;
+          },
+          fd_close() {
+            return 8;
+          }
+        }
+      });
+      instance.call("_initialize");
+      const result2 = new _VectorIndex(instance, 0, dimensions);
+      try {
+        return new _VectorIndex(instance, result2.checked("index_create", dimensions, 128), dimensions);
+      } catch (error) {
+        instance.close();
+        throw error;
+      }
+    });
+  }
+  call(name, ...args) {
+    if (this.closed) throw new Error("Vector index is closed");
+    return Number(this.wasm.call(name, args.map((value) => typeof value === "bigint" ? { type: "i64", value: value.toString() } : { type: "i32", value })));
+  }
+  checked(name, ...args) {
+    const result2 = this.call(name, ...args), pointer = this.call("index_error");
+    if (pointer) {
+      const memory = this.wasm.memory();
+      let message = "";
+      for (let index = pointer; index < memory.length && memory[index] && index < pointer + 4096; index++) message += String.fromCharCode(memory[index]);
+      throw new Error("USearch: " + message);
+    }
+    return result2;
+  }
+  /** Allocations are tracked before the next allocation, so a partial failure cannot leak. */
+  buffers(arrays, lengths, run) {
+    const allocated = [];
+    try {
+      for (const length of [...arrays.map((array3) => array3.byteLength), ...lengths]) {
+        const pointer = this.call("malloc", Math.max(8, length));
+        if (!pointer) throw new Error("USearch allocation failed");
+        allocated.push(pointer);
+      }
+      arrays.forEach((array3, index) => this.wasm.writeMemory(allocated[index], new Uint8Array(array3.buffer, array3.byteOffset, array3.byteLength)));
+      return run(allocated);
+    } finally {
+      for (const pointer of allocated.reverse()) this.call("free", pointer);
+    }
+  }
+  add(key2, vector) {
+    if (vector.length !== this.dimensions || vector.some((component) => !Number.isFinite(component))) throw new Error("Invalid vector dimensions/components");
+    this.buffers([new BigUint64Array([key2]), new Float32Array(vector)], [], ([keys, vectors]) => {
+      if (this.checked("index_add_batch", this.pointer, keys, vectors, 1, this.dimensions) !== 1) throw new Error("Incomplete vector insertion");
+    });
+  }
+  remove(key2) {
+    this.checked("index_remove", this.pointer, key2);
+  }
+  search(vector, count, allowed, excluded = []) {
+    if (vector.length !== this.dimensions) throw new Error("Query vector dimensions changed");
+    const sorted = (keys) => new BigUint64Array([...keys].sort((a, b) => a < b ? -1 : a > b ? 1 : 0));
+    return this.buffers([new Float32Array(vector), sorted(allowed ?? []), sorted(excluded)], [count * 8, count * 4], ([query, allow, exclude, keys, distances]) => {
+      const found = this.checked("index_search_filtered", this.pointer, query, count, keys, distances, allow, allowed?.length ?? 0, exclude, excluded.length, allowed === void 0 ? 0 : 1);
+      const labels = new BigUint64Array(this.wasm.readMemory(keys, found * 8).buffer);
+      const values = new Float32Array(this.wasm.readMemory(distances, found * 4).buffer);
+      return Array.from(labels, (key2, index) => ({ key: key2, similarity: Math.max(-1, Math.min(1, 1 - values[index] / 2)) }));
+    });
+  }
+  score(vector, keys) {
+    if (keys.length === 0) return [];
+    return this.buffers([new Float32Array(vector), new BigUint64Array(keys)], [keys.length * 8], ([query, labels, scores]) => {
+      if (this.checked("index_score_keys", this.pointer, query, labels, keys.length, this.dimensions, scores) !== keys.length) throw new Error("Missing indexed source vector");
+      return Array.from(new Float64Array(this.wasm.readMemory(scores, keys.length * 8).buffer), (value) => Math.max(-1, Math.min(1, value)));
+    });
+  }
+  close() {
+    if (!this.closed) {
+      this.call("index_destroy", this.pointer);
+      this.wasm.close();
+      this.closed = true;
+    }
+  }
+};
+
+// src/search/text-index.ts
+var TextIndex = class {
+  constructor() {
+    this.text = /* @__PURE__ */ new Map();
+    this.postings = /* @__PURE__ */ new Map();
+  }
+  grams(value, width) {
+    const result2 = /* @__PURE__ */ new Set();
+    for (let offset = 0; offset <= value.length - width; offset++) result2.add(value.slice(offset, offset + width));
+    return result2;
+  }
+  remove(id2) {
+    const old = this.text.get(id2);
+    if (old === void 0) return;
+    for (let width = 1; width <= 3; width++) for (const gram of this.grams(old, width)) {
+      const posting = this.postings.get(gram);
+      posting.delete(id2);
+      if (posting.size === 0) this.postings.delete(gram);
+    }
+    this.text.delete(id2);
+  }
+  put(id2, value) {
+    this.remove(id2);
+    value = value.toLowerCase();
+    this.text.set(id2, value);
+    for (let width = 1; width <= 3; width++) for (const gram of this.grams(value, width)) {
+      let posting = this.postings.get(gram);
+      if (posting === void 0) {
+        posting = /* @__PURE__ */ new Set();
+        this.postings.set(gram, posting);
+      }
+      posting.add(id2);
+    }
+  }
+  search(term) {
+    if (term === "") return [];
+    if (term.includes("*")) {
+      const parts = term.split("*").filter(Boolean);
+      const candidates = parts.length ? parts.map((part) => this.search(part)).sort((a, b) => a.length - b.length)[0] : [...this.text.keys()];
+      const pattern = new RegExp(parts.length ? term.split("*").map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[^\\0]*") : "", "u");
+      return candidates.filter((id2) => pattern.test(this.text.get(id2)));
+    }
+    const postings = [...this.grams(term, Math.min(3, term.length))].map((gram) => this.postings.get(gram));
+    if (postings.some((posting) => posting === void 0)) return [];
+    const ordered = postings.sort((a, b) => a.size - b.size);
+    return [...ordered[0]].filter((id2) => ordered.every((posting) => posting.has(id2)) && this.text.get(id2).includes(term));
+  }
+};
+var TitleIndex = class {
+  constructor() {
+    this.root = { children: /* @__PURE__ */ new Map(), ids: /* @__PURE__ */ new Set() };
+  }
+  put(id2, title) {
+    let node = this.root;
+    for (const character of title.toLowerCase()) {
+      let child = node.children.get(character);
+      if (!child) {
+        child = { children: /* @__PURE__ */ new Map(), ids: /* @__PURE__ */ new Set() };
+        node.children.set(character, child);
+      }
+      node = child;
+    }
+    node.ids.add(id2);
+  }
+  remove(id2, title) {
+    let node = this.root;
+    const path = [];
+    for (const character of title.toLowerCase()) {
+      path.push([node, character]);
+      const child = node.children.get(character);
+      if (!child) return;
+      node = child;
+    }
+    node.ids.delete(id2);
+    for (const [parent, character] of path.reverse()) {
+      const child = parent.children.get(character);
+      if (child.ids.size || child.children.size) break;
+      parent.children.delete(character);
+    }
+  }
+  search(query) {
+    const characters = [...query.toLowerCase()], result2 = /* @__PURE__ */ new Set();
+    for (let start = 0; start < characters.length; start++) {
+      let node = this.root;
+      for (let index = start; index < characters.length; index++) {
+        const child = node.children.get(characters[index]);
+        if (!child) break;
+        node = child;
+        for (const id2 of node.ids) result2.add(id2);
+      }
+    }
+    return result2;
+  }
+};
+
+// src/search/state.ts
+var compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+var groupKey = (embedding) => JSON.stringify([embedding.space, embedding.vector.length]);
+function addTo(map, key2, value) {
+  let values = map.get(key2);
+  if (!values) {
+    values = /* @__PURE__ */ new Set();
+    map.set(key2, values);
+  }
+  values.add(value);
+}
+function removeFrom(map, key2, value) {
+  const values = map.get(key2);
+  if (values) {
+    values.delete(value);
+    if (!values.size) map.delete(key2);
+  }
+}
+function folders(memory) {
+  if (memory.folderPath === null) return [];
+  const parts = memory.folderPath.split("/");
+  return parts.map((_part, index) => parts.slice(0, index + 1).join("/"));
+}
+var MemoryIndex = class {
+  constructor(database, ownerKey) {
+    this.database = database;
+    this.ownerKey = ownerKey;
+    this.memories = /* @__PURE__ */ new Map();
+    this.chunks = /* @__PURE__ */ new Map();
+    this.links = /* @__PURE__ */ new Map();
+    this.adjacency = /* @__PURE__ */ new Map();
+    this.parents = /* @__PURE__ */ new Map();
+    this.all = /* @__PURE__ */ new Set();
+    this.text = new TextIndex();
+    this.tags = new TextIndex();
+    this.titles = new TitleIndex();
+    this.sources = /* @__PURE__ */ new Map();
+    this.units = /* @__PURE__ */ new Map();
+    this.chunkIds = /* @__PURE__ */ new Map();
+    this.folderIds = /* @__PURE__ */ new Map();
+    this.dates = [];
+    this.groups = /* @__PURE__ */ new Map();
+    this.invalid = /* @__PURE__ */ new Map();
+    this.nextLabel = 1n;
+    this.cursor = null;
+    this.initialized = false;
+  }
+  close() {
+    for (const group of this.groups.values()) group.index.close();
+    this.groups.clear();
+  }
+  /** Captures the journal before initial paging, then catches writes made during the build. */
+  refresh() {
+    return __async(this, null, function* () {
+      if (!this.initialized) {
+        this.cursor = (yield this.database.changes(null)).cursor;
+        for (const collection of ["memories", "chunks", "links"]) {
+          let after = "";
+          for (; ; ) {
+            const rows = yield this.database.select(collection, this.ownerKey, "1", [], 100, after);
+            for (const row of rows) yield this.apply(collection, row.key, row);
+            if (rows.length < 100) break;
+            after = rows[rows.length - 1].key;
+          }
+        }
+        this.initialized = true;
+      }
+      for (; ; ) {
+        const page = yield this.database.changes(this.cursor);
+        if (page.reset) return false;
+        for (const change of page.changes) if (change.key.startsWith(this.ownerKey + "/")) {
+          yield this.apply(change.collection, change.key, change.entry);
+        }
+        this.cursor = page.cursor;
+        if (!page.hasMore) return true;
+      }
+    });
+  }
+  datePosition(time, id2) {
+    let low = 0, high = this.dates.length;
+    while (low < high) {
+      const middle = low + high >>> 1, item = this.dates[middle];
+      if (item.time < time || item.time === time && compare(item.id, id2) < 0) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  }
+  removeSource(identity3) {
+    const old = this.sources.get(identity3);
+    if (!old) return;
+    this.text.remove(identity3);
+    removeFrom(this.units, old.parent, identity3);
+    if (old.group !== null) {
+      const group = this.groups.get(old.group);
+      group.index.remove(old.label);
+      group.sources.delete(old.label);
+      const count = group.parents.get(old.parent) - 1;
+      if (count) group.parents.set(old.parent, count);
+      else group.parents.delete(old.parent);
+    } else {
+      const count = this.invalid.get(old.parent) - 1;
+      if (count) this.invalid.set(old.parent, count);
+      else this.invalid.delete(old.parent);
+    }
+    this.sources.delete(identity3);
+  }
+  apply(collection, key2, entry) {
+    return __async(this, null, function* () {
+      if (collection !== "memories" && collection !== "chunks" && collection !== "links") return;
+      const id2 = key2.slice(this.ownerKey.length + 1), identity3 = collection + "/" + id2;
+      if (collection === "links") {
+        const old = this.links.get(id2);
+        if (old) {
+          removeFrom(this.adjacency, old.sourceMemoryId, id2);
+          removeFrom(this.adjacency, old.targetMemoryId, id2);
+          this.links.delete(id2);
+        }
+        if (entry) {
+          const link2 = entry.value.record;
+          this.links.set(id2, link2);
+          addTo(this.adjacency, link2.sourceMemoryId, id2);
+          addTo(this.adjacency, link2.targetMemoryId, id2);
+        }
+        return;
+      }
+      this.removeSource(identity3);
+      if (collection === "memories") {
+        const old = this.memories.get(id2);
+        if (old) {
+          this.tags.remove(id2);
+          this.titles.remove(id2, old.title);
+          this.parents.delete(old.uuid);
+          this.memories.delete(id2);
+          this.all.delete(id2);
+          for (const folder2 of folders(old)) removeFrom(this.folderIds, folder2, id2);
+          const offset = this.datePosition(old.createdAt, id2);
+          if (this.dates[offset]?.id === id2) this.dates.splice(offset, 1);
+        }
+      } else {
+        const old = this.chunks.get(id2);
+        if (old) {
+          removeFrom(this.chunkIds, old.memoryUuid, id2);
+          this.chunks.delete(id2);
+        }
+      }
+      if (!entry) return;
+      const record2 = entry.value.record;
+      const parent = collection === "memories" ? record2.uuid : record2.memoryUuid;
+      if (collection === "memories") {
+        const memory = record2;
+        this.memories.set(id2, memory);
+        this.parents.set(parent, id2);
+        if (memory.title === ".folder_placeholder") return;
+        this.all.add(id2);
+        for (const folder2 of folders(memory)) addTo(this.folderIds, folder2, id2);
+        this.dates.splice(this.datePosition(memory.createdAt, id2), 0, { time: memory.createdAt, id: id2 });
+        this.tags.put(id2, memory.tags.map((tag) => tag.name).join("\0"));
+        this.titles.put(id2, memory.title);
+        this.text.put(identity3, memory.title + "\0" + memory.content);
+      } else {
+        this.chunks.set(id2, record2);
+        addTo(this.chunkIds, parent, id2);
+        this.text.put(identity3, record2.content);
+      }
+      const expected = collection === "memories" && record2.isDocumentNode ? record2.title : record2.content;
+      const embedding = entry.value.embedding;
+      const valid = embedding != null && embedding.text === expected && embedding.vector.length > 0 && embedding.vector.every(Number.isFinite);
+      const source = { identity: identity3, parent, label: this.nextLabel++, group: valid ? groupKey(embedding) : null, collection, id: id2, version: entry.version };
+      if (valid) {
+        let group = this.groups.get(source.group);
+        if (!group) {
+          group = { index: yield VectorIndex.open(embedding.vector.length), sources: /* @__PURE__ */ new Map(), parents: /* @__PURE__ */ new Map() };
+          this.groups.set(source.group, group);
+        }
+        group.index.add(source.label, embedding.vector);
+        group.sources.set(source.label, source);
+        group.parents.set(parent, (group.parents.get(parent) ?? 0) + 1);
+      } else this.invalid.set(parent, (this.invalid.get(parent) ?? 0) + 1);
+      this.sources.set(identity3, source);
+      addTo(this.units, parent, identity3);
+    });
+  }
+  scope(options) {
+    let ids = this.all, restricted = false;
+    if (options.folderPath !== null) {
+      ids = this.folderIds.get(options.folderPath) ?? /* @__PURE__ */ new Set();
+      restricted = true;
+    }
+    if (options.createdAtStartMs !== null || options.createdAtEndMs !== null) {
+      const start = options.createdAtStartMs === null ? 0 : this.datePosition(options.createdAtStartMs, "");
+      const end = options.createdAtEndMs === null ? this.dates.length : this.datePosition(options.createdAtEndMs + 1, "");
+      ids = new Set(this.dates.slice(start, end).filter((item) => ids.has(item.id)).map((item) => item.id));
+      restricted = true;
+    }
+    return { ids, restricted };
+  }
+  parentId(source) {
+    return this.parents.get(source.parent);
+  }
+  matching(terms, scope, keywordsEnabled = true, tagsEnabled = true) {
+    const keywords = /* @__PURE__ */ new Map(), tags = /* @__PURE__ */ new Map();
+    for (const term of terms) {
+      const parents = /* @__PURE__ */ new Set();
+      if (keywordsEnabled) for (const identity3 of this.text.search(term)) {
+        const source = this.sources.get(identity3);
+        if (!source) continue;
+        const id2 = this.parentId(source);
+        if (id2 !== void 0 && scope.ids.has(id2)) parents.add(id2);
+      }
+      for (const id2 of parents) keywords.set(id2, (keywords.get(id2) ?? 0) + 1);
+      if (tagsEnabled) {
+        for (const id2 of this.tags.search(term)) if (scope.ids.has(id2)) tags.set(id2, (tags.get(id2) ?? 0) + 1);
+      }
+    }
+    return { keywords, tags };
+  }
+  validate(query, scope, parent) {
+    const relevant = (uuid2) => parent === void 0 ? scope.ids.has(this.parents.get(uuid2) ?? "") : uuid2 === parent;
+    for (const uuid2 of this.invalid.keys()) if (relevant(uuid2)) throw new Error("Memory vector index is incomplete or stale; rebuild memory embeddings");
+    const expected = groupKey(query);
+    for (const [name, group] of this.groups) if (name !== expected) {
+      for (const uuid2 of group.parents.keys()) if (relevant(uuid2)) throw new Error("Memory vector provider dimensions changed; rebuild memory embeddings");
+    }
+  }
+  semantic(query, scope, count, excluded, parent) {
+    const result2 = /* @__PURE__ */ new Map(), group = this.groups.get(groupKey(query));
+    if (!group) return result2;
+    let allowed;
+    if (scope.restricted || parent !== void 0) {
+      allowed = [];
+      const uuids = parent === void 0 ? [...scope.ids].map((id2) => this.memories.get(id2).uuid) : [parent];
+      for (const uuid2 of uuids) for (const identity3 of this.units.get(uuid2) ?? []) {
+        const source = this.sources.get(identity3);
+        if (source.group === groupKey(query) && (parent === void 0 || source.collection === "chunks")) allowed.push(source.label);
+      }
+    }
+    const excludedLabels = [];
+    for (const id2 of excluded) {
+      const uuid2 = this.memories.get(id2)?.uuid;
+      if (uuid2 === void 0) continue;
+      for (const identity3 of this.units.get(uuid2) ?? []) {
+        const source = this.sources.get(identity3);
+        if (source.group === groupKey(query)) excludedLabels.push(source.label);
+      }
+    }
+    const maximum = Math.min(group.sources.size, Math.max(512, count * 16));
+    let budget = Math.min(maximum, Math.max(128, count * 4));
+    for (; ; ) {
+      const hits = group.index.search(query.vector, Math.max(1, budget), allowed, excludedLabels);
+      for (const hit of hits) {
+        const source = group.sources.get(hit.key);
+        const id2 = parent === void 0 ? this.parentId(source) : source.id;
+        if (id2 !== void 0 && (parent !== void 0 || scope.ids.has(id2))) result2.set(id2, Math.max(result2.get(id2) ?? -Infinity, hit.similarity));
+      }
+      if (result2.size >= count || hits.length < budget || budget === maximum) break;
+      budget = Math.min(maximum, budget * 2);
+    }
+    return result2;
+  }
+  scoreCandidates(query, ids, scores, chunks = false) {
+    const group = this.groups.get(groupKey(query));
+    if (!group) return;
+    const labels = [], parents = [];
+    for (const id2 of ids) {
+      const identities2 = chunks ? ["chunks/" + id2] : this.units.get(this.memories.get(id2).uuid) ?? [];
+      for (const identity3 of identities2) {
+        const source = this.sources.get(identity3);
+        if (source?.group === groupKey(query)) {
+          labels.push(source.label);
+          parents.push(id2);
+        }
+      }
+    }
+    const exact = group.index.score(query.vector, labels);
+    for (const id2 of new Set(parents)) scores.delete(id2);
+    exact.forEach((score3, index) => scores.set(parents[index], Math.max(scores.get(parents[index]) ?? -Infinity, score3)));
+  }
+};
+var retained = /* @__PURE__ */ new WeakMap();
+function withMemoryIndex(database, ownerKey, run) {
+  let state = retained.get(database);
+  if (!state) {
+    state = { tail: Promise.resolve(), owners: /* @__PURE__ */ new Map() };
+    retained.set(database, state);
+  }
+  const current = state;
+  const operation = current.tail.catch(() => {
+  }).then(() => __async(null, null, function* () {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let index = current.owners.get(ownerKey);
+      if (!index) {
+        index = new MemoryIndex(database, ownerKey);
+        current.owners.set(ownerKey, index);
+      }
+      let ready;
+      try {
+        ready = yield index.refresh();
+      } catch (error) {
+        index.close();
+        current.owners.delete(ownerKey);
+        throw error;
+      }
+      if (ready) return run(index);
+      index.close();
+      current.owners.delete(ownerKey);
+    }
+    throw new Error("Memory change journal reset repeatedly during index construction");
+  }));
+  current.tail = operation;
+  return operation;
+}
+function closeMemoryIndexes(database) {
+  return __async(this, null, function* () {
+    const state = retained.get(database);
+    if (!state) return;
+    yield state.tail.catch(() => {
+    });
+    for (const index of state.owners.values()) index.close();
+    retained.delete(database);
+  });
+}
+
 // src/memory-search.ts
 var MEMORY_SEARCH_THRESHOLD = 0.025;
 function lexicalTerms(query) {
@@ -1327,173 +1842,124 @@ function lexicalTerms(query) {
   }
   return [...terms].slice(0, 32);
 }
-function parameters(options) {
-  return [
-    options.ownerKey + "/",
-    options.ownerKey + "0",
-    options.folderPath,
-    options.createdAtStartMs,
-    options.createdAtEndMs,
-    options.query,
-    JSON.stringify(lexicalTerms(options.query))
-  ];
-}
-var rankedQuery = `
-WITH query_vector AS (SELECT CAST(key AS INTEGER) AS dimension,value FROM json_each(?9)), scoped AS (
-  SELECT key,value,json_extract(value,'$.record.id') AS id,
-    json_extract(value,'$.record.importance') AS importance,
-    json_extract(value,'$.record.updatedAt') AS updatedAt
-  FROM plugin_objects
-  WHERE collection='memories' AND key>=?1 AND key<?2
-    AND json_extract(value,'$.record.title')<>'.folder_placeholder'
-    AND (?3 IS NULL OR json_extract(value,'$.record.folderPath')=?3 OR
-      substr(json_extract(value,'$.record.folderPath'),1,length(?3)+1)=?3||'/')
-    AND (?4 IS NULL OR json_extract(value,'$.record.createdAt')>=?4)
-    AND (?5 IS NULL OR json_extract(value,'$.record.createdAt')<=?5)
-), units AS (
-  SELECT id,value FROM scoped
-  UNION ALL
-  SELECT m.id,c.value FROM plugin_objects c JOIN scoped m
-    ON json_extract(c.value,'$.record.memoryUuid')=json_extract(m.value,'$.record.uuid')
-  WHERE c.collection='chunks' AND c.key>=?1 AND c.key<?2
-), lexical AS (
-  SELECT m.*,
-    (SELECT count(*) FROM json_each(?7) t WHERE
-      lower(json_extract(m.value,'$.record.title')) GLOB '*'||t.value||'*'
-      OR EXISTS (SELECT 1 FROM units u WHERE u.id=m.id AND
-        lower(json_extract(u.value,'$.record.content')) GLOB '*'||t.value||'*')) AS keywords,
-    (SELECT count(*) FROM json_each(?7) t WHERE EXISTS (
-      SELECT 1 FROM json_each(m.value,'$.record.tags') tag
-      WHERE lower(json_extract(tag.value,'$.name')) GLOB '*'||t.value||'*')) AS tags
-  FROM scoped m
-), keyword_ranks AS (
-  SELECT id,?10*importance*(1+0.6*keywords/max(1,json_array_length(?7)))/(60.0+row_number() OVER (ORDER BY keywords DESC,importance DESC,updatedAt DESC,id)) AS score
-  FROM lexical WHERE keywords>0
-), tag_ranks AS (
-  SELECT id,?11*importance*(1+0.6*tags/max(1,json_array_length(?7)))/(60.0+row_number() OVER (ORDER BY tags DESC,importance DESC,updatedAt DESC,id)) AS score
-  FROM lexical WHERE tags>0
-), similarities AS (
-  SELECT u.id,max((SELECT sum(q.value*v.value) FROM json_each(u.value,'$.embedding.vector') v
-    JOIN query_vector q ON q.dimension=v.key)) AS similarity
-  FROM units u WHERE ?12>0 AND json_extract(u.value,'$.embedding.space')=?8
-    AND json_array_length(u.value,'$.embedding.vector')=json_array_length(?9)
-  GROUP BY u.id
-), semantic AS (
-  SELECT id,?12*max(-1.0,min(1.0,similarity)) AS score FROM similarities
-), base AS (
-  SELECT m.*,coalesce(k.score,0)+CASE WHEN instr(lower(?6),lower(json_extract(m.value,'$.record.title')))>0 THEN ?10*m.importance/61.0 ELSE 0 END AS keywordScore,coalesce(t.score,0) AS tagScore,
-    coalesce(s.score,0) AS vectorScore,
-    coalesce(k.score,0)+coalesce(t.score,0)+coalesce(s.score,0)+CASE WHEN instr(lower(?6),lower(json_extract(m.value,'$.record.title')))>0 THEN ?10*m.importance/61.0 ELSE 0 END AS baseScore
-  FROM scoped m LEFT JOIN keyword_ranks k USING(id) LEFT JOIN tag_ranks t USING(id) LEFT JOIN semantic s USING(id)
-), seeds AS (
-  SELECT id,baseScore FROM base WHERE baseScore>0 ORDER BY baseScore DESC,id LIMIT 10
-), edges AS (
-  SELECT target.id,sum((seed.baseScore*json_extract(l.value,'$.record.weight')+0.03)*?13) AS score
-  FROM plugin_objects l JOIN seeds seed ON
-    json_extract(l.value,'$.record.sourceMemoryId')=seed.id OR json_extract(l.value,'$.record.targetMemoryId')=seed.id
-  JOIN scoped target ON target.id=CASE WHEN json_extract(l.value,'$.record.sourceMemoryId')=seed.id
-    THEN json_extract(l.value,'$.record.targetMemoryId') ELSE json_extract(l.value,'$.record.sourceMemoryId') END
-  WHERE l.collection='links' AND l.key>=?1 AND l.key<?2 AND ?13>0 GROUP BY target.id
-), scored AS (
-  SELECT b.*,coalesce(e.score,0) AS edgeScore,baseScore+coalesce(e.score,0) AS score FROM base b LEFT JOIN edges e USING(id)
-), page AS (
-  SELECT * FROM scored WHERE (?17=1 OR (score>0 AND score>=?14)) AND id NOT IN (SELECT value FROM json_each(?16)) ORDER BY score DESC,id LIMIT ?15
-), stats AS (
-  SELECT (SELECT count(*) FROM scoped) AS total,
-    (SELECT count(*) FROM scored WHERE score>0 AND score>=?14 AND id IN (SELECT value FROM json_each(?16))) AS excluded,
-    (SELECT count(*) FROM units WHERE ?12>0 AND (
-      json_extract(value,'$.embedding.text') IS NOT CASE WHEN json_extract(value,'$.record.isDocumentNode')=1 THEN json_extract(value,'$.record.title') ELSE json_extract(value,'$.record.content') END OR
-      json_extract(value,'$.embedding.space') IS NOT ?8 OR
-      json_array_length(value,'$.embedding.vector') IS NOT json_array_length(?9))) AS invalid
-)
-SELECT json_extract(page.value,'$.record') AS record,page.keywordScore,page.tagScore,page.vectorScore,page.edgeScore,page.score,stats.total,stats.invalid,stats.excluded
-FROM stats LEFT JOIN page ON 1 ORDER BY page.score DESC,page.id`;
 function prepareMemoryQuery(settings2, query, config) {
   return __async(this, null, function* () {
     return query.trim() !== "*" && settings2.cloudEmbeddingEnabled && config.vectorWeight > 0 ? (yield embedTexts([query], settings2))[0] : null;
   });
 }
+var compareId = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+function rank(index, counts, weight, termCount) {
+  if (weight === 0) return /* @__PURE__ */ new Map();
+  const ids = [...counts.keys()].sort((a, b) => {
+    const first = index.memories.get(a), second = index.memories.get(b);
+    return counts.get(b) - counts.get(a) || second.importance - first.importance || second.updatedAt - first.updatedAt || compareId(a, b);
+  });
+  return new Map(ids.map((id2, offset) => [id2, weight * index.memories.get(id2).importance * (1 + 0.6 * counts.get(id2) / Math.max(1, termCount)) / (61 + offset)]));
+}
+function ranked(index, scope, options, config, query, debug) {
+  const excluded = new Set(options.excludeIds ?? []), limit2 = options.limit ?? 100;
+  if (options.query.trim() === "*") return {
+    excluded: [...excluded].filter((id2) => scope.ids.has(id2)).length,
+    hits: [...scope.ids].filter((id2) => !excluded.has(id2)).sort(compareId).slice(0, limit2).map((id2) => ({ memory: index.memories.get(id2), score: 1, keywordScore: 0, tagScore: 0, vectorScore: 0, edgeScore: 0, passedThreshold: true }))
+  };
+  const terms = lexicalTerms(options.query), matched = index.matching(terms, scope, config.keywordWeight > 0, config.tagWeight > 0);
+  const lexicalBoost = config.scoreMode === "KEYWORD_FIRST" ? 1.3 : config.scoreMode === "SEMANTIC_FIRST" ? 0.8 : 1;
+  const keywordWeight = config.keywordWeight * lexicalBoost, tagWeight = config.tagWeight * lexicalBoost;
+  const vectorWeight = config.vectorWeight * (config.scoreMode === "SEMANTIC_FIRST" ? 1.3 : config.scoreMode === "KEYWORD_FIRST" ? 0.8 : 1);
+  const edgeWeight = config.edgeWeight * (config.scoreMode === "KEYWORD_FIRST" ? 0.9 : config.scoreMode === "SEMANTIC_FIRST" ? 1.1 : 1);
+  const keywords = rank(index, matched.keywords, keywordWeight, terms.length), tags = rank(index, matched.tags, tagWeight, terms.length);
+  if (keywordWeight > 0) {
+    for (const id2 of index.titles.search(options.query)) if (scope.ids.has(id2)) keywords.set(id2, (keywords.get(id2) ?? 0) + keywordWeight * index.memories.get(id2).importance / 61);
+  }
+  const lexical = /* @__PURE__ */ new Set([...keywords.keys(), ...tags.keys()]);
+  let semantic = /* @__PURE__ */ new Map();
+  if (query !== null) {
+    index.validate(query, scope);
+    semantic = index.semantic(query, scope, Math.max(10, limit2), excluded);
+    const candidates = [...lexical].sort((a, b) => (keywords.get(b) ?? 0) + (tags.get(b) ?? 0) - (keywords.get(a) ?? 0) - (tags.get(a) ?? 0));
+    index.scoreCandidates(query, [...new Set([...candidates.slice(0, Math.max(256, limit2 * 4)), ...excluded].filter((id2) => scope.ids.has(id2)))], semantic);
+  }
+  const ids = debug ? new Set(scope.ids) : /* @__PURE__ */ new Set([...lexical, ...semantic.keys()]);
+  const hits = /* @__PURE__ */ new Map();
+  const hit = (id2) => {
+    let item = hits.get(id2);
+    if (!item) {
+      const keywordScore = keywords.get(id2) ?? 0, tagScore = tags.get(id2) ?? 0, vectorScore = (semantic.get(id2) ?? 0) * vectorWeight;
+      item = { memory: index.memories.get(id2), keywordScore, tagScore, vectorScore, edgeScore: 0, score: keywordScore + tagScore + vectorScore, passedThreshold: false };
+      hits.set(id2, item);
+    }
+    return item;
+  };
+  for (const id2 of ids) hit(id2);
+  const seeds = [...hits.values()].filter((item) => item.score > 0).sort((a, b) => b.score - a.score || compareId(a.memory.id, b.memory.id)).slice(0, 10);
+  if (edgeWeight > 0) {
+    const targets = /* @__PURE__ */ new Set();
+    for (const seed of seeds) for (const linkId of index.adjacency.get(seed.memory.id) ?? []) {
+      const link2 = index.links.get(linkId), id2 = link2.sourceMemoryId === seed.memory.id ? link2.targetMemoryId : link2.sourceMemoryId;
+      if (scope.ids.has(id2)) targets.add(id2);
+    }
+    if (query !== null) index.scoreCandidates(query, [...targets], semantic);
+    for (const id2 of targets) {
+      const item = hit(id2);
+      item.vectorScore = (semantic.get(id2) ?? 0) * vectorWeight;
+      item.score = item.keywordScore + item.tagScore + item.vectorScore;
+    }
+    const seedScores = seeds.map((seed) => ({ id: seed.memory.id, score: seed.keywordScore + seed.tagScore + seed.vectorScore }));
+    for (const seed of seedScores) for (const linkId of index.adjacency.get(seed.id) ?? []) {
+      const link2 = index.links.get(linkId), id2 = link2.sourceMemoryId === seed.id ? link2.targetMemoryId : link2.sourceMemoryId;
+      if (!scope.ids.has(id2)) continue;
+      hit(id2).edgeScore += (seed.score * link2.weight + 0.03) * edgeWeight;
+    }
+  }
+  let excludedCount = 0;
+  for (const item of hits.values()) {
+    item.score += item.edgeScore;
+    item.passedThreshold = item.score > 0 && item.score >= options.relevanceThreshold;
+    if (excluded.has(item.memory.id) && item.passedThreshold) excludedCount++;
+  }
+  return { excluded: excludedCount, hits: [...hits.values()].filter((item) => !excluded.has(item.memory.id) && (debug || item.passedThreshold)).sort((a, b) => b.score - a.score || compareId(a.memory.id, b.memory.id)).slice(0, limit2) };
+}
 function searchMemoryDatabase(database, settings2, options, config, debug = false) {
   return __async(this, null, function* () {
-    const limit2 = options.limit ?? 100;
+    const limit2 = options.limit ?? 100, wildcard = options.query.trim() === "*";
     if (!Number.isInteger(limit2) || limit2 < 1 || limit2 > 1e3) throw new Error("Memory search limit must be between 1 and 1000");
-    const params = parameters(options);
-    if (options.query.trim() === "*") {
-      const rows2 = yield database.query(
-        `WITH scoped AS (
-      SELECT value,json_extract(value,'$.record.id') AS id FROM plugin_objects WHERE collection='memories' AND key>=?1 AND key<?2
-      AND (?3 IS NULL OR json_extract(value,'$.record.folderPath')=?3 OR substr(json_extract(value,'$.record.folderPath'),1,length(?3)+1)=?3||'/')
-      AND (?4 IS NULL OR json_extract(value,'$.record.createdAt')>=?4) AND (?5 IS NULL OR json_extract(value,'$.record.createdAt')<=?5)
-      AND json_extract(value,'$.record.title')<>'.folder_placeholder'
-    ), page AS (SELECT * FROM scoped WHERE id NOT IN (SELECT value FROM json_each(?6)) ORDER BY id LIMIT ?7), stats AS (
-      SELECT count(*) AS total,sum(CASE WHEN id IN (SELECT value FROM json_each(?6)) THEN 1 ELSE 0 END) AS excluded FROM scoped
-    ) SELECT json_extract(page.value,'$.record') AS record,stats.total,stats.excluded FROM stats LEFT JOIN page ON 1 ORDER BY page.id`,
-        [...params.slice(0, 5), JSON.stringify(options.excludeIds ?? []), limit2]
-      );
-      return { queryEmbedding: null, result: {
-        excludedBySnapshotCount: Number(rows2[0].excluded),
-        query: options.query,
-        config,
-        relevanceThreshold: options.relevanceThreshold,
-        memoriesInScopeCount: Number(rows2[0].total),
-        candidates: rows2.filter(
-          /** Omits an empty listing page. */
-          (row) => row.record !== null
-        ).map(
-          /** Returns complete explicitly listed records. */
-          (row) => ({ memory: JSON.parse(String(row.record)), score: 1, keywordScore: 0, tagScore: 0, vectorScore: 0, edgeScore: 0, passedThreshold: true })
-        )
-      } };
+    if (!wildcard) {
+      if (options.query.trim() === "") throw new Error("Memory search query must not be blank");
+      const vectorWeight = settings2.cloudEmbeddingEnabled ? config.vectorWeight : 0;
+      if (lexicalTerms(options.query).length === 0 && vectorWeight === 0) throw new Error("Memory search query has no searchable tokens");
+      if (config.keywordWeight + config.tagWeight + vectorWeight + config.edgeWeight === 0) throw new Error("Memory search has no enabled scoring weights");
     }
-    if (options.query.trim() === "") throw new Error("Memory search query must not be blank");
-    const vectorWeight = settings2.cloudEmbeddingEnabled ? config.vectorWeight : 0;
-    if (lexicalTerms(options.query).length === 0 && vectorWeight === 0) throw new Error("Memory search query has no searchable tokens");
-    if (config.keywordWeight + config.tagWeight + vectorWeight + config.edgeWeight === 0) throw new Error("Memory search has no enabled scoring weights");
     const queryEmbedding = yield prepareMemoryQuery(settings2, options.query, config);
-    const space = queryEmbedding === null ? "" : queryEmbedding.space, vector = queryEmbedding === null ? [] : queryEmbedding.vector;
-    const keywordBoost = config.scoreMode === "KEYWORD_FIRST" ? 1.3 : config.scoreMode === "SEMANTIC_FIRST" ? 0.8 : 1;
-    const vectorBoost = config.scoreMode === "SEMANTIC_FIRST" ? 1.3 : config.scoreMode === "KEYWORD_FIRST" ? 0.8 : 1;
-    params.push(
-      space,
-      JSON.stringify(vector),
-      config.keywordWeight * keywordBoost,
-      config.tagWeight * keywordBoost,
-      vectorWeight * vectorBoost,
-      config.edgeWeight * (config.scoreMode === "KEYWORD_FIRST" ? 0.9 : config.scoreMode === "SEMANTIC_FIRST" ? 1.1 : 1),
-      options.relevanceThreshold,
-      limit2,
-      JSON.stringify(options.excludeIds ?? []),
-      debug ? 1 : 0
-    );
-    const rows = yield database.query(rankedQuery, params);
-    if (Number(rows[0].invalid) !== 0) throw new Error("Memory vector index is incomplete or its provider dimensions changed; rebuild memory embeddings");
-    return { queryEmbedding, result: {
-      excludedBySnapshotCount: Number(rows[0].excluded),
-      query: options.query,
-      config,
-      relevanceThreshold: options.relevanceThreshold,
-      memoriesInScopeCount: Number(rows[0].total),
-      candidates: rows.filter(
-        /** Omits the aggregate-only row for an empty result page. */
-        (row) => row.record !== null
-      ).map(
-        /** Decodes bounded hits after all database filtering and ranking. */
-        (row) => ({
-          memory: JSON.parse(String(row.record)),
-          score: Number(row.score),
-          keywordScore: Number(row.keywordScore),
-          tagScore: Number(row.tagScore),
-          vectorScore: Number(row.vectorScore),
-          edgeScore: Number(row.edgeScore),
-          passedThreshold: Number(row.score) > 0 && Number(row.score) >= options.relevanceThreshold
-        })
-      )
-    } };
+    return withMemoryIndex(database, options.ownerKey, (index) => __async(null, null, function* () {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const scope = index.scope(options), page = ranked(index, scope, options, config, queryEmbedding, debug);
+        if (page.hits.length) {
+          const entries = yield database.getMany("memories", page.hits.map((item) => options.ownerKey + "/" + item.memory.id));
+          if (entries.some((entry, offset) => entry === null || entry.version !== index.sources.get("memories/" + page.hits[offset].memory.id)?.version)) {
+            if (!(yield index.refresh())) throw new Error("Memory index changed during retrieval; retry the query");
+            continue;
+          }
+          page.hits.forEach((item, offset) => {
+            item.memory = entries[offset].value.record;
+          });
+        }
+        return { queryEmbedding, result: { excludedBySnapshotCount: page.excluded, query: options.query, config, relevanceThreshold: options.relevanceThreshold, memoriesInScopeCount: scope.ids.size, candidates: page.hits } };
+      }
+      throw new Error("Memory records changed repeatedly during retrieval");
+    }));
   });
 }
 
 // src/memory-jobs/prompt-template.ts
 var extractionTemplate = '\u4F60\u8981\u4ECE\u5BF9\u8BDD\u4E2D\u6784\u5EFA\u957F\u671F\u8BB0\u5FC6\u56FE\u8C31\u3002\r\n\r\n$duplicatesPromptPart\r\n$existingMemoriesPrompt\r\n$existingFoldersPrompt\r\n\r\n\u3010\u5199\u5165\u524D\u5148\u8FC7\u7B5B\u3011\r\n- \u53EA\u8BB0\u5F55"\u7528\u6237\u7279\u5F02\u4E14\u53EF\u590D\u7528"\u7684\u4FE1\u606F\uFF1A\u7A33\u5B9A\u504F\u597D\u3001\u7EA6\u675F\u3001\u5DF2\u786E\u8BA4\u51B3\u7B56\u3001\u53CD\u590D\u9519\u8BEF\u3001\u9879\u76EE\u4E8B\u5B9E\u3001\u957F\u671F\u4E16\u754C\u89C2\u4E2D\u7684\u7A33\u5B9A\u8BBE\u5B9A\u3002\r\n- \u4E0D\u8BB0\u5F55\u5E38\u8BC6/\u516C\u5F00\u5B9A\u4E49\uFF08\u5982"TS\u662F\u4EC0\u4E48""Node\u662F\u4EC0\u4E48""\u78C1\u504F\u89D2\u662F\u4EC0\u4E48"\uFF09\u3002\r\n- \u4E0D\u8BB0\u5F55\u672A\u6765\u63A8\u6D4B\u9879\uFF1A\u4E0B\u4E00\u6B65\u5EFA\u8BAE\u3001TODO\u3001\u6682\u5B9A\u8BA1\u5212\u3002\r\n- \u82E5\u6CA1\u6709\u957F\u671F\u4EF7\u503C\u4FE1\u53F7\uFF0C\u76F4\u63A5\u8FD4\u56DE `{}`\u3002\r\n\r\n\u3010\u62BD\u53D6\u7B56\u7565\u3011\r\n- \u63D0\u4F9B\u7684\u5DF2\u6709\u8BB0\u5FC6\u53EA\u662F\u68C0\u7D22\u7EBF\u7D22\uFF0C\u4E0D\u662F\u4E8B\u5B9E\u8BC1\u636E\uFF1B\u53EA\u6709\u5BF9\u8BDD\u660E\u786E\u8BC1\u660E\u4E3B\u4F53\u548C\u4E8B\u5B9E\u76F8\u540C\u65F6\u624D\u53EF `update`\u3001`merge` \u6216\u8FDE\u8FB9\uFF0C\u5426\u5219\u5FFD\u7565\u8BE5\u5019\u9009\u3002\r\n- \u4F18\u5148 `update` / `merge`\uFF0C\u5176\u6B21\u624D\u662F `new`\u3002\r\n- `new` \u4EC5\u5728\u786E\u5B9E\u65B0\u589E\u6982\u5FF5\u65F6\u4F7F\u7528\uFF08\u6700\u591A 5 \u6761\uFF09\u3002\r\n- \u957F\u671F\u5C0F\u8BF4/\u4E16\u754C\u89C2\u573A\u666F\u4E2D\uFF0C\u53CD\u590D\u51FA\u73B0\u4E14\u5F71\u54CD\u8FDE\u7EED\u6027\u7684\u89D2\u8272\u3001\u5730\u70B9\u3001\u7EC4\u7EC7\u3001\u89C4\u5219\u3001\u65F6\u95F4\u7EBF\u53EF\u4EE5\u5165\u5E93\u3002\r\n- \u82E5\u6838\u5FC3\u662F"\u66F4\u65B0\u65E7\u6982\u5FF5"\uFF0C`main` \u5FC5\u987B\u4E3A `null`\uFF0C\u53EA\u7528 `update`\u3002\r\n- \u5982\u679C\u53EA\u662F\u5BF9\u5DF2\u6709\u8BB0\u5FC6\u7684\u6539\u5199\uFF08\u540C\u4E3B\u4F53 + \u540C\u52A8\u4F5C + \u540C\u7ED3\u679C\uFF09\uFF0C\u6309\u91CD\u590D\u5904\u7406\uFF1A\u4F18\u5148 `update`/`merge`\uFF0C\u4E0D\u8981\u518D `new`\u3002\r\n- \u5982\u679C `main` \u4E0E\u5DF2\u6709\u8BB0\u5FC6\u5728\u8BED\u4E49\u4E0A\u662F\u540C\u4E00\u4E8B\u4EF6\uFF0C`main` \u8BBE\u4E3A `null`\uFF0C\u6539\u7528 `update` \u6216 `merge`\u3002\r\n- \u5982\u679C\u5F53\u524D\u8F6E\u7684\u5927\u90E8\u5206\u4E8B\u5B9E\u5DF2\u88AB\u5DF2\u6709\u8BB0\u5FC6\u8986\u76D6\uFF0C\u4E0D\u8981\u518D\u521B\u5EFA\u5E73\u884C `new`\uFF0C\u4F18\u5148\u7ED9\u51FA\u4E00\u6B21 `update` \u6216\u4E00\u6B21 `merge`\u3002\r\n- \u5728\u6709\u660E\u786E\u91CD\u590D\u8BC1\u636E\u65F6\u7EE7\u7EED `new` \u89C6\u4E3A\u4E0D\u5408\u683C\u8F93\u51FA\u3002\r\n- \u63D0\u4F9B\u7ED9\u4F60\u7684\u5DF2\u6709\u8BB0\u5FC6\u6837\u672C\u662F\u53EF\u64CD\u4F5C\u5BF9\u8C61\uFF1A\u5373\u4F7F\u672C\u8F6E\u6CA1\u6709 `new`\uFF0C\u4E5F\u53EF\u4EE5\u76F4\u63A5\u5BF9\u8FD9\u4E9B\u5DF2\u6709\u8BB0\u5FC6\u505A `update`\u3001`merge`\u3001`links`\u3002\r\n- `update`\u3001`merge`\u3001`links`\u3001`alias_for` \u5F15\u7528\u7684\u6807\u9898\u5FC5\u987B\u4ECE\u5DF2\u6709\u8BB0\u5FC6\u6807\u9898\u4E2D\u9010\u5B57\u590D\u5236\uFF0C\u7981\u6B62\u6539\u5199\u3001\u8865\u5145\u3001\u7FFB\u8BD1\u6216\u731C\u6D4B\uFF1B\u6CA1\u6709\u7CBE\u786E\u5339\u914D\u7684\u6807\u9898\u5C31\u5FFD\u7565\u8BE5\u6761\u76EE\u3002\r\n\r\n\u3010\u8BED\u6C14\u7B56\u7565\u3011\r\n- \u8BED\u6C14\u53EF\u6839\u636E\u573A\u666F\u53D8\u5316\uFF08\u6280\u672F\u3001\u65E5\u5E38\u804A\u5929\u3001\u5C0F\u8BF4\u521B\u4F5C\uFF09\uFF0C\u4F46\u53EA\u80FD\u6539\u53D8\u8868\u8FBE\u65B9\u5F0F\uFF0C\u4E0D\u80FD\u6539\u53D8\u5165\u5E93\u6807\u51C6\u3002\r\n- \u7ED3\u6784\u548C\u4E8B\u5B9E\u5FC5\u987B\u7A33\u5B9A\uFF1A\u8BED\u6C14\u53D8\u5316\u4E0D\u7B49\u4E8E\u653E\u5BBD\u7B5B\u9009\u3002\r\n- \u4E0D\u80FD\u56E0\u4E3A\u8BED\u6C14\u81EA\u7136\u5316\u5C31\u8BB0\u5F55\u5E38\u8BC6\u6216\u672A\u6765\u8BA1\u5212\u3002\r\n- \u6807\u9898\u4FDD\u6301\u7B80\u6D01\u5E76\u805A\u7126\u4E8B\u4EF6\uFF0C\u5185\u5BB9\u5728\u53EF\u8BFB\u7684\u524D\u63D0\u4E0B\u8D34\u5408\u573A\u666F\u8BED\u6C14\u3002\r\n\r\n\u3010\u6807\u9898\u4E0E\u5185\u5BB9\u5199\u6CD5\u3011\r\n- `main` \u6807\u9898\u4F18\u5148\u5199\u4E8B\u4EF6\uFF0C\u4E0D\u5199\u5B9A\u4E49\u3002\r\n- \u63A8\u8350\u6807\u9898\u6A21\u677F\uFF1A\r\n  - \u4E8B\u4EF6\uFF1A`[\u9886\u57DF] \u4E8B\u4EF6\uFF1A\u52A8\u4F5C + \u7ED3\u679C`\r\n  - \u4E16\u754C\u89C2\u5B9E\u4F53\uFF1A`\u5B9E\u4F53\uFF1A\u540D\u79F0\uFF08\u8EAB\u4EFD/\u7C7B\u578B\uFF09`\r\n- \u4E0D\u63A8\u8350\u6807\u9898\uFF1A`X\u662F\u4EC0\u4E48`\u3001`X\u7684\u5B9A\u4E49`\u3001\u767E\u79D1\u5F0F\u6CDB\u6807\u9898\u3002\r\n- \u5185\u5BB9\u53EA\u5199"\u5DF2\u53D1\u751F\u4E8B\u5B9E + \u5F53\u524D\u5DF2\u786E\u8BA4\u72B6\u6001"\u3002\r\n- \u5185\u5BB9\u7981\u6B62\u5199\u672A\u6765\u52A8\u4F5C\u3001TODO\u3001\u63A8\u6D4B\u6027\u8BA1\u5212\u3002\r\n$memoryExtractionCustomRulesInstruction\r\n\r\n\u3010\u8FDE\u63A5\u5173\u7CFB\u89C4\u5219\u3011\r\n- \u53EA\u6709\u5F53\u5BF9\u8BDD\u91CC\u6709\u660E\u786E\u8BC1\u636E\u65F6\u624D\u5EFA\u8FB9\u3002\r\n- \u63A8\u8350\u5173\u7CFB\u7C7B\u578B\uFF1A\r\n  - \u4E8B\u4EF6\u6D41\u7A0B\uFF1A`FOLLOWS`\u3001`CORRECTS`\u3001`UPDATES`\r\n  - \u53C2\u4E0E\u4E0E\u4E0A\u4E0B\u6587\uFF1A`INVOLVES`\u3001`HAPPENS_AT`\r\n  - \u4E16\u754C\u89C2\u7ED3\u6784\uFF1A`PART_OF`\u3001`ALLIED_WITH`\u3001`OPPOSES`\r\n- \u4E0D\u80FD\u4EC5\u51ED"\u540C\u6BB5\u63D0\u5230\u8FC7"\u5C31\u8FDE\u8FB9\u3002\r\n- \u62FF\u4E0D\u51C6\u5C31\u4E0D\u8FDE\u3002\r\n- \u5EFA\u8FB9\u8303\u56F4\u4E0D\u5E94\u53EA\u9650\u4E8E\u672C\u8F6E\u65B0\u8F93\u51FA\uFF1B\u5982\u679C"\u5DF2\u6709\u6837\u672C\u8BB0\u5FC6"\u4E0E\u672C\u8F6E\u4E8B\u4EF6/\u5B9E\u4F53\u5173\u7CFB\u660E\u786E\uFF0C\u4E5F\u5E94\u4E3B\u52A8\u5EFA\u8FB9\u3002\r\n- \u8F93\u51FA\u524D\u8BF7\u5728\u5168\u91CF\u5BF9\u8C61\u4E0A\u505A\u4E24\u4E24\u5173\u7CFB\u68C0\u67E5\uFF1A`main`\u3001`new`\u3001`update` \u76EE\u6807\u3001\u4EE5\u53CA\u63D0\u4F9B\u7684\u5DF2\u6709\u8BB0\u5FC6\uFF1B\u51E1\u6709\u660E\u786E\u8BC1\u636E\u90FD\u5E94\u5EFA\u8FB9\u3002\r\n\r\n\u3010\u793A\u4F8B\uFF08\u5FC5\u987B\u9075\u5FAA\uFF09\u3011\r\n- \u4EC5\u5728\u95EE\u7B54\u5E38\u8BC6\uFF08\u5982"\u78C1\u504F\u89D2\u662F\u4EC0\u4E48"\uFF09\u4E14\u65E0\u7528\u6237\u7279\u5F02\u4FE1\u53F7\uFF1A\u8FD4\u56DE `{}`\u3002\r\n- \u4EC5\u89E3\u91CA TS/Node \u7B49\u516C\u5F00\u5B9A\u4E49\uFF1A\u8FD4\u56DE `{}`\u3002\r\n- \u95F2\u804A\u4F46\u6709\u5B9E\u9645\u4EA4\u6D41\u5185\u5BB9\uFF1A\u538B\u7F29\u6210\u4E00\u6761\u4E8B\u4EF6\u578B `main` \u8BB0\u5F55\uFF0C\u4E0D\u62C6\u6280\u672F\u7EC6\u8282\u3002\r\n- \u53EA\u6709\u7A7A\u6CDB\u5BD2\u6684\uFF08\u5982\u4EC5"\u4F60\u597D/\u5728\u5417"\uFF09\uFF1A\u8FD4\u56DE `{}`\u3002\r\n- \u672C\u8F6E\u51FA\u73B0"\u7528\u6237\u72AF\u9519\u5E76\u88AB\u7EA0\u6B63"\uFF1A\u4F5C\u4E3A\u4E8B\u4EF6\u5199\u5165 `main`\u3002\r\n- \u957F\u671F\u5C0F\u8BF4/\u4E16\u754C\u89C2\u8BA8\u8BBA\uFF1A\u53CD\u590D\u51FA\u73B0\u4E14\u5F71\u54CD\u8FDE\u7EED\u6027\u7684\u89D2\u8272\u3001\u5730\u540D\u3001\u7EC4\u7EC7\u3001\u89C4\u5219\u3001\u65F6\u95F4\u7EBF\u5E94\u5165\u5E93\uFF0C\u6309\u9700\u4F7F\u7528 `new`/`links`\u3002\r\n- \u4EC5\u89E3\u91CA\u533B\u7597\u5B9A\u4E49\uFF08\u5982"\u6D41\u611F\u662F\u4EC0\u4E48"\uFF09\uFF1A\u8FD4\u56DE `{}`\u3002\r\n- \u4EC5\u89E3\u91CA\u91D1\u878D\u5B9A\u4E49\uFF08\u5982"ETF\u662F\u4EC0\u4E48"\uFF09\uFF1A\u8FD4\u56DE `{}`\u3002\r\n- \u9879\u76EE\u672C\u8F6E\u6709\u660E\u786E\u8FDB\u5C55\uFF08\u4FEE\u590D\u5B8C\u6210/\u6458\u8981\u5B8C\u6210/\u4EFB\u52A1\u7EC8\u6B62\uFF09\uFF1A\u5199\u4E00\u6761\u4E8B\u4EF6\u578B `main`\u3002\r\n- \u53CD\u590D\u89E3\u91CA\u4F46\u6CA1\u6709\u65B0\u8FDB\u5C55/\u65B0\u51B3\u7B56\uFF1A\u8FD4\u56DE `{}`\u3002\r\n- \u4E16\u754C\u89C2\u8BBE\u5B9A\u53D1\u751F\u53D8\u5316\uFF08\u5173\u7CFB/\u5F52\u5C5E\u53D8\u66F4\uFF09\uFF1A\u4F18\u5148 `update`\uFF0C\u5E76\u5728\u8BC1\u636E\u660E\u786E\u65F6\u8FDE `UPDATES` / `PART_OF`\u3002\r\n- \u672C\u8F6E\u53EA\u662F\u91CD\u8FF0\u5DF2\u5B58\u5728\u4E8B\u4EF6\uFF1A\u4F18\u5148 `update`/`merge`\uFF0C\u4E0D\u8981 `new`\u3002\r\n- \u4E8B\u4EF6\u91CC\u660E\u786E\u51FA\u73B0\u53C2\u4E0E\u8005/\u5DE5\u5177\u5305\u4E14\u5173\u7CFB\u6E05\u6670\uFF1A\u8865\u5145 `INVOLVES` \u94FE\u63A5\u3002\r\n- \u672C\u8F6E\u786E\u8BA4\u4E86"\u5DF2\u6709\u6837\u672C\u8BB0\u5FC6"\u548C\u5176\u4ED6\u8BB0\u5FC6\u7684\u660E\u786E\u5173\u7CFB\uFF1A\u5373\u4F7F\u6CA1\u6709 `new`\uFF0C\u4E5F\u5E94\u5728 `links` \u4E2D\u4F53\u73B0\u3002\r\n\r\n\u3010\u8F93\u51FA\u683C\u5F0F\uFF08\u4E25\u683CJSON\uFF09\u3011\r\n- \u9664\u8FD4\u56DE `{}` \u5916\uFF0C\u5FC5\u987B\u5305\u542B `main`\u3001`new`\u3001`update`\u3001`merge`\u3001`links`$profileOptionalKey\uFF1B\u6570\u7EC4\u4E2D\u7684\u6BCF\u4E00\u9879\u5FC5\u987B\u662F\u5177\u540D\u5BF9\u8C61\uFF0C\u7981\u6B62\u4F4D\u7F6E\u6570\u7EC4\u3002\r\n- `main`\uFF1A`null` \u6216 `{"title":"...","content":"...","tags":["..."],"folder_path":"..."}`\u3002\r\n- `new`\uFF1A`[{"title":"...","content":"...","tags":["..."],"folder_path":"...","alias_for":null}, ...]`\u3002\r\n- `update`\uFF1A`[{"title":"...","content":"\u65B0\u5B8C\u6574\u5185\u5BB9","reason":"...","credibility":null,"importance":null}, ...]`\u3002\r\n- `merge`\uFF1A`[{"source_titles":["A","B"],"title":"...","content":"...","tags":["..."],"folder_path":"...","reason":"..."}, ...]`\u3002\r\n- `links`\uFF1A`[{"source":"...","target":"...","type":"\u5927\u5199\u4E0B\u5212\u7EBF\u5173\u7CFB","description":"...","weight":0.0}, ...]`\u3002\r\n- \u53EF\u4FE1\u5EA6\u3001\u91CD\u8981\u6027\u3001\u6743\u91CD\u5FC5\u987B\u662F 0.0 \u5230 1.0 \u7684 JSON \u6570\u5B57\uFF1B\u53EF\u4FE1\u5EA6\u3001\u91CD\u8981\u6027\u548C `alias_for` \u53EF\u7528 JSON `null`\u3002\r\n$profileMarkdownSchemaLine\r\n\r\n$profileUpdateInstruction\r\n\r\n\u53EA\u8FD4\u56DE\u5408\u6CD5 JSON \u5BF9\u8C61\uFF0C\u4E0D\u8981\u8F93\u51FA\u5176\u4ED6\u5185\u5BB9\u3002\r\n';
+
+// src/storage/meta-schema.json
+var meta_schema_default = {
+  version: 1,
+  steps: [
+    [{ op: "set_object_field", key: "state", field: "legacyImportPending", value: true }]
+  ]
+};
 
 // src/storage/merge.json
 var merge_default = {
@@ -1786,6 +2252,135 @@ var merge_default = {
           }
         ],
         target: "runtime/plugin_data/space/com.operit.character_cards/groups.preferences.json"
+      },
+      {
+        key: {
+          kind: "exact",
+          key: "initialization"
+        },
+        path: [
+          {
+            kind: "field",
+            name: "card"
+          },
+          {
+            kind: "field",
+            name: "id"
+          }
+        ],
+        target: "runtime/plugin_data/space/com.operit.character_cards/cards.preferences.json"
+      },
+      {
+        key: {
+          kind: "exact",
+          key: "initialization"
+        },
+        path: [
+          {
+            kind: "field",
+            name: "card"
+          },
+          {
+            kind: "field",
+            name: "chatProviderId"
+          }
+        ],
+        target: "runtime/config/preferences/model_configs.preferences.json"
+      },
+      {
+        key: {
+          kind: "exact",
+          key: "initialization"
+        },
+        path: [
+          {
+            kind: "field",
+            name: "card"
+          },
+          {
+            kind: "field",
+            name: "ttsConfigId"
+          }
+        ],
+        target: "runtime/config/preferences/tts_configs.preferences.json"
+      },
+      {
+        key: {
+          kind: "exact",
+          key: "initialization"
+        },
+        path: [
+          {
+            kind: "field",
+            name: "card"
+          },
+          {
+            kind: "field",
+            name: "themeConfigId"
+          }
+        ],
+        target: "runtime/config/preferences/user_preferences.preferences.json"
+      },
+      {
+        key: {
+          kind: "exact",
+          key: "initialization"
+        },
+        path: [
+          {
+            kind: "field",
+            name: "card"
+          },
+          {
+            kind: "field",
+            name: "sharedMemoryId"
+          }
+        ],
+        target: "runtime/plugin_data/space/com.operit.character_cards/stores.preferences.json"
+      },
+      {
+        key: {
+          kind: "exact",
+          key: "initialization"
+        },
+        path: [
+          {
+            kind: "field",
+            name: "card"
+          },
+          {
+            kind: "field",
+            name: "attachedTagIds"
+          },
+          {
+            kind: "array_values"
+          }
+        ],
+        target: "runtime/plugin_data/space/com.operit.character_cards/tags.preferences.json"
+      },
+      {
+        key: {
+          kind: "exact",
+          key: "initialization"
+        },
+        path: [
+          {
+            kind: "field",
+            name: "card"
+          },
+          {
+            kind: "field",
+            name: "sharedMemoryMounts"
+          },
+          {
+            kind: "array_values"
+          },
+          {
+            kind: "field",
+            name: "sharedMemoryId"
+          }
+        ],
+        target: "runtime/plugin_data/space/com.operit.character_cards/stores.preferences.json"
       }
     ],
     projection: null
@@ -2391,8 +2986,8 @@ function prepareVersionOne(storage, metadata, directory) {
         ]);
       }
     }
-    const retained2 = new Set(before.map((row) => JSON.stringify([row.collection, row.key])));
-    for (const row of rows) if (!retained2.has(JSON.stringify([row.collection, row.key])))
+    const retained3 = new Set(before.map((row) => JSON.stringify([row.collection, row.key])));
+    for (const row of rows) if (!retained3.has(JSON.stringify([row.collection, row.key])))
       changes2.push([{ op: "delete", collection: row.collection, key: row.key, expectedValue: row.value }]);
     for (const [key2, originalValue] of (yield storage.chats.data()).entries()) {
       const collection = key2.startsWith("binding_") ? "chat_bindings" : key2.startsWith("draft_") ? "chat_drafts" : null;
@@ -2521,7 +3116,7 @@ function migrateCharacterStorage(storage, directory) {
             const document2 = absolute(directory, move.destination + "/USER.md");
             if (!(yield Tools.Files.exists(document2)).exists) {
               completed(yield Tools.Files.mkdir(document2.slice(0, document2.lastIndexOf("/")), true));
-              completed(yield Tools.Files.write(document2, ""));
+              completed((yield Tools.Files.write(document2, "")).operation);
             }
           }
           plan.phase = "authors";
@@ -2796,7 +3391,10 @@ var CharacterMemoryDatabase = class _CharacterMemoryDatabase {
   }
   /** Closes the retained memory database handle. */
   close() {
-    return this.database.close();
+    return __async(this, null, function* () {
+      yield closeMemoryIndexes(this);
+      return this.database.close();
+    });
   }
   /** Reads explicit backup or migration pages without hiding storage failures. */
   read(collection) {
@@ -2812,7 +3410,11 @@ var CharacterMemoryDatabase = class _CharacterMemoryDatabase {
       }
     });
   }
-  /** Executes database-side filtering, ranking and bounded projections. */
+  /** Reads the local change journal; synchronized replays and other handles are included. */
+  changes(after, limit2 = 100) {
+    return this.database.changes(after, limit2);
+  }
+  /** Executes simple database filtering and bounded projections. */
   query(sql, params = []) {
     return this.database.query(sql, params);
   }
@@ -2888,8 +3490,8 @@ var CharacterStorage = class _CharacterStorage {
     this.migration = migration;
     this.memory = memory;
   }
-  /** Opens JSON configuration owners and upgrades the plugin schema before business reads. */
-  static open() {
+  /** Opens the real owners for explicit inspection without migrating or initializing business data. */
+  static openForRecovery() {
     return __async(this, null, function* () {
       const directory = ToolPkg.getSpaceDataDir();
       if (typeof directory !== "string" || directory.trim() === "") throw new Error("Plugin data directory is unavailable");
@@ -2906,26 +3508,34 @@ var CharacterStorage = class _CharacterStorage {
         const configuration = {};
         for (const name of configurationNames) configuration[name] = yield open(name);
         const metadata = yield open("meta"), chats = yield open("chats");
-        const migration = yield Tools.Storage.dataStore.open({ path: directory + "/migration.preferences.json" });
+        const migration = yield Tools.Storage.dataStore.open({ path: ToolPkg.getLocalDataDir() + "/migration.preferences.json" });
         handles.push(migration);
         memory = yield CharacterMemoryDatabase.open();
-        const storage = new _CharacterStorage(configuration, metadata, chats, migration, memory);
-        metadata.withSchema(1, (version, preferences) => {
-          if (version !== 0) throw new Error("Missing character schema migration: " + version);
-          const state = preferences.get("state");
-          if (state !== void 0) {
-            assertObject(state, "character schema metadata");
-            preferences.set("state", { ...state, legacyImportPending: true });
-          }
-        });
-        yield metadata.data();
-        yield migrateCharacterStorage(storage, directory);
-        yield memory.retireLegacyEmbeddings();
-        return storage;
+        return new _CharacterStorage(configuration, metadata, chats, migration, memory);
       } catch (error) {
         const closed = yield Promise.allSettled([...handles.map((handle) => handle.close()), ...memory === void 0 ? [] : [memory.close()]]);
         const failures = closed.filter((result2) => result2.status === "rejected").map((result2) => result2.reason);
         if (failures.length !== 0) throw Object.assign(new Error("Character storage open and handle cleanup failed"), { cause: error, cleanupErrors: failures });
+        throw error;
+      }
+    });
+  }
+  /** Opens JSON configuration owners and upgrades the plugin schema before business reads. */
+  static open() {
+    return __async(this, null, function* () {
+      const storage = yield _CharacterStorage.openForRecovery();
+      try {
+        storage.metadata.withSchema(meta_schema_default.version, meta_schema_default.steps);
+        yield storage.metadata.data();
+        yield migrateCharacterStorage(storage, ToolPkg.getSpaceDataDir());
+        yield storage.memory.retireLegacyEmbeddings();
+        return storage;
+      } catch (error) {
+        try {
+          yield storage.close();
+        } catch (cleanupError) {
+          throw Object.assign(new Error("Character storage open and handle cleanup failed"), { cause: error, cleanupError });
+        }
         throw error;
       }
     });
@@ -2936,6 +3546,20 @@ var CharacterStorage = class _CharacterStorage {
       const result2 = {};
       for (const name of configurationNames) result2[name] = yield this.configuration[name].data();
       return result2;
+    });
+  }
+  /** Releases every retained host handle after an unsuccessful repository initialization. */
+  close() {
+    return __async(this, null, function* () {
+      const closed = yield Promise.allSettled([
+        ...Object.values(this.configuration).map((handle) => handle.close()),
+        this.metadata.close(),
+        this.chats.close(),
+        this.migration.close(),
+        this.memory.close()
+      ]);
+      const failures = closed.filter((result2) => result2.status === "rejected").map((result2) => result2.reason);
+      if (failures.length !== 0) throw Object.assign(new Error("Character storage handle cleanup failed"), { cleanupErrors: failures });
     });
   }
 };
@@ -3086,6 +3710,31 @@ var CharacterChatStore = class {
   }
 };
 
+// src/search/chunks.ts
+function searchDocumentChunks(database, ownerKey, memory, query, count, config, embedding) {
+  return withMemoryIndex(database, ownerKey, (index) => __async(null, null, function* () {
+    const ids = index.chunkIds.get(memory.uuid) ?? /* @__PURE__ */ new Set(), scores = /* @__PURE__ */ new Map();
+    const wildcard = query.trim() === "*";
+    if (wildcard) for (const id2 of ids) scores.set(id2, 1);
+    else {
+      if (config.keywordWeight > 0) for (const term of lexicalTerms(query)) for (const identity3 of index.text.search(term)) {
+        if (identity3.startsWith("chunks/") && ids.has(identity3.slice(7))) scores.set(identity3.slice(7), config.keywordWeight);
+      }
+      if (embedding !== null) {
+        const scope = { ids: /* @__PURE__ */ new Set([memory.id]), restricted: true };
+        index.validate(embedding, scope, memory.uuid);
+        const semantic = index.semantic(embedding, scope, count, /* @__PURE__ */ new Set(), memory.uuid);
+        index.scoreCandidates(embedding, [...scores.keys()].slice(0, Math.max(256, count * 4)), semantic, true);
+        for (const [id2, similarity] of semantic) scores.set(id2, (scores.get(id2) ?? 0) + config.vectorWeight * similarity);
+      }
+    }
+    const selected = [...scores.keys()].filter((id2) => scores.get(id2) > 0).sort((a, b) => scores.get(b) - scores.get(a) || index.chunks.get(a).chunkIndex - index.chunks.get(b).chunkIndex).slice(0, count);
+    const entries = selected.length ? yield database.getMany("chunks", selected.map((id2) => ownerKey + "/" + id2)) : [];
+    if (entries.some((entry, offset) => entry === null || entry.version !== index.sources.get("chunks/" + selected[offset])?.version)) throw new Error("Document changed during retrieval; retry the query");
+    return { total: ids.size, chunks: entries.map((entry) => entry.value.record) };
+  }));
+}
+
 // src/storage/memory-repository.ts
 function key(ownerKey, id2) {
   return requireId(ownerKey, "owner key") + "/" + requireId(id2, "record id");
@@ -3117,10 +3766,25 @@ var DatabaseMemoryRepository = class {
     this.memoryDatabase = memoryDatabase;
     this.snapshots = /* @__PURE__ */ new WeakMap();
   }
-  /** Requires the persisted metadata for one exact owner. */
+  /** Keeps nullable reads separate from versioned writes to an existing library. */
+  findOwner(ownerKey) {
+    return this.memoryDatabase.get("owners", requireId(ownerKey, "memory owner"));
+  }
+  hasMemoryOwner(ownerKey) {
+    return __async(this, null, function* () {
+      return (yield this.findOwner(ownerKey)) !== null;
+    });
+  }
+  /** Missing libraries have default values in memory; reads never publish new records. */
+  readOwnerValue(ownerKey) {
+    return __async(this, null, function* () {
+      return (yield this.findOwner(ownerKey))?.value ?? createMemorySpace(ownerKey);
+    });
+  }
+  /** Requires persisted metadata and its exact version for a write. */
   owner(ownerKey) {
     return __async(this, null, function* () {
-      const entry = yield this.memoryDatabase.get("owners", requireId(ownerKey, "memory owner"));
+      const entry = yield this.findOwner(ownerKey);
       if (entry === null) throw new Error("Missing memory owner: " + ownerKey);
       return entry;
     });
@@ -3162,7 +3826,7 @@ var DatabaseMemoryRepository = class {
   /** Reads settings from one owner record. */
   readMemorySettings(ownerKey) {
     return __async(this, null, function* () {
-      return (yield this.owner(ownerKey)).value.settings;
+      return (yield this.readOwnerValue(ownerKey)).settings;
     });
   }
   /** Updates complete settings with the owner's exact version precondition. */
@@ -3188,7 +3852,7 @@ var DatabaseMemoryRepository = class {
   /** Reads persisted search weights without reading memory bodies. */
   readMemorySearchConfig(ownerKey) {
     return __async(this, null, function* () {
-      return (yield this.owner(ownerKey)).value.searchConfig;
+      return (yield this.readOwnerValue(ownerKey)).searchConfig;
     });
   }
   /** Writes complete search configuration through optimistic concurrency. */
@@ -3203,7 +3867,8 @@ var DatabaseMemoryRepository = class {
   searchMemories(options) {
     return __async(this, null, function* () {
       assertSearchOptions(options);
-      const owner2 = yield this.owner(options.ownerKey);
+      const owner2 = yield this.findOwner(options.ownerKey);
+      if (owner2 === null) return [];
       return (yield searchMemoryDatabase(this.memoryDatabase, owner2.value.settings, options, owner2.value.searchConfig)).result.candidates.map(
         /** Returns the complete source records selected in the database. */
         (hit) => hit.memory
@@ -3214,7 +3879,8 @@ var DatabaseMemoryRepository = class {
   searchMemoryPage(options) {
     return __async(this, null, function* () {
       assertSearchOptions(options);
-      const owner2 = yield this.owner(options.ownerKey);
+      const owner2 = yield this.findOwner(options.ownerKey);
+      if (owner2 === null) return { ownerKey: options.ownerKey, items: [], documents: [], excludedBySnapshotCount: 0 };
       const { result: result2, queryEmbedding } = yield searchMemoryDatabase(this.memoryDatabase, owner2.value.settings, options, owner2.value.searchConfig);
       const items = result2.candidates.map(
         /** Projects only selected source records. */
@@ -3237,14 +3903,15 @@ var DatabaseMemoryRepository = class {
     return __async(this, null, function* () {
       assertSearchOptions(options);
       assertSearchConfig(config);
-      const owner2 = yield this.owner(options.ownerKey);
+      const owner2 = yield this.findOwner(options.ownerKey);
+      if (owner2 === null) return { query: options.query, config, relevanceThreshold: options.relevanceThreshold ?? 0, memoriesInScopeCount: 0, candidates: [], excludedBySnapshotCount: 0 };
       return (yield searchMemoryDatabase(this.memoryDatabase, owner2.value.settings, options, config, true)).result;
     });
   }
   /** Lists an explicitly requested owner library without loading other owners. */
   listMemories(ownerKey) {
     return __async(this, null, function* () {
-      yield this.owner(ownerKey);
+      if (!(yield this.hasMemoryOwner(ownerKey))) return [];
       const rows = yield this.memoryDatabase.all("memories", ownerKey);
       return rows.map(
         /** Projects original records for the library view or export. */
@@ -3255,7 +3922,7 @@ var DatabaseMemoryRepository = class {
   /** Reads only the explicitly selected exact titles, including genuine duplicate clusters. */
   readMemoriesByTitles(ownerKey, titles) {
     return __async(this, null, function* () {
-      yield this.owner(ownerKey);
+      if (!(yield this.hasMemoryOwner(ownerKey))) return [];
       const rows = yield this.memoryDatabase.all("memories", ownerKey, "json_extract(value,'$.record.title') IN (SELECT value FROM json_each(?))", [JSON.stringify(titles)]);
       return rows.map(
         /** Projects only selected source records. */
@@ -3277,18 +3944,18 @@ var DatabaseMemoryRepository = class {
   /** Reads distinct folder paths in the database and expands their parent directories. */
   listMemoryFolders(ownerKey) {
     return __async(this, null, function* () {
-      yield this.owner(ownerKey);
+      if (!(yield this.hasMemoryOwner(ownerKey))) return [];
       const rows = yield this.memoryDatabase.query("SELECT DISTINCT json_extract(value,'$.record.folderPath') AS folder FROM plugin_objects WHERE collection='memories' AND key>=? AND key<?", [ownerKey + "/", ownerKey + "0"]);
-      const folders = /* @__PURE__ */ new Set();
+      const folders2 = /* @__PURE__ */ new Set();
       for (const row of rows) {
         if (row.folder === null) {
-          folders.add("");
+          folders2.add("");
           continue;
         }
         const parts = String(row.folder).split("/");
-        for (let length = 1; length <= parts.length; length += 1) folders.add(parts.slice(0, length).join("/"));
+        for (let length = 1; length <= parts.length; length += 1) folders2.add(parts.slice(0, length).join("/"));
       }
-      return [...folders].sort();
+      return [...folders2].sort();
     });
   }
   /** Creates an intentional new non-document memory. */
@@ -3453,7 +4120,7 @@ var DatabaseMemoryRepository = class {
   /** Lists explicit graph relationships for one owner. */
   listMemoryLinks(ownerKey) {
     return __async(this, null, function* () {
-      yield this.owner(ownerKey);
+      if (!(yield this.hasMemoryOwner(ownerKey))) return [];
       return (yield this.memoryDatabase.all("links", ownerKey)).map(
         /** Projects complete graph relationships. */
         (row) => row.value.record
@@ -3504,7 +4171,9 @@ var DatabaseMemoryRepository = class {
   /** Reads job metadata and candidates independently of memory bodies and vectors. */
   readMemoryJobState(ownerKey) {
     return __async(this, null, function* () {
-      const owner2 = yield this.owner(ownerKey), candidates = yield this.rows("candidates", ownerKey);
+      const owner2 = yield this.findOwner(ownerKey);
+      if (owner2 === null) return createMemorySpace(ownerKey);
+      const candidates = yield this.rows("candidates", ownerKey);
       const state = { ...owner2.value, candidates: candidates.map(
         /** Projects job candidates without memory data. */
         (row) => row.value.record
@@ -3528,6 +4197,31 @@ var DatabaseMemoryRepository = class {
       this.snapshots.delete(state);
     });
   }
+  /** Changes only failed candidates in bounded pages under their exact source and owner versions. */
+  recoverFailedCandidates(ownerKey, producerNodeId) {
+    return __async(this, null, function* () {
+      const owner2 = yield this.owner(ownerKey), now = Date.now();
+      let count = 0, after = "";
+      for (; ; ) {
+        const rows = yield this.memoryDatabase.select("candidates", ownerKey, "json_extract(value,'$.record.status')='failed'", [], 100, after);
+        if (rows.length === 0) return count;
+        yield this.commit(
+          rows.map(
+            /** Preserves concurrent status changes through the exact candidate version. */
+            (row) => producerNodeId === null ? remove({ collection: "candidates", ...row }) : put(
+              "candidates",
+              row.key,
+              { ...row.value, record: { ...row.value.record, producerNodeId, status: "pending", lastError: "", updatedAt: now } },
+              row.version
+            )
+          ),
+          [{ collection: "owners", key: ownerKey, expectedVersion: owner2.version }]
+        );
+        count += rows.length;
+        after = rows[rows.length - 1].key;
+      }
+    });
+  }
   /** Computes record-level mutations only for explicitly selected records. */
   diff(before, after) {
     const previous = new Map(before.map(
@@ -3546,7 +4240,8 @@ var DatabaseMemoryRepository = class {
   /** Counts candidate states in SQLite without loading their payloads. */
   readMemoryAutoSaveStatus(ownerKey) {
     return __async(this, null, function* () {
-      const owner2 = yield this.owner(ownerKey);
+      const owner2 = yield this.findOwner(ownerKey);
+      if (owner2 === null) return { ownerKey, pendingCandidates: 0, pendingChats: 0, processingCandidates: 0, failedCandidates: 0, nextRunAtMs: 0, minutesUntilNextRun: 0, lastError: "" };
       const rows = yield this.memoryDatabase.query(`SELECT json_extract(value,'$.record.status') AS status,count(*) AS count,count(DISTINCT json_extract(value,'$.record.chatId')) AS chats
       FROM plugin_objects WHERE collection='candidates' AND key>=? AND key<? GROUP BY json_extract(value,'$.record.status')`, [ownerKey + "/", ownerKey + "0"]);
       let pendingCandidates = 0, pendingChats = 0, processingCandidates = 0, failedCandidates = 0;
@@ -3575,7 +4270,7 @@ var DatabaseMemoryRepository = class {
   /** Reads persisted rebuild progress without waiting for model requests. */
   readMemoryRebuildProgress(ownerKey) {
     return __async(this, null, function* () {
-      return (yield this.owner(ownerKey)).value.rebuildProgress;
+      return (yield this.readOwnerValue(ownerKey)).rebuildProgress;
     });
   }
   /** Cancels a running task through an exact owner-version update. */
@@ -3617,7 +4312,9 @@ var DatabaseMemoryRepository = class {
   /** Reads full owner records only for explicit backups and bulk imports. */
   readMemorySpace(ownerKey) {
     return __async(this, null, function* () {
-      const owner2 = yield this.owner(ownerKey), state = { ...owner2.value, memories: [], links: [], chunks: [], candidates: [], embeddings: [] };
+      const owner2 = yield this.findOwner(ownerKey);
+      if (owner2 === null) return createMemorySpace(ownerKey);
+      const state = { ...owner2.value, memories: [], links: [], chunks: [], candidates: [], embeddings: [] };
       const before = [{ collection: "owners", key: ownerKey, value: storedValue(owner2.value), version: owner2.version }];
       for (const collection of ["memories", "links", "chunks", "candidates"]) {
         const rows = yield this.rows(collection, ownerKey);
@@ -3716,30 +4413,7 @@ var DatabaseMemoryRepository = class {
   /** Ranks document chunks with the query vector already prepared for this operation. */
   queryChunks(ownerKey, owner2, memory, query, count, queryEmbedding) {
     return __async(this, null, function* () {
-      const semantic = queryEmbedding !== null;
-      const space = queryEmbedding === null ? "" : queryEmbedding.space, vector = queryEmbedding === null ? [] : queryEmbedding.vector;
-      const rows = yield this.memoryDatabase.query(
-        `WITH query_vector AS (SELECT CAST(key AS INTEGER) AS dimension,value FROM json_each(?6)), chunks AS (
-      SELECT value,json_extract(value,'$.record.chunkIndex') AS position FROM plugin_objects
-      WHERE collection='chunks' AND key>=?1 AND key<?2 AND json_extract(value,'$.record.memoryUuid')=?3
-    ), scored AS (
-      SELECT *,CASE WHEN ?4='*' THEN 1 ELSE
-        CASE WHEN lower(json_extract(value,'$.record.content')) GLOB '*'||lower(?4)||'*' THEN ?7 ELSE 0 END +
-        CASE WHEN ?8>0 THEN ?8*(SELECT sum(q.value*v.value) FROM json_each(chunks.value,'$.embedding.vector') v JOIN query_vector q ON q.dimension=v.key) ELSE 0 END END AS score
-      FROM chunks
-    ), page AS (SELECT * FROM scored WHERE score>0 ORDER BY score DESC,position LIMIT ?9), stats AS (
-      SELECT count(*) AS total,sum(CASE WHEN ?8>0 AND (json_extract(value,'$.embedding.text') IS NOT json_extract(value,'$.record.content') OR json_extract(value,'$.embedding.space') IS NOT ?5 OR json_array_length(value,'$.embedding.vector') IS NOT json_array_length(?6)) THEN 1 ELSE 0 END) AS invalid FROM chunks
-    ) SELECT json_extract(page.value,'$.record') AS record,stats.total,stats.invalid FROM stats LEFT JOIN page ON 1 ORDER BY page.score DESC,page.position`,
-        [ownerKey + "/", ownerKey + "0", memory.uuid, query.trim() === "*" ? "*" : query, space, JSON.stringify(vector), owner2.searchConfig.keywordWeight, semantic ? owner2.searchConfig.vectorWeight : 0, count]
-      );
-      if (rows[0].invalid !== null && Number(rows[0].invalid) !== 0) throw new Error("Document vector index requires an explicit rebuild");
-      return { total: Number(rows[0].total), chunks: rows.filter(
-        /** Omits the aggregate-only empty page row. */
-        (row) => row.record !== null
-      ).map(
-        /** Decodes only the selected source chunks. */
-        (row) => JSON.parse(String(row.record))
-      ) };
+      return searchDocumentChunks(this.memoryDatabase, ownerKey, memory, query, count, owner2.searchConfig, queryEmbedding);
     });
   }
   /** Imports complete document-aware records, relationships, settings and USER text in this operation. */
@@ -3920,24 +4594,17 @@ var RepositorySession = class extends DatabaseMemoryRepository {
       return copy(get(this.state.cards, id2, "character"));
     });
   }
-  /** Removes memory owners whose backing entity no longer exists and returns their pruned owner keys.
-    * Orphan owners appear when a character or shared store is lost outside the removal path
-    * (for example a deleted-synced card); every scheduler transaction on such an owner throws,
-    * so the interval prunes them up front instead of failing forever. */
-  pruneOrphanMemoryOwners() {
+  /** Initializes a missing library only after the user's explicit request. */
+  createMemoryLibrary(ownerKey) {
     return __async(this, null, function* () {
-      const alive = (ownerKey) => {
-        const parts = ownerKey.split(":");
-        if (parts.length !== 2) return false;
-        if (parts[0] === "character") return this.state.cards.some((card) => card.id === parts[1]);
-        if (parts[0] === "shared") return this.state.stores.some((store) => store.id === parts[1]);
-        return false;
-      };
-      const orphans = this.state.owners.filter((space) => !alive(space.ownerKey)).map((space) => space.ownerKey);
-      if (orphans.length === 0) return [];
-      this.state.owners = this.state.owners.filter((space) => alive(space.ownerKey));
-      for (const ownerKey of orphans) this.documents.delete(ownerKey);
-      return orphans;
+      const [kind, id2, extra] = ownerKey.split(":");
+      if (extra !== void 0 || kind !== "character" && kind !== "shared") throw new Error("Invalid memory owner namespace");
+      get(kind === "character" ? this.state.cards : this.state.stores, id2, "memory owner");
+      if (yield this.hasMemoryOwner(ownerKey)) return;
+      const space = createMemorySpace(ownerKey);
+      if ((yield Tools.Files.exists(this.directory + "/" + space.userDocumentPath)).exists) {
+        this.state.owners.push(space);
+      } else this.addSpace(ownerKey);
     });
   }
   /** Creates all character fields and its genuine initialized memory space. */
@@ -4182,19 +4849,33 @@ var RepositorySession = class extends DatabaseMemoryRepository {
       this.state.active = copy(active);
     });
   }
-  /** Rejects deletion while any stored chat binding references the selection. */
+  /** Rejects deletion only while an existing Core conversation references the selection. */
   requireUnboundSelection(selection) {
     return __async(this, null, function* () {
-      const binding = (yield this.chatBindings.listChatBindings()).find(
+      const bindings = (yield this.chatBindings.listChatBindings()).filter(
         /** Matches the exact selection proposed for deletion. */
-        (binding2) => binding2.selection === selection
+        (binding) => binding.selection === selection
       );
-      if (binding !== void 0) throw new Error("Rebind or delete the chat extension before deleting its selection: " + binding.chatId);
+      for (let offset = 0; offset < bindings.length; offset += 200) {
+        const ids = bindings.slice(offset, offset + 200).map((binding) => binding.chatId);
+        const result2 = yield Tools.Chat.listChats({ chat_ids: ids, limit: 200 });
+        assertInteger(result2.totalCount, "conversation count", 0);
+        if (!Array.isArray(result2.chats) || result2.chats.length !== result2.totalCount)
+          throw new Error("\u5BF9\u8BDD\u5217\u8868\u4E0D\u5B8C\u6574\uFF0C\u8BF7\u5237\u65B0\u540E\u91CD\u8BD5");
+        const remaining = new Set(ids);
+        for (const chat2 of result2.chats) {
+          requireId(chat2.id, "conversation id");
+          if (!remaining.delete(chat2.id)) throw new Error("Chat batch returned an unrelated or duplicate identity");
+        }
+        const chat = result2.chats[0];
+        if (chat !== void 0) throw new Error("Rebind or delete the chat extension before deleting its selection: " + chat.id);
+      }
     });
   }
   /** Reads the actual owner USER.md file or the edit staged within this same operation. */
   readUser(ownerKey) {
     return __async(this, null, function* () {
+      if (!(yield this.hasMemoryOwner(ownerKey))) return { ownerKey, content: "" };
       const path = yield this.readUserPath(ownerKey), document2 = this.documents.get(ownerKey);
       if (document2 !== void 0) return { ownerKey, content: document2.content };
       const result2 = yield Tools.Files.read(path);
@@ -4217,13 +4898,14 @@ var RepositorySession = class extends DatabaseMemoryRepository {
       return this.directory + "/" + this.space(ownerKey).userDocumentPath;
     });
   }
-  /** Lists only owners that genuinely exist in this plugin snapshot. */
+  /** Schedules initialized owners only after their independently synchronized configuration arrives. */
   listMemoryOwnerKeys() {
     return __async(this, null, function* () {
-      return this.state.owners.map(
-        /** Preserves each actual initialized namespace. */
-        (space) => space.ownerKey
-      );
+      const configured2 = /* @__PURE__ */ new Set([
+        ...this.state.cards.map((card) => "character:" + card.id),
+        ...this.state.stores.map((store) => "shared:" + store.id)
+      ]);
+      return this.state.owners.filter((space) => configured2.has(space.ownerKey)).map((space) => space.ownerKey);
     });
   }
   /** Creates one device-independent identity for a private persisted job or candidate. */
@@ -4286,6 +4968,169 @@ var RepositorySession = class extends DatabaseMemoryRepository {
   }
 };
 
+// src/storage/initialization.ts
+function recoveryPlan(source) {
+  const plan = createPlan();
+  plan.card = source.card;
+  if (source.owner !== null) {
+    assertObject(source.owner, "existing memory owner");
+    const { ownerKey, userDocumentPath: userDocumentPath2, ...memory } = source.owner;
+    plan.memory = { ...memory, memories: [], links: [], chunks: [], candidates: [], embeddings: [] };
+  }
+  assertPlan(plan);
+  return plan;
+}
+function recoverySource(storage) {
+  return __async(this, null, function* () {
+    const entries = (yield storage.configuration.cards.data()).entries();
+    if (entries.length !== 1 || !entries[0][0].startsWith(recordPrefix))
+      throw new Error("\u6B64\u4FEE\u590D\u4EC5\u5904\u7406\u9996\u6B21\u5B89\u88C5\u4E2D\u65AD\uFF0C\u9700\u8981\u4FDD\u7559\u6070\u597D\u4E00\u5F20\u89D2\u8272\u5361\uFF1B\u4E0D\u4F1A\u6E05\u7A7A\u6216\u63A5\u7BA1\u5176\u4ED6\u6570\u636E\u3002");
+    const [key2, value] = entries[0];
+    const card = readCharacter(value, key2.slice(recordPrefix.length));
+    if (key2 !== recordPrefix + card.id || !equal(card, value)) throw new Error("\u89D2\u8272\u5361\u683C\u5F0F\u4E0D\u5B8C\u6574\uFF0C\u4E0D\u80FD\u4F5C\u4E3A\u9996\u6B21\u521D\u59CB\u5316\u4FEE\u590D\u6765\u6E90\u3002");
+    const owner2 = yield storage.memory.get("owners", "character:" + card.id);
+    const source = { card, owner: owner2 === null ? null : owner2.value };
+    yield validateRecords(storage, recoveryPlan(source));
+    return source;
+  });
+}
+function inspectCharacterInitialization() {
+  return __async(this, null, function* () {
+    const storage = yield CharacterStorage.openForRecovery();
+    try {
+      const metadata = yield storage.metadata.data();
+      if (metadata.contains("state")) return { status: "ready" };
+      const pending = metadata.get("initialization");
+      if (pending !== void 0) {
+        assertPlan(pending);
+        return { status: "planned", cardName: pending.card.name };
+      }
+      return { status: "repairable", source: yield recoverySource(storage) };
+    } finally {
+      yield storage.close();
+    }
+  });
+}
+function repairCharacterInitialization(expected) {
+  return __async(this, null, function* () {
+    const storage = yield CharacterStorage.openForRecovery();
+    try {
+      storage.metadata.withSchema(meta_schema_default.version, meta_schema_default.steps);
+      const source = yield recoverySource(storage);
+      if (!equal(source, expected)) throw new Error("\u6570\u636E\u5DF2\u5728\u68C0\u67E5\u540E\u53D1\u751F\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u68C0\u67E5\u518D\u786E\u8BA4\u4FEE\u590D\u3002");
+      const plan = recoveryPlan(source);
+      yield storage.metadata.edit((preferences) => {
+        if (preferences.contains("state") || preferences.contains("initialization"))
+          throw new Error("\u521D\u59CB\u5316\u72B6\u6001\u5DF2\u53D1\u751F\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u68C0\u67E5\u3002");
+        preferences.set("initialization", storedValue(plan));
+      });
+      yield initializeCharacterStorage(storage, ToolPkg.getSpaceDataDir());
+    } finally {
+      yield storage.close();
+    }
+  });
+}
+function createPlan() {
+  const state = createInitialState(Date.now());
+  const { ownerKey, userDocumentPath: userDocumentPath2, ...memory } = state.owners[0];
+  return { version: 1, card: state.cards[0], memory, memoryPreferences: state.memoryPreferences, memoryRecall: state.memoryRecall };
+}
+function plannedOwner(plan) {
+  const ownerKey = "character:" + plan.card.id;
+  return { ...plan.memory, ownerKey, userDocumentPath: userDocumentPath(ownerKey) };
+}
+function plannedOwnerMetadata(plan) {
+  const { memories, links, chunks, candidates, embeddings, ...metadata } = plannedOwner(plan);
+  return metadata;
+}
+function assertPlan(value) {
+  assertObject(value, "character initialization plan");
+  if (value.version !== 1) throw new Error("Unsupported character initialization plan");
+  assertObject(value.card, "initial character");
+  if (!equal(readCharacter(value.card, requireId(value.card.id, "initial character id")), value.card))
+    throw new Error("Invalid character initialization card");
+  assertObject(value.memory, "initial memory space");
+  const owner2 = plannedOwner(value);
+  assertMemorySpace(owner2);
+  for (const name of ["memories", "links", "chunks", "candidates", "embeddings"])
+    if (owner2[name].length !== 0) throw new Error("Character initialization plan contains memory records");
+  if (owner2.rebuildTask !== null) throw new Error("Character initialization plan contains a memory job");
+  assertObject(value.memoryPreferences, "initial memory preferences");
+  assertBoolean(value.memoryPreferences.userDescriptionEnabled, "user description enabled");
+  assertBoolean(value.memoryPreferences.autoUpdateEnabled, "memory auto update enabled");
+  if (!equal(normalizeMemoryRecallSettings(value.memoryRecall), value.memoryRecall))
+    throw new Error("Character initialization plan has incomplete recall settings");
+}
+function validateRecords(storage, plan) {
+  return __async(this, null, function* () {
+    const configuration = yield storage.data();
+    for (const name of configurationNames) {
+      const entries = configuration[name].entries();
+      if (entries.length === 0) continue;
+      if (plan === void 0 || name !== "cards" || entries.length !== 1 || entries[0][0] !== recordPrefix + plan.card.id || !equal(entries[0][1], plan.card))
+        throw new Error("Character initialization found unplanned configuration: " + name);
+    }
+    const rows = yield storage.memory.query("SELECT collection,key,value FROM plugin_objects LIMIT 2");
+    if (rows.length === 0) return;
+    if (plan === void 0) throw new Error("Character initialization found memory records without a plan");
+    const expected = plannedOwnerMetadata(plan);
+    if (rows.length !== 1 || rows[0].collection !== "owners" || rows[0].key !== expected.ownerKey || !equal(JSON.parse(String(rows[0].value)), expected))
+      throw new Error("Character initialization found unplanned memory records");
+  });
+}
+function initializeCharacterStorage(storage, directory) {
+  return __async(this, null, function* () {
+    const metadata = yield storage.metadata.data();
+    if (metadata.contains("state")) {
+      if (metadata.contains("initialization")) throw new Error("Character initialization plan remains beside completed metadata");
+      return;
+    }
+    let persisted = metadata.get("initialization");
+    if (persisted === void 0) {
+      yield validateRecords(storage, void 0);
+      const plan2 = createPlan();
+      yield storage.metadata.edit((preferences) => {
+        if (preferences.contains("state") || preferences.contains("initialization"))
+          throw new Error("Character initialization changed concurrently");
+        preferences.set("initialization", storedValue(plan2));
+      });
+      persisted = storedValue(plan2);
+    }
+    assertPlan(persisted);
+    const plan = persisted;
+    yield validateRecords(storage, plan);
+    yield storage.configuration.cards.edit((preferences) => {
+      const entries = preferences.entries();
+      if (entries.length === 1 && entries[0][0] === recordPrefix + plan.card.id && equal(entries[0][1], plan.card)) return;
+      if (entries.length !== 0) throw new Error("Character initialization card changed concurrently");
+      preferences.set(recordPrefix + plan.card.id, storedValue(plan.card));
+    });
+    const owner2 = plannedOwner(plan);
+    const existing = yield storage.memory.get("owners", owner2.ownerKey);
+    const ownerMetadata = plannedOwnerMetadata(plan);
+    if (existing === null) {
+      yield storage.memory.commit([{ op: "put", collection: "owners", key: owner2.ownerKey, value: storedValue(ownerMetadata), expectedVersion: null }]);
+    } else if (!equal(existing.value, ownerMetadata)) throw new Error("Character initialization owner changed concurrently");
+    const path = directory + "/" + owner2.userDocumentPath;
+    const file = yield Tools.Files.exists(path);
+    if (file.exists) {
+      if (file.isDirectory) throw new Error("Character initialization document path is a directory");
+    } else {
+      const created = yield Tools.Files.mkdir(path.slice(0, path.lastIndexOf("/")), true);
+      if (!created.successful) throw new Error(created.details);
+      const { operation } = yield Tools.Files.write(path, "", false);
+      if (!operation.successful) throw new Error(operation.details);
+    }
+    yield validateRecords(storage, plan);
+    yield storage.metadata.edit((preferences) => {
+      if (preferences.contains("state") || !equal(preferences.get("initialization"), plan))
+        throw new Error("Character initialization changed concurrently");
+      preferences.set("state", { version: 1, active: { CharacterCard: { id: plan.card.id } }, memoryPreferences: plan.memoryPreferences, memoryRecall: plan.memoryRecall });
+      preferences.remove("initialization");
+    });
+  });
+}
+
 // src/storage/database.ts
 function completed2(result2) {
   if (!result2.successful) throw new Error(result2.details);
@@ -4326,29 +5171,18 @@ var DatabaseCharacterRepository = class _DatabaseCharacterRepository {
         throw new Error("Plugin data directory is unavailable");
       const storage = yield CharacterStorage.open();
       const repository2 = new _DatabaseCharacterRepository(storage, directory, directories2);
-      const existing = (yield storage.metadata.data()).get("state");
-      if (existing === void 0) {
-        const state = createInitialState(Date.now());
-        for (const name of configurationNames) {
-          yield storage.configuration[name].edit((preferences) => {
-            if (preferences.entries().length !== 0) throw new Error("Character initialization found existing configuration: " + name);
-            for (const value of state[name]) preferences.set(recordPrefix + value.id, storedValue(value));
-          });
+      try {
+        yield initializeCharacterStorage(storage, directory);
+        yield repository2.readMetadata();
+        return repository2;
+      } catch (error) {
+        try {
+          yield storage.close();
+        } catch (cleanupError) {
+          throw Object.assign(new Error("Character initialization and handle cleanup failed"), { cause: error, cleanupError });
         }
-        const initialMemory = records(state).filter((row) => !configurationNames.some((name) => name === row.collection));
-        if (initialMemory.length !== 0) yield storage.memory.commit(initialMemory.map((row) => ({ op: "put", ...row, expectedVersion: null })));
-        for (const owner2 of state.owners) {
-          const path = directory + "/" + owner2.userDocumentPath;
-          completed2(yield Tools.Files.mkdir(path.slice(0, path.lastIndexOf("/")), true));
-          completed2(yield Tools.Files.write(path, "", false));
-        }
-        yield storage.metadata.edit((preferences) => {
-          if (preferences.contains("state")) throw new Error("Character initialization changed concurrently");
-          preferences.set("state", { version: state.version, active: storedValue(state.active), memoryPreferences: storedValue(state.memoryPreferences), memoryRecall: storedValue(state.memoryRecall) });
-        });
+        throw error;
       }
-      yield repository2.readMetadata();
-      return repository2;
     });
   }
   /** Combines complete JSON preferences with independently stored memory records for a domain session. */
@@ -4381,7 +5215,7 @@ var DatabaseCharacterRepository = class _DatabaseCharacterRepository {
         /** Selects explicitly removed owner namespaces. */
         (owner2) => !state.owners.some(
           /** Matches retained owner identities. */
-          (retained2) => retained2.ownerKey === owner2.ownerKey
+          (retained3) => retained3.ownerKey === owner2.ownerKey
         )
       ).map(
         /** Resolves the removed owner's document directory. */
@@ -4423,7 +5257,8 @@ var DatabaseCharacterRepository = class _DatabaseCharacterRepository {
         Promise.resolve().then(() => directories2.readToolCatalog()),
         this.readMetadata()
       ]);
-      return { cards, groups, stores, tags, models, ttsConfigs, toolCatalog, ...metadata };
+      const memoryOwnerKeys = (yield this.storage.memory.query("SELECT key FROM plugin_objects WHERE collection='owners' ORDER BY key")).map((row) => String(row.key));
+      return { cards, groups, stores, tags, models, ttsConfigs, toolCatalog, memoryOwnerKeys, ...metadata };
     }));
   }
   /** Reads complete character JSON documents. */
@@ -4570,7 +5405,8 @@ var DatabaseCharacterRepository = class _DatabaseCharacterRepository {
   }
   /** Reads the selected owner's actual USER.md document. */
   readUser(ownerKey) {
-    return this.readOwnerMetadata(ownerKey, (row) => __async(this, null, function* () {
+    return this.readOwnerMetadata(ownerKey, (row, exists) => __async(this, null, function* () {
+      if (!exists) return { ownerKey, content: "" };
       const document2 = yield Tools.Files.read(
         this.ownerDocumentPath(ownerKey, row)
       );
@@ -4598,13 +5434,13 @@ var DatabaseCharacterRepository = class _DatabaseCharacterRepository {
       requireId(ownerKey, "memory owner");
       return this.readConsistent(() => __async(this, null, function* () {
         const row = yield this.storage.memory.get("owners", ownerKey);
-        if (row === null) throw new Error("Memory owner is missing: " + ownerKey);
-        assertObject(row.value, "memory owner metadata");
-        if (row.value.ownerKey !== ownerKey) throw new Error("Invalid memory owner identity");
+        const value = row === null ? storedValue(createMemorySpace(ownerKey)) : row.value;
+        assertObject(value, "memory owner metadata");
+        if (value.ownerKey !== ownerKey) throw new Error("Invalid memory owner identity");
         const separator = ownerKey.indexOf(":");
         const kind = ownerKey.slice(0, separator);
         if (kind !== "character" && kind !== "shared") throw new Error("Invalid memory owner: " + ownerKey);
-        return action(row.value);
+        return action(value, row !== null);
       }));
     });
   }
@@ -4657,7 +5493,7 @@ var DatabaseCharacterRepository = class _DatabaseCharacterRepository {
           );
         }
         const stagedPath = document2.path + ".pending";
-        completed2(yield Tools.Files.write(stagedPath, document2.content, false));
+        completed2((yield Tools.Files.write(stagedPath, document2.content, false)).operation);
         stagedDocuments.push({ path: document2.path, stagedPath });
       }
       for (const name of configurationNames) {
@@ -4698,6 +5534,26 @@ function connectDirectorySources(sources) {
 }
 function getRepository() {
   return repository ?? (repository = Promise.resolve().then(() => DatabaseCharacterRepository.open(directories)));
+}
+function recoverRepository(source) {
+  return __async(this, null, function* () {
+    const previous = repository;
+    if (previous !== void 0) {
+      let failed = false;
+      try {
+        yield previous;
+      } catch {
+        failed = true;
+      }
+      if (!failed) throw new Error("\u89D2\u8272\u5361\u670D\u52A1\u5DF2\u7ECF\u6B63\u5E38\u8FD0\u884C\uFF0C\u65E0\u9700\u4FEE\u590D\u521D\u59CB\u5316\u3002");
+    }
+    if (repository !== previous) throw new Error("\u5DF2\u6709\u521D\u59CB\u5316\u6216\u4FEE\u590D\u8BF7\u6C42\u6B63\u5728\u6267\u884C\u3002");
+    repository = Promise.resolve().then(() => __async(null, null, function* () {
+      if (source !== null) yield repairCharacterInitialization(source);
+      return DatabaseCharacterRepository.open(directories);
+    }));
+    return repository;
+  });
 }
 
 // src/chat-storage.ts
@@ -5090,7 +5946,7 @@ function memoryByTitle(memories, title) {
   if (matches.length !== 1) throw new Error("Memory title does not identify exactly one record: " + title);
   return matches[0];
 }
-function extractionPrompt(candidates, memories, folders, settings2, profile) {
+function extractionPrompt(candidates, memories, folders2, settings2, profile) {
   const existing = candidates.length === 0 ? "\u6CA1\u6709\u5DF2\u6709\u8BB0\u5FC6\u3002" : "\u5DF2\u6709\u8BB0\u5FC6\uFF08\u4EC5\u662F\u68C0\u7D22\u7EBF\u7D22\uFF0C\u4E0D\u662F\u4E8B\u5B9E\u8BC1\u636E\uFF09\uFF1A\n" + candidates.map(
     /** Preserves the title and a bounded real-record content sample. */
     (memory) => "- " + JSON.stringify(memory.title) + ": " + [...memory.content.replace(/\n/g, " ")].slice(0, 150).join("")
@@ -5115,7 +5971,7 @@ function extractionPrompt(candidates, memories, folders, settings2, profile) {
   const fields4 = [
     ["$duplicatesPromptPart", duplicates],
     ["$existingMemoriesPrompt", existing],
-    ["$existingFoldersPrompt", "\u5DF2\u6709\u6587\u4EF6\u5939\uFF1A" + folders.join(", ")],
+    ["$existingFoldersPrompt", "\u5DF2\u6709\u6587\u4EF6\u5939\uFF1A" + folders2.join(", ")],
     ["$profileOptionalKey", enabled ? "\u3001profile_markdown" : ""],
     ["$profileMarkdownSchemaLine", enabled ? "- profile_markdown\uFF1A\u5B8C\u6574\u66FF\u6362 Markdown\uFF0C\u672A\u66F4\u65B0\u65F6\u4E3A null\u3002" : ""],
     ["$profileUpdateInstruction", profileInstruction],
@@ -5270,7 +6126,7 @@ function extractMessages(ownerKey, messages, repository2) {
     const profile = settings2.profileAutoUpdateEnabled && !settings2.profileAutoUpdateLocked ? (yield repository2.readUser(ownerKey)).content : "";
     const query = buildCandidateSearchQuery(history);
     const candidates = yield repository2.searchMemories({ ownerKey, query, folderPath: null, relevanceThreshold: MEMORY_SEARCH_THRESHOLD, createdAtStartMs: null, createdAtEndMs: null });
-    const folders = yield repository2.listMemoryFolders(ownerKey), prompt = extractionPrompt(candidates.slice(0, 15), candidates, folders, settings2, profile);
+    const folders2 = yield repository2.listMemoryFolders(ownerKey), prompt = extractionPrompt(candidates.slice(0, 15), candidates, folders2, settings2, profile);
     const response = yield Tools.Chat.call({ functionType: "MEMORY", turns: [{ kind: "SYSTEM", content: prompt }, { kind: "USER", content: "\u5BF9\u8BDD\u8BB0\u5F55\uFF1A\n" + history.map(
       /** Retains the real user and assistant sequence in the selected extraction window. */
       (message) => message.sender + ": " + message.content
@@ -5297,14 +6153,14 @@ function autoCategorizeMemory(ownerKey, repository2) {
     const memories = (yield repository2.listMemories(ownerKey)).filter(
       /** Selects only records genuinely stored in the root folder. */
       (memory) => memory.folderPath === null || memory.folderPath === ""
-    ), folders = yield repository2.listMemoryFolders(ownerKey);
+    ), folders2 = yield repository2.listMemoryFolders(ownerKey);
     let changed = 0;
     for (let index = 0; index < memories.length; index += 10) {
       const batch = memories.slice(index, index + 10), digest = batch.map(
         /** Supplies real titles and a bounded full-record content preview. */
         (memory) => "- title: " + memory.title + ", content: " + [...memory.content].slice(0, 100).join("")
       ).join("\n");
-      const response = yield Tools.Chat.call({ functionType: "MEMORY", turns: [{ kind: "SYSTEM", content: "\u4F60\u662F\u77E5\u8BC6\u5206\u7C7B\u4E13\u5BB6\u3002\u6839\u636E\u8BB0\u5FC6\u5185\u5BB9\uFF0C\u4E3A\u6BCF\u6761\u8BB0\u5FC6\u5206\u914D\u5408\u9002\u7684\u6587\u4EF6\u5939\u8DEF\u5F84\u3002\n\u5DF2\u6709\u6587\u4EF6\u5939\uFF1A" + folders.join(", ") + '\n\u4F18\u5148\u4F7F\u7528\u5DF2\u6709\u6587\u4EF6\u5939\uFF0C\u5FC5\u8981\u65F6\u521B\u5EFA\u65B0\u6587\u4EF6\u5939\u3002\u4EC5\u8FD4\u56DE\u4E25\u683C JSON \u6570\u7EC4 [{"title":"\u8BB0\u5FC6\u6807\u9898","folder":"\u6587\u4EF6\u5939\u8DEF\u5F84"}]\u3002\n\u8BB0\u5FC6\u5217\u8868\uFF1A\n' + digest }, { kind: "USER", content: "\u8BF7\u4E3A\u8FD9\u4E9B\u8BB0\u5FC6\u5206\u7C7B\u3002" }], recordTokenUsage: true, enableThinking: false });
+      const response = yield Tools.Chat.call({ functionType: "MEMORY", turns: [{ kind: "SYSTEM", content: "\u4F60\u662F\u77E5\u8BC6\u5206\u7C7B\u4E13\u5BB6\u3002\u6839\u636E\u8BB0\u5FC6\u5185\u5BB9\uFF0C\u4E3A\u6BCF\u6761\u8BB0\u5FC6\u5206\u914D\u5408\u9002\u7684\u6587\u4EF6\u5939\u8DEF\u5F84\u3002\n\u5DF2\u6709\u6587\u4EF6\u5939\uFF1A" + folders2.join(", ") + '\n\u4F18\u5148\u4F7F\u7528\u5DF2\u6709\u6587\u4EF6\u5939\uFF0C\u5FC5\u8981\u65F6\u521B\u5EFA\u65B0\u6587\u4EF6\u5939\u3002\u4EC5\u8FD4\u56DE\u4E25\u683C JSON \u6570\u7EC4 [{"title":"\u8BB0\u5FC6\u6807\u9898","folder":"\u6587\u4EF6\u5939\u8DEF\u5F84"}]\u3002\n\u8BB0\u5FC6\u5217\u8868\uFF1A\n' + digest }, { kind: "USER", content: "\u8BF7\u4E3A\u8FD9\u4E9B\u8BB0\u5FC6\u5206\u7C7B\u3002" }], recordTokenUsage: true, enableThinking: false });
       const rows = parseModelJson(response.text);
       if (!Array.isArray(rows) || rows.length !== batch.length) throw new Error("Categorization must return exactly one folder for each supplied memory");
       const seen = /* @__PURE__ */ new Set();
@@ -5403,6 +6259,8 @@ function enqueueCandidate(input, repository2) {
       if (participants.length !== 1) throw new Error("A group selected-user candidate requires an explicit owner");
       owners.add(yield primaryOwner(participants[0], repository2));
     }
+    for (const ownerKey of owners) if (!(yield repository2.hasMemoryOwner(ownerKey))) owners.delete(ownerKey);
+    if (owners.size === 0) return { owners: [], candidateIds: [] };
     const result2 = { owners: [...owners], candidateIds: [] }, now = Date.now();
     const producerNodeId = yield memoryJobProducer();
     for (const ownerKey of owners) {
@@ -5421,35 +6279,6 @@ function enqueueCandidate(input, repository2) {
       result2.candidateIds.push(id2);
     }
     return result2;
-  });
-}
-function retryFailedCandidates(ownerKey, repository2) {
-  return __async(this, null, function* () {
-    const space = yield repository2.readMemoryJobState(ownerKey), now = Date.now(), producerNodeId = yield memoryJobProducer();
-    let retried = 0;
-    for (const candidate of space.candidates) if (candidate.status === "failed") {
-      candidate.producerNodeId = producerNodeId;
-      candidate.status = "pending";
-      candidate.lastError = "";
-      candidate.updatedAt = now;
-      retried += 1;
-    }
-    if (retried !== 0) yield repository2.writeMemoryJobState(ownerKey, space);
-    return { retried };
-  });
-}
-function clearFailedCandidates(ownerKey, repository2) {
-  return __async(this, null, function* () {
-    const space = yield repository2.readMemoryJobState(ownerKey);
-    const remaining = space.candidates.filter(
-      /** Retains pending and processing records for their real owners. */
-      (candidate) => candidate.status !== "failed"
-    ), cleared = space.candidates.length - remaining.length;
-    if (cleared !== 0) {
-      space.candidates = remaining;
-      yield repository2.writeMemoryJobState(ownerKey, space);
-    }
-    return { cleared };
   });
 }
 function startMemoryRebuild(ownerKey, rebuild, repository2) {
@@ -5662,12 +6491,8 @@ var MemoryJobRunner = class {
   /** Advances only tasks produced by this device while preserving independent owner failures. */
   runTick() {
     return __async(this, null, function* () {
-      yield this.owner.run(
-        /** Removes memory owners whose backing entity disappeared. */
-        (repository2) => repository2.pruneOrphanMemoryOwners()
-      );
       const keys = yield this.owner.run(
-        /** Enumerates initialized memory owners without loading their corpora. */
+        /** Skips owners awaiting role configuration without deleting their synchronized records. */
         (repository2) => repository2.listMemoryOwnerKeys()
       ), report = { owners: keys.length, rebuildWindows: 0, candidateBatches: 0 };
       const failures = [], producerNodeId = yield memoryJobProducer();
@@ -6395,7 +7220,8 @@ function snapshot(host) {
       models,
       ttsConfigs,
       toolCatalog,
-      memoryPreferences
+      memoryPreferences,
+      memoryOwnerKeys
     ] = yield Promise.all([
       host.listCharacters(),
       host.listGroups(),
@@ -6405,9 +7231,11 @@ function snapshot(host) {
       Promise.resolve().then(() => host.listModels()),
       Promise.resolve().then(() => host.listTtsConfigs()),
       Promise.resolve().then(() => host.readToolCatalog()),
-      host.readGlobalMemoryPreferences()
+      host.readGlobalMemoryPreferences(),
+      host.listMemoryOwnerKeys()
     ]);
     return {
+      memoryOwnerKeys,
       cards,
       groups,
       stores,
@@ -6842,14 +7670,9 @@ function dispatch(request, host) {
           host
         );
       case "retryFailedCandidates":
-        return executeDomain(
-          "memory.candidates.retryFailed",
-          { ownerKey: "ownerKey" in request ? request.ownerKey : yield menuMemoryOwner(request.chatId, host) },
-          host
-        );
       case "clearFailedCandidates":
         return executeDomain(
-          "memory.candidates.clearFailed",
+          request.action === "retryFailedCandidates" ? "memory.candidates.retryFailed" : "memory.candidates.clearFailed",
           { ownerKey: "ownerKey" in request ? request.ownerKey : yield menuMemoryOwner(request.chatId, host) },
           host
         );
@@ -6890,6 +7713,9 @@ function dispatch(request, host) {
           request.tagChanges,
           host
         );
+        return snapshot(host);
+      case "createMemoryLibrary":
+        yield host.createMemoryLibrary(request.ownerKey);
         return snapshot(host);
       case "deleteCharacter":
         yield deleteCharacter(request.id, host);
@@ -7199,9 +8025,13 @@ var handlers = {
   /** Enqueues only actual persisted message sources and genuine bound owners. */
   "memory.candidate.enqueue": (input, repository2) => enqueueCandidate(input, repository2),
   /** Returns genuine terminal failures to the pending queue for one later interval retry. */
-  "memory.candidates.retryFailed": (input, repository2) => retryFailedCandidates(input.ownerKey, repository2),
+  "memory.candidates.retryFailed": (input, repository2) => __async(null, null, function* () {
+    return { retried: yield repository2.recoverFailedCandidates(input.ownerKey, yield memoryJobProducer()) };
+  }),
   /** Removes genuine terminal failures from the owner queue. */
-  "memory.candidates.clearFailed": (input, repository2) => clearFailedCandidates(input.ownerKey, repository2),
+  "memory.candidates.clearFailed": (input, repository2) => __async(null, null, function* () {
+    return { cleared: yield repository2.recoverFailedCandidates(input.ownerKey, null) };
+  }),
   /** Resolves chat configuration using this operation's existing repository snapshot. */
   "chat.configuration.resolve": (input, repository2) => resolveConfiguration(input, {
     /** Reads only the requested character. */
@@ -7747,6 +8577,12 @@ function initializeService() {
     yield getService();
   });
 }
+function recoverService(source) {
+  return __async(this, null, function* () {
+    const owner2 = yield recoverRepository(source);
+    service = Promise.resolve(createCharacterCardsService(owner2));
+  });
+}
 function dispatch2(request) {
   return __async(this, null, function* () {
     return (yield getService()).dispatch(request);
@@ -7962,6 +8798,20 @@ function receiveDomainRequest(value) {
 function registerUiRequestChannel() {
   ToolPkg.ipc.on("character-memory.request", receiveUiRequest);
   ToolPkg.ipc.on("character-memory.domain", receiveDomainRequest);
+  ToolPkg.ipc.on("character-memory.initialization", receiveInitializationRecovery);
+}
+function receiveInitializationRecovery(value) {
+  return __async(this, null, function* () {
+    const request = record(value, "character-memory.initialization");
+    if (request.action === "inspect") return inspectCharacterInitialization();
+    if (request.action === "repair") {
+      const source = record(request.source, "initialization recovery source");
+      if (!("card" in source) || !("owner" in source)) throw new Error("Missing inspected initialization source");
+      yield recoverService(source);
+    } else if (request.action === "resume") yield recoverService(null);
+    else throw new Error("Unknown initialization recovery action");
+    return { status: "ready" };
+  });
 }
 function registerServiceLifecycle() {
   ToolPkg.registerAppLifecycleHook({ id: "service-initialize", event: "application_on_create", function: onServiceInitialize });
@@ -7970,17 +8820,6 @@ function onServiceInitialize(_event) {
   return __async(this, null, function* () {
     yield initializeService();
   });
-}
-
-// src/host-path.ts
-function hostFilePath(path, platform) {
-  const normalized = path.replace(/\\/g, "/");
-  if (normalized.startsWith("/app/") || normalized.startsWith("/mnt/")) return normalized;
-  if (platform === "windows" && /^[a-z]:\//i.test(normalized)) return `/mnt/windows/${normalized[0].toLowerCase()}/${normalized.slice(3)}`;
-  if (!normalized.startsWith("/")) return null;
-  if (platform === "macos" || platform === "linux") return `/mnt/${platform}${normalized}`;
-  if (platform === "android") return `/mnt/android/root${normalized}`;
-  return null;
 }
 
 // src/import-source.ts
@@ -7993,10 +8832,7 @@ function parseImportSource(raw) {
 function readImportSource(source) {
   return __async(this, null, function* () {
     if (source.kind === "inline") return source.content;
-    const platform = (yield Tools.System.terminal.info()).platform;
-    const path = hostFilePath(source.path, platform);
-    if (path === null) throw new Error(`unsupported import file path on ${platform}: ${source.path}`);
-    const file = yield Tools.Files.read(path);
+    const file = yield Tools.Files.read(source.path);
     const content = file.content.replace(/^\uFEFF/, "");
     if (content.trim() === "") throw new Error(`import file is empty: ${source.path}`);
     return content;
@@ -9885,10 +10721,10 @@ function memoryBlock(result2) {
   lines2.push("</memory_context>");
   return lines2.join("\n");
 }
-function onMemoryRecallPromptFinalize(event) {
+function onMemoryRecallPromptInput(event) {
   return __async(this, null, function* () {
     const stage = String(event.eventPayload.stage ?? event.eventName ?? "");
-    if (stage !== "before_send_to_model") return null;
+    if (stage !== "before_process") return null;
     const participant = executionParticipant(event.eventPayload);
     if (participant === null) return null;
     const processedInput = String(event.eventPayload.processedInput ?? event.eventPayload.rawInput ?? "");
@@ -9911,7 +10747,7 @@ ${block}`;
   });
 }
 function registerMemoryRecallHook() {
-  ToolPkg.registerPromptFinalizeHook({ id: "character-memory-recall", function: onMemoryRecallPromptFinalize });
+  ToolPkg.registerPromptInputHook({ id: "character-memory-recall", function: onMemoryRecallPromptInput });
 }
 
 // src/chat-lifecycle.ts
@@ -10111,6 +10947,71 @@ function toolPromptPolicy(event) {
 function registerToolPolicies() {
   ToolPkg.registerToolLifecycleHook({ id: "participant-tool-execution", function: toolCallPolicy });
   ToolPkg.registerToolPromptComposeHook({ id: "participant-tool-visibility", function: toolPromptPolicy });
+}
+
+// src/diagnostics.ts
+var reportedErrors = /* @__PURE__ */ new WeakSet();
+function logCharacterStatus(message, fields4, elapsedMs) {
+  const chat = typeof fields4.chatId === "string" ? " chat=" + fields4.chatId.slice(0, 8) : "";
+  const task = typeof fields4.submissionId === "string" ? " task=" + fields4.submissionId : "";
+  const elapsed = elapsedMs === void 0 ? "" : " " + elapsedMs + "ms";
+  console.log("[character_cards] " + message + chat + task + elapsed);
+}
+function logCharacterFailure(message, fields4, error, elapsedMs) {
+  if (typeof error === "object" && error !== null) {
+    if (reportedErrors.has(error)) return;
+    reportedErrors.add(error);
+  }
+  const reason = typeof error === "object" && error !== null && "message" in error ? String(error.message) : String(error);
+  const chat = typeof fields4.chatId === "string" ? " chat=" + fields4.chatId.slice(0, 8) : "";
+  const task = typeof fields4.submissionId === "string" ? " task=" + fields4.submissionId : "";
+  const elapsed = elapsedMs === void 0 ? "" : " " + elapsedMs + "ms";
+  console.error("[character_cards] " + message + chat + task + elapsed + ": " + reason.replace(/\s+/g, " ").slice(0, 240));
+}
+var CharacterTrace = class {
+  constructor(operation, fields4) {
+    this.operation = operation;
+    this.startedAt = Date.now();
+    this.stage = "";
+    this.details = { ...fields4 };
+    if (operation === "group.input.submit") logCharacterStatus("\u68C0\u67E5\u53D1\u9001", this.details);
+    if (operation === "group.native.send") logCharacterStatus(fields4.turn === "record_only" ? "\u4FDD\u5B58\u7FA4\u804A\u6D88\u606F" : "\u8BF7\u6C42\u89D2\u8272\u56DE\u590D", this.details);
+  }
+  event(stage, fields4 = {}) {
+    Object.assign(this.details, fields4);
+    if (stage === "input.admission.wait") logCharacterStatus("\u7FA4\u804A\u63A5\u7BA1\uFF0C\u7B49\u5F85\u4FDD\u5B58", this.details);
+    if (stage !== "end") return;
+    const elapsedMs = Date.now() - this.startedAt;
+    if (this.operation === "group.input.submit") {
+      logCharacterStatus(this.details.reason === "existing_submission" ? "\u7FA4\u804A\u4EFB\u52A1\u672A\u7ED3\u675F\uFF0C\u963B\u6B62\u91CD\u590D\u63D0\u4EA4" : this.details.type ? "\u7FA4\u804A\u5DF2\u63A5\u7BA1" : "\u653E\u884C", this.details, elapsedMs);
+    } else if (elapsedMs >= 1e3) {
+      logCharacterStatus(this.operation + " \u5B8C\u6210", this.details, elapsedMs);
+    }
+  }
+  step(stage, work) {
+    return __async(this, null, function* () {
+      this.stage = stage;
+      const result2 = yield work();
+      this.stage = "";
+      return result2;
+    });
+  }
+  fail(error) {
+    logCharacterFailure(this.operation + (this.stage ? "/" + this.stage : "") + " \u5931\u8D25", this.details, error, Date.now() - this.startedAt);
+  }
+};
+function traceCharacterWork(operation, fields4, work) {
+  return __async(this, null, function* () {
+    const trace = new CharacterTrace(operation, fields4);
+    try {
+      const result2 = yield work(trace);
+      trace.event("end");
+      return result2;
+    } catch (error) {
+      trace.fail(error);
+      throw error;
+    }
+  });
 }
 
 // src/group-execution/planner.ts
@@ -10679,7 +11580,14 @@ var NativeGroupTurnTransport = class {
       const attempt = { chatId: sequence.chatId, runtime: sequence.runtime, active: true };
       this.attempts.set(requestKey, attempt);
       try {
-        const actual = yield Tools.Chat.sendMessage(request);
+        const actual = yield traceCharacterWork("group.native.send", {
+          chatId: sequence.chatId,
+          submissionId: "kind" in input ? input.submission.submissionId : input.submissionId,
+          requestKey,
+          runtime: sequence.runtime,
+          kind: request.kind,
+          turn: request.kind === "submit" ? request.turn.kind : "continue"
+        }, (trace) => trace.step("host.Chat.sendMessage", () => Tools.Chat.sendMessage(request)));
         const decision = decodeNativeGroupSendResult(actual, input, "kind" in input ? null : input.userMessageTimestamp);
         sequence.last = decision;
         if (decision.type === "committed") {
@@ -10729,12 +11637,16 @@ function observe(execution, work) {
     (outcome) => {
       execution.status = "settled";
       execution.outcome = outcome;
+      logCharacterStatus("\u7FA4\u804A\u7ED3\u675F\uFF08" + outcome.status + "\uFF09", {
+        chatId: execution.input.chatId,
+        submissionId: execution.input.submissionId
+      });
     },
     /** Retains the original rejected error and exposes the background failure through the plugin log. */
     (failure2) => {
       execution.status = "failed";
       execution.failure = failure2;
-      console.error("Group input " + execution.input.submissionId + " failed: " + String(failure2));
+      logCharacterFailure("\u7FA4\u804A\u5931\u8D25", { chatId: execution.input.chatId, submissionId: execution.input.submissionId }, failure2);
     }
   );
 }
@@ -10744,31 +11656,50 @@ function onGroupInputSubmit(event) {
     const payload = event.eventPayload;
     if (payload.source === "Sequence") return null;
     const chatId = requireId(payload.chatId, "submitted chatId");
-    const binding = yield findChatBinding(chatId);
-    if (binding === null) return null;
-    if (parseChatSelection(binding.selection).kind !== "group") return null;
-    const service2 = yield getService();
-    const input = submission(payload, chatId, binding.selection);
-    const current = executions.get(chatId);
-    if (current !== void 0 && (current.status === "running" || current.outcome !== null && current.outcome.status === "cancelled")) {
-      return { action: "Block", clearInput: false, message: "An existing group submission must settle or resume before another input", metadata: { submissionId: current.input.submissionId } };
-    }
-    if (controller === null) controller = createGroupExecutionController(service2, new NativeGroupTurnTransport());
-    const work = controller.submit(input);
-    const execution = { input, status: "running", outcome: null, failure: null };
-    executions.set(chatId, execution);
-    observe(execution, work);
-    const admitted = yield controller.waitForInput(chatId, input.submissionId);
-    if (admitted.type === "consumed") return { action: "Consume", clearInput: true, metadata: admitted.metadata };
-    if (admitted.type === "blocked") return {
-      action: "Block",
-      clearInput: false,
-      message: admitted.message === null ? void 0 : admitted.message
-    };
-    if (admitted.type !== "committed" || admitted.receipt.userMessageTimestamp === null) {
-      return { action: "Block", clearInput: false, message: "Group input was not persisted" };
-    }
-    return { action: "Consume", clearInput: true, metadata: { submissionId: input.submissionId, chatId, selection: input.selection, runtime: input.runtime } };
+    return traceCharacterWork("group.input.submit", {
+      chatId,
+      source: payload.source ?? null,
+      runtime: payload.runtime,
+      textLength: payload.text?.length ?? 0,
+      attachmentCount: payload.attachmentCount ?? null
+    }, (trace) => __async(null, null, function* () {
+      const binding = yield trace.step("binding.read", () => findChatBinding(chatId));
+      if (binding === null) {
+        trace.event("allow", { reason: "unassociated" });
+        return null;
+      }
+      trace.event("binding.resolved", { selection: binding.selection });
+      if (parseChatSelection(binding.selection).kind !== "group") {
+        trace.event("allow", { reason: "not_group" });
+        return null;
+      }
+      const service2 = yield trace.step("service.ready", getService);
+      const input = submission(payload, chatId, binding.selection);
+      trace.event("submission.created", { submissionId: input.submissionId, selection: input.selection });
+      const current = executions.get(chatId);
+      if (current !== void 0 && (current.status === "running" || current.outcome !== null && current.outcome.status === "cancelled")) {
+        trace.event("block", { reason: "existing_submission", submissionId: current.input.submissionId, status: current.status });
+        return { action: "Block", clearInput: false, message: "An existing group submission must settle or resume before another input", metadata: { submissionId: current.input.submissionId } };
+      }
+      if (controller === null) controller = createGroupExecutionController(service2, new NativeGroupTurnTransport());
+      const work = controller.submit(input);
+      const execution = { input, status: "running", outcome: null, failure: null };
+      executions.set(chatId, execution);
+      observe(execution, work);
+      trace.event("input.admission.wait", { submissionId: input.submissionId });
+      const admitted = yield trace.step("input.admission", () => controller.waitForInput(chatId, input.submissionId));
+      trace.event("input.admission.result", { submissionId: input.submissionId, type: admitted.type });
+      if (admitted.type === "consumed") return { action: "Consume", clearInput: true, metadata: admitted.metadata };
+      if (admitted.type === "blocked") return {
+        action: "Block",
+        clearInput: false,
+        message: admitted.message === null ? void 0 : admitted.message
+      };
+      if (admitted.type !== "committed" || admitted.receipt.userMessageTimestamp === null) {
+        return { action: "Block", clearInput: false, message: "Group input was not persisted" };
+      }
+      return { action: "Consume", clearInput: true, metadata: { submissionId: input.submissionId, chatId, selection: input.selection, runtime: input.runtime } };
+    }));
   });
 }
 function decodeGroupExecutionRequest(payload) {
@@ -10783,7 +11714,7 @@ function decodeGroupExecutionRequest(payload) {
   if (action !== "status" && action !== "cancel" && action !== "resume") throw new Error("Unknown group execution action");
   return { chatId, submissionId, action };
 }
-function retained(payload) {
+function retained2(payload) {
   const execution = executions.get(payload.chatId);
   if (execution === void 0 || execution.input.submissionId !== payload.submissionId || controller === null) throw new Error("Group execution has no matching retained submission");
   return { execution, action: payload.action, controller };
@@ -10794,13 +11725,19 @@ function groupExecutionRequest(payload) {
       const execution2 = executions.get(payload.chatId);
       return execution2 === void 0 ? null : jsonValue(executionStatus(execution2));
     }
-    const target = retained(payload), execution = target.execution;
+    const target = retained2(payload), execution = target.execution;
     if (target.action === "cancel") {
       if (execution.status !== "running") throw new Error("Only a running group submission can be cancelled");
-      yield target.controller.cancel(execution.input.chatId, execution.input.submissionId);
+      yield traceCharacterWork(
+        "group.cancel",
+        { chatId: execution.input.chatId, submissionId: execution.input.submissionId },
+        (trace) => trace.step("controller.cancel", () => target.controller.cancel(execution.input.chatId, execution.input.submissionId))
+      );
     } else if (target.action === "resume") {
       if (execution.status !== "settled" || execution.outcome === null || execution.outcome.status !== "cancelled") throw new Error("Only a settled cancelled group submission can resume");
+      const trace = new CharacterTrace("group.resume", { chatId: execution.input.chatId, submissionId: execution.input.submissionId });
       const work = target.controller.resume(execution.input.chatId, execution.input.submissionId);
+      trace.event("accepted");
       execution.status = "running";
       execution.outcome = null;
       execution.failure = null;
@@ -10945,19 +11882,18 @@ function characterSidebarSections(directory, selections, chats) {
   const selectionByChat = /* @__PURE__ */ new Map();
   for (const state of selections) {
     if (selectionByChat.has(state.chatId)) throw new Error("Duplicate sidebar selection state: " + state.chatId);
-    if (state.selection !== null) decodeSelection(state.selection, directory);
+    if (state.selection !== null) parseChatSelection(state.selection);
     selectionByChat.set(state.chatId, state);
   }
   const unbound = { id: "unbound", title: "\u672A\u7ED1\u5B9A\u89D2\u8272", avatarUri: null, kind: "unbound", selection: null, chats: [] };
   for (const chat of chats) {
     const state = selectionByChat.get(chat.id);
     if (state === void 0) throw new Error("Sidebar has no explicit namespace selection state for chat: " + chat.id);
-    if (state.selection === null || decodeSelection(state.selection, directory).entity === "model") {
+    const section = state.selection === null ? void 0 : bySelection.get(state.selection);
+    if (section === void 0) {
       unbound.chats.push(chat);
       continue;
     }
-    const section = bySelection.get(state.selection);
-    if (section === void 0) throw new Error("Plugin selection has no real category: " + state.selection);
     section.chats.push(chat);
   }
   if (unbound.chats.length !== 0) sections.push(unbound);
@@ -10998,9 +11934,6 @@ function readSidebarCatalog(value) {
   return __async(this, null, function* () {
     const current = parseCurrentSidebar(value), service2 = yield getService();
     const [directory, selections] = yield Promise.all([service2.sidebarDirectory(), readSidebarSelections(current.chatSidebar.chats)]);
-    for (const selection of selections) {
-      if (selection.selection !== null) requireChatSelection(selection.selection, directory.cards, directory.groups);
-    }
     const sections = characterSidebarSections(directory, selections, current.chatSidebar.chats);
     if (!sections.some(
       /** Ensures an explicit unbound grouping scope remains available for real empty group creation. */

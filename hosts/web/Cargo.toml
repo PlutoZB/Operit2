@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 operit-store = { path = "../../core/crates/persistence/store", default-features = false }
 operit-data-rescue = { path = "../../core/crates/persistence/rescue" }
 anyhow = "1"
+async-trait = "0.1"
 js-sys = "0.3"
 operit-host-api = { path = "../../core/crates/foundation/host-api" }
 operit-proxy-local = { path = "../../core/crates/proxy/local" }
@@ -21,4 +22,5 @@ serde_json = "1"
 tokio = { version = "1", default-features = false, features = ["sync"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
+vt100 = "0.15"
 web-sys = { version = "0.3", features = ["BinaryType", "CloseEvent", "Event", "EventTarget", "MessageEvent", "Navigator", "WebSocket", "Window"] }

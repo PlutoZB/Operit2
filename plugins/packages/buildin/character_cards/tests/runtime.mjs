@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-const require = createRequire(new URL("../../workflow/package.json", import.meta.url));
+const require = createRequire(import.meta.url);
 const { buildSync } = require("esbuild");
 const ts = require("typescript");
 
@@ -25,7 +25,7 @@ export function loadModule(relative, globals = {}) {
     /** Rejects every invocation of the removed CLI or lossy summary-tool bridge. */
     get(_target, property) { throw new Error(`Forbidden production Tools access: ${String(property)}`); },
   });
-  vm.runInNewContext(result.outputFiles[0].text, { module, exports: module.exports, console, TextEncoder, TextDecoder, setTimeout, clearTimeout, Tools: forbidden, ...globals }, { filename: file });
+  vm.runInNewContext(result.outputFiles[0].text, { module, exports: module.exports, console, Uint8Array, Float32Array, Float64Array, BigUint64Array, ArrayBuffer, DataView, WebAssembly, TextEncoder, TextDecoder, setTimeout, clearTimeout, Tools: forbidden, ...globals }, { filename: file });
   return module.exports;
 }
 

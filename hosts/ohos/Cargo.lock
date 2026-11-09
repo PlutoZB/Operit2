@@ -613,7 +613,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07bbe89c50d7a535e539b8c17bc0b49bdb77747034daa8087407d655f3f7cc1d"
 dependencies = [
  "futures-core",
- "futures-sink",
 ]
 
 [[package]]
@@ -1367,6 +1366,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "flume",
+ "if-addrs",
  "libc",
  "mdns-sd",
  "operit-host-api",
@@ -1405,6 +1406,7 @@ dependencies = [
  "reqwest",
  "tokio",
  "tokio-tungstenite",
+ "tower",
 ]
 
 [[package]]
@@ -1466,6 +1468,7 @@ dependencies = [
  "operit-host-api",
  "operit-util",
  "serde",
+ "serde_bytes",
  "serde_json",
  "sha2",
  "tar",
@@ -1480,7 +1483,6 @@ dependencies = [
  "flate2",
  "operit-host-api",
  "regex",
- "reqwest",
  "serde",
  "serde_json",
  "tokio",
@@ -1751,7 +1753,6 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64",
  "bytes",
- "futures-channel",
  "futures-core",
  "futures-util",
  "http",
@@ -1926,6 +1927,16 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
  "serde_derive",
+]
+
+[[package]]
+name = "serde_bytes"
+version = "0.11.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5d440709e79d88e51ac01c4b72fc6cb7314017bb7da9eeff678aa94c10e3ea8"
+dependencies = [
+ "serde",
+ "serde_core",
 ]
 
 [[package]]

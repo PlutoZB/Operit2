@@ -7,6 +7,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:desktop_widgets/desktop_widgets.dart';
 
+import '../../window/DesktopWindowChrome.dart';
+import '../design/SoftwareDesignCatalog.dart';
+
 import '../../../core/bridge/ProxyCoreRuntimeBridge.dart';
 import '../../common/contributions/ChatSidebarTabHost.dart'
     show ChatSidebarPreparation, ChatSidebarPreparationScope;
@@ -18,9 +21,10 @@ import '../../features/chat/viewmodel/ChatSelectionTransition.dart';
 import '../components/AppContent.dart';
 import '../components/DrawerConversationState.dart';
 import '../layout/NavigationLayoutMetrics.dart';
-import '../layout/AdaptiveMainLayout.dart';
+import '../layout/PhoneLayout.dart';
 import '../MainLayoutController.dart';
 import '../TopBarController.dart';
+import '../layout/TabletLayout.dart';
 import '../layout/SidebarDockController.dart';
 import '../navigation/AppNavigationModels.dart';
 import '../navigation/AppRouteCatalog.dart';
@@ -61,6 +65,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
 
   late AppNavigationModel _navigationModel;
   late final AppRouterState _routerState;
+  late final SoftwareDesignCatalog _softwareDesignCatalog;
   late final TopBarController _topBarController;
   late final MainLayoutController _mainLayoutController;
   late final SidebarDockController _sidebarDockController;
@@ -75,7 +80,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
   StreamSubscription<String?>? _drawerCurrentChatSubscription;
   StreamSubscription<List<String>>? _drawerActiveStreamingChatIdsSubscription;
   late final ValueNotifier<bool> _drawerOpenState;
-  bool _isTabletSidebarExpanded = false;
+  bool _isTabletSidebarExpanded = true;
   bool _isNavigatingBack = false;
   bool _requestedInitialToolPkgNavigationRefresh = false;
   StreamSubscription<void>? _toolPkgCatalogChangeSubscription;
@@ -96,6 +101,11 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
     _drawerConversationState.addListener(_prepareSidebarData);
     _drawerOpenState = ValueNotifier<bool>(false);
     AppRouterGateway.install(handler: _navigateToRoute, reset: _resetToRoute);
+    _softwareDesignCatalog = SoftwareDesignCatalog(
+      router: _routerState,
+      routes: () => _navigationModel.routes,
+      navigate: _navigateToRoute,
+    );
     NotificationActivationService.instance.installChatHandler(
       _activateNotificationChat,
     );
@@ -242,6 +252,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
             setAsCurrentChat: true,
             sourceChatId: null,
             parentChatId: null,
+            workspaceId: null,
             input: null,
           );
         } catch (error, stackTrace) {
@@ -274,6 +285,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
       toolPkgNavigationEntries: _toolPkgNavigationEntries,
     );
     AppRouteDiscoveryGateway.install(() => _navigationModel.routes);
+    _softwareDesignCatalog.install();
     _synchronizeSidebarDock();
     if (!_requestedInitialToolPkgNavigationRefresh) {
       _requestedInitialToolPkgNavigationRefresh = true;
@@ -285,6 +297,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
   void dispose() {
     unawaited(DesktopWidgets.setActionHandler(null));
     unawaited(DesktopWidgets.setSnapshotRenderer(null));
+    _softwareDesignCatalog.dispose();
     AppRouterGateway.clear();
     AppRouteDiscoveryGateway.clear();
     NotificationActivationService.instance.clearChatHandler();
@@ -312,16 +325,19 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
     if (routeSpec == null) {
       throw StateError('Unknown routeId: $routeId');
     }
+    // Rejects arguments the route cannot show before the router moves.
+    AppRouteCatalog.resolveScreen(
+      _navigationModel,
+      RouteEntry(routeId: routeId, args: args, source: source),
+    );
     _isNavigatingBack = false;
-    if (!_shouldPreserveTopBarTitle(routeId, args, source)) {
-      _topBarController.clear();
-    }
-    _mainLayoutController.clear();
-    _routerState.navigate(
-      routeId: routeId,
-      args: args,
-      source: source,
-      routeSpec: routeSpec,
+    _moveRouter(
+      () => _routerState.navigate(
+        routeId: routeId,
+        args: args,
+        source: source,
+        routeSpec: routeSpec,
+      ),
     );
   }
 
@@ -333,30 +349,35 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
     if (!_navigationModel.routesById.containsKey(routeId)) {
       throw StateError('Unknown routeId: $routeId');
     }
+    final entry = RouteEntry(routeId: routeId, args: args, source: source);
+    // Rejects arguments the route cannot show before the router moves.
+    AppRouteCatalog.resolveScreen(_navigationModel, entry);
     _isNavigatingBack = false;
-    if (!_shouldPreserveTopBarTitle(routeId, args, source)) {
-      _topBarController.clear();
-    }
-    _mainLayoutController.clear();
-    _routerState.resetTo(
-      RouteEntry(routeId: routeId, args: args, source: source),
-    );
+    _moveRouter(() => _routerState.resetTo(entry));
   }
 
-  bool _shouldPreserveTopBarTitle(
-    String nextRouteId,
-    Map<String, Object?> nextArgs,
-    RouteEntrySource nextSource,
-  ) {
-    final currentScreen = AppRouteCatalog.resolveScreen(
+  /// Moves the router, then resets the chrome pages own (the top bar content
+  /// and the layout attachment) only if another page is now on screen.
+  ///
+  /// A navigation can land on the page already shown: one cached page serves
+  /// several routes and arguments, and the router reuses an identical current
+  /// entry. That page stays mounted and current, so it never claims its chrome
+  /// again; clearing it would leave the top bar empty.
+  void _moveRouter(VoidCallback move) {
+    final previousPage = _currentPageKey();
+    move();
+    if (_currentPageKey() != previousPage) {
+      _topBarController.clear();
+      _mainLayoutController.clear();
+    }
+  }
+
+  String _currentPageKey() {
+    final entry = _routerState.currentEntry;
+    return AppRouteCatalog.resolveScreen(
       _navigationModel,
-      _routerState.currentEntry,
-    );
-    final nextScreen = AppRouteCatalog.resolveScreen(
-      _navigationModel,
-      RouteEntry(routeId: nextRouteId, args: nextArgs, source: nextSource),
-    );
-    return currentScreen.preserveTopBarTitleWhenReplacingWith(nextScreen);
+      entry,
+    ).pageKey(entry);
   }
 
   Future<void> _refreshToolPkgNavigationModel() async {
@@ -654,9 +675,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
 
   void _goBack() {
     _isNavigatingBack = true;
-    _topBarController.clear();
-    _mainLayoutController.clear();
-    _routerState.pop();
+    _moveRouter(_routerState.pop);
   }
 
   void _resetToConversationFromBack() {
@@ -665,15 +684,15 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
       throw StateError('Unknown navigation entry: main.ai_chat');
     }
     _isNavigatingBack = true;
-    _topBarController.clear();
-    _mainLayoutController.clear();
-    _routerState.resetTo(
-      RouteEntry(
-        routeId: entry.routeId,
-        args: <String, Object?>{
-          'conversationActivatedAt': DateTime.now().microsecondsSinceEpoch,
-        },
-        source: RouteEntrySource.defaultSource,
+    _moveRouter(
+      () => _routerState.resetTo(
+        RouteEntry(
+          routeId: entry.routeId,
+          args: <String, Object?>{
+            'conversationActivatedAt': DateTime.now().microsecondsSinceEpoch,
+          },
+          source: RouteEntrySource.defaultSource,
+        ),
       ),
     );
   }
@@ -778,24 +797,52 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
                 child: ValueListenableBuilder<bool>(
                   valueListenable: _drawerOpenState,
                   child: Scaffold(
-                    body: AdaptiveMainLayout(
-                      content: content,
-                      navigationEntries: _navigationModel.navigationEntries,
-                      pluginSidebarEntries: pluginSidebarEntries,
-                      selectedRouteId: currentRouteEntry.routeId,
-                      drawerConversationState: _drawerConversationState,
-                      isTabletSidebarExpanded: _isTabletSidebarExpanded,
-                      drawerOpenState: _drawerOpenState,
-                      enableNavigationAnimation: true,
-                      onOpenDrawer: () {
-                        _drawerOpenState.value = true;
-                      },
-                      onCloseDrawer: () {
-                        _drawerOpenState.value = false;
-                      },
-                      onNavigationEntrySelected: _navigateToNavigationEntry,
-                      onConversationActivated: _activateConversationRoute,
-                    ),
+                    body: useTabletLayout
+                        ? TabletLayout(
+                            content: content,
+                            navigationEntries:
+                                _navigationModel.navigationEntries,
+                            pluginSidebarEntries: pluginSidebarEntries,
+                            selectedRouteId: currentRouteEntry.routeId,
+                            drawerConversationState: _drawerConversationState,
+                            isTabletSidebarExpanded: _isTabletSidebarExpanded,
+                            tabletSidebarWidth: 280,
+                            collapsedTabletSidebarWidth: 56,
+                            onNavigationEntrySelected:
+                                _navigateToNavigationEntry,
+                            onConversationActivated: _activateConversationRoute,
+                            onExpandSidebar: () {
+                              setState(() => _isTabletSidebarExpanded = true);
+                            },
+                            onCollapseSidebar: () {
+                              setState(() {
+                                _isTabletSidebarExpanded = false;
+                              });
+                            },
+                          )
+                        : DesktopContentPanel(
+                            child: PhoneLayout(
+                              content: content,
+                              navigationEntries:
+                                  _navigationModel.navigationEntries,
+                              pluginSidebarEntries: pluginSidebarEntries,
+                              selectedRouteId: currentRouteEntry.routeId,
+                              drawerConversationState: _drawerConversationState,
+                              drawerWidth: screenSize.width * 0.75,
+                              drawerOpenState: _drawerOpenState,
+                              enableNavigationAnimation: true,
+                              onOpenDrawer: () {
+                                _drawerOpenState.value = true;
+                              },
+                              onCloseDrawer: () {
+                                _drawerOpenState.value = false;
+                              },
+                              onNavigationEntrySelected:
+                                  _navigateToNavigationEntry,
+                              onConversationActivated:
+                                  _activateConversationRoute,
+                            ),
+                          ),
                   ),
                   builder: (context, drawerOpen, child) {
                     final phoneDrawerOpen = !useTabletLayout && drawerOpen;
