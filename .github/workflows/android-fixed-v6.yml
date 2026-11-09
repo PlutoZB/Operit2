@@ -179,10 +179,6 @@ jobs:
       PYTHONUTF8: "1"
       PYTHONIOENCODING: "utf-8"
       RUSTY_V8_MIRROR: https://github.com/satouriko/rusty-v8-mobile/releases/download
-      # 与 build-android-v8 产出的 manifest.json 里的 android_ndk_version(r29b) 对齐：
-      # prepare_android_v8.py 优先读 OPERIT_ANDROID_V8_NDK。
-      OPERIT_ANDROID_V8_NDK: ${{ runner.temp }}\android-ndk\android-ndk-r29-beta4
-      ANDROID_NDK_HOME: ${{ runner.temp }}\android-ndk\android-ndk-r29-beta4
 
     steps:
       - name: Checkout
@@ -532,6 +528,9 @@ jobs:
             throw "NDK extraction did not produce $ndkDir"
           }
           Write-Host "NDK ready: $ndkDir"
+          # 供后续 V8 / Gradle 步骤使用（与 Linux manifest 的 r29b 对齐）
+          "OPERIT_ANDROID_V8_NDK=$ndkDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "ANDROID_NDK_HOME=$ndkDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Patch V8 NDK override in app/build.gradle.kts
         shell: pwsh
