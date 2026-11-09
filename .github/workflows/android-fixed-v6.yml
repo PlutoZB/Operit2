@@ -219,6 +219,39 @@ jobs:
           if (-not (Test-Path -LiteralPath $py)) { throw "hook venv missing: $py" }
           & $py -c "import sys; print('hook python OK:', sys.version)"
 
+      - name: Generate embedded plugin assets
+        shell: pwsh
+        run: |
+          # 关键步骤：把 plugins/packages/{buildin,external} 下的 .js / .toolpkg 源
+          # 同步（含 TypeScript 编译与 .toolpkg 打包）到
+          # core/crates/runtime/application/assets/plugins/{buildin,external}。
+          # 仓库不提交这些派生产物，缺失时 operit-runtime 的 build.rs 会
+          #   panic: package example has no embedded archive
+          # 导致 cargo check / build 直接失败。
+          $ErrorActionPreference = "Stop"
+          python plugins/tools/sync_plugin_packages.py --source runtime --no-hot-reload
+          if ($LASTEXITCODE -ne 0) { throw "sync_plugin_packages.py failed with exit code $LASTEXITCODE" }
+
+          # 校验产物确实生成，避免静默回归
+          $root = "core/crates/runtime/application/assets/plugins"
+          foreach ($pair in @(
+            @{ Dir = "$root/buildin";  Min = 10; Sample = "time.js" },
+            @{ Dir = "$root/external"; Min = 10; Sample = "waifu.toolpkg" }
+          )) {
+            if (-not (Test-Path -LiteralPath $pair.Dir)) {
+              throw "plugin asset dir missing: $($pair.Dir)"
+            }
+            $items = @(Get-ChildItem -LiteralPath $pair.Dir -File -ErrorAction SilentlyContinue |
+                       Where-Object { $_.Extension -in @('.js', '.toolpkg') })
+            Write-Host ("{0}: {1} 个资产" -f $pair.Dir, $items.Count)
+            if ($items.Count -lt $pair.Min) {
+              throw "plugin assets under $($pair.Dir) look incomplete ($($items.Count) < $($pair.Min))"
+            }
+            if (-not (Test-Path -LiteralPath (Join-Path $pair.Dir $pair.Sample))) {
+              throw "expected sample asset missing: $($pair.Sample)"
+            }
+          }
+
       - name: Pre-install Android CMake 3.22.1 (multi-source,避开 dl.google.com)
         shell: pwsh
         run: |
