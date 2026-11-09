@@ -131,9 +131,13 @@ jobs:
           echo "deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" \
             | sudo tee /etc/apt/sources.list.d/llvm-21.list > /dev/null
           sudo apt-get update
-          sudo apt-get install -y llvm-21-dev lld-21 libclang-21-dev
-          # 供 find_libclang() 校验
-          ls -l /usr/lib/llvm-21/lib/libclang.so* || true
+          sudo apt-get install -y llvm-21-dev lld-21 libclang-21-dev libclang1-21
+          # prepare_android_v8.py 的 find_libclang() 用正则 libclang\.so\.(\d+)
+          # 需要 >= 21，而 Debian/Ubuntu 包的文件名是 libclang-21.so.21（带 -21），
+          # 匹配不到，会抛 "require LLVM/libclang 21.1 or newer"。
+          # 补一个上游命名的软链接让它可见；不修改上游脚本。
+          sudo ln -sf /usr/lib/llvm-21/lib/libclang-21.so.21 /usr/lib/llvm-21/lib/libclang.so.21
+          ls -l /usr/lib/llvm-21/lib/libclang*.so* || true
           ls -l /usr/lib/llvm-21/bin/ld.lld || true
 
       - name: Fetch Android NDK
@@ -146,7 +150,7 @@ jobs:
           command: bash tools/android-runtime/fetch_ndk_wsl.sh
 
       - name: Cache source-built Android V8
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: tools/release/work/android-v8
           key: linux-android-v8-${{ hashFiles('tools/build_scripts/prepare_android_v8.py', 'apps/flutter/native/operit-flutter-bridge/Cargo.lock') }}
