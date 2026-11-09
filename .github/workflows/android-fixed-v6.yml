@@ -51,7 +51,7 @@ jobs:
             xz-utils
 
       - name: Fetch Android runtime sources
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@v4
         with:
           timeout_minutes: 25
           max_attempts: 5
@@ -60,7 +60,7 @@ jobs:
           command: pwsh -NoProfile -File tools/android-runtime/fetch_sources.ps1
 
       - name: Fetch Android NDK
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@v4
         with:
           timeout_minutes: 25
           max_attempts: 5
@@ -89,8 +89,86 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  build-android-v8:
+    # V8 的 Chromium 构建脚本硬性断言 host_os == "linux"
+    # （//build/config/BUILDCONFIG.gn:262 "Android builds are only supported on Linux."），
+    # 因此 V8 源码构建不能放在 windows runner 上。这里在 Linux 上编好 V8，
+    # 把缓存目录作为 artifact 交给 build-android，Windows 侧 cache_valid()
+    # 命中后 build.rs 直接复用 RUSTY_V8_ARCHIVE，不再调用 gn。
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      RUST_TOOLCHAIN_VERSION: 1.95.0
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          targets: aarch64-linux-android
+
+      - name: Install V8 build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bzip2 ca-certificates curl flex g++ git libc6-dev \
+            libssl-dev ninja-build pkg-config python3 python3-pip \
+            unzip xz-utils zlib1g-dev
+          # depot_tools 未用：prepare_android_v8.py 通过 CIPD 自行拉取 pinned gn/ninja。
+          # V8 的 bindings 生成需要 libclang 21.1+（BUILDING.md 第 6 条）。
+          sudo apt-get install -y llvm-21-dev lld-21
+
+      - name: Fetch Android NDK
+        uses: nick-fields/retry@v4
+        with:
+          timeout_minutes: 25
+          max_attempts: 5
+          retry_wait_seconds: 30
+          shell: bash
+          command: bash tools/android-runtime/fetch_ndk_wsl.sh
+
+      - name: Cache source-built Android V8
+        uses: actions/cache@v4
+        with:
+          path: tools/release/work/android-v8
+          key: linux-android-v8-${{ hashFiles('tools/build_scripts/prepare_android_v8.py', 'apps/flutter/native/operit-flutter-bridge/Cargo.lock') }}
+
+      - name: Build Android V8 (aarch64)
+        run: |
+          # 显式固定 NDK，保证与 Windows 侧 manifest.configuration 里的
+          # android_ndk_version 完全一致（由目录名 r29-beta4 推导为 r29b）。
+          export OPERIT_ANDROID_V8_NDK="$HOME/.cache/operit-android-runtime/android-ndk-r29-beta4"
+          # libclang / ld.lld 由 find_libclang()/find_lld() 自行在
+          # /usr/lib/llvm21/lib 与 llvm*/bin/ld.lld 下探测（apt 装 llvm-21-dev + lld-21）。
+          python3 tools/build_scripts/prepare_android_v8.py \
+            --target aarch64-linux-android \
+            --env-file tools/release/work/android-v8-env.sh
+          echo "--- env file ---"
+          cat tools/release/work/android-v8-env.sh
+          echo "--- cache artifacts ---"
+          find tools/release/work/android-v8 -type f \( -name 'librusty_v8.a' -o -name 'src_binding.rs' -o -name 'args.gn' -o -name 'manifest.json' \) | sed 's/^/  /'
+          echo "--- manifest.json ---"
+          cat tools/release/work/android-v8/*/aarch64-linux-android/manifest.json
+
+      - name: Upload Android V8 cache
+        uses: actions/upload-artifact@v7
+        with:
+          name: operit2-android-v8
+          overwrite: true
+          path: tools/release/work/android-v8
+          if-no-files-found: error
+          retention-days: 30
+
   build-android:
-    needs: build-android-runtime
+    needs: [build-android-runtime, build-android-v8]
     if: ${{ !cancelled() }}
     runs-on: windows-2025
     timeout-minutes: 180
@@ -101,6 +179,10 @@ jobs:
       PYTHONUTF8: "1"
       PYTHONIOENCODING: "utf-8"
       RUSTY_V8_MIRROR: https://github.com/satouriko/rusty-v8-mobile/releases/download
+      # 与 build-android-v8 产出的 manifest.json 里的 android_ndk_version(r29b) 对齐：
+      # prepare_android_v8.py 优先读 OPERIT_ANDROID_V8_NDK。
+      OPERIT_ANDROID_V8_NDK: ${{ runner.temp }}\android-ndk\android-ndk-r29-beta4
+      ANDROID_NDK_HOME: ${{ runner.temp }}\android-ndk\android-ndk-r29-beta4
 
     steps:
       - name: Checkout
@@ -135,6 +217,35 @@ jobs:
           if ($missing.Count -gt 0) {
             throw "Android runtime 产物缺失。请先跑一次 skip_runtime=false 生成产物，然后在此处填写那次运行的 ID 到 runtime_run_id: $($missing -join ', ')"
           }
+
+      - name: Download Android V8 cache
+        uses: actions/download-artifact@v8
+        with:
+          name: operit2-android-v8
+          path: tools/release/work/android-v8
+
+      - name: Verify Android V8 cache present
+        shell: pwsh
+        run: |
+          # prepare_android_v8.py 的 cache_valid() 会校验 manifest.json 里的
+          # configuration（含 android_ndk_version）与三个产物的 sha256；
+          # 任一不符就会在 Windows 上重新走 gn，而 gn 在非 Linux 上必然失败。
+          # 这里提前确认产物齐全，避免白跑一次 Gradle。
+          $root = "tools/release/work/android-v8"
+          $manifests = @(Get-ChildItem -LiteralPath $root -Recurse -Filter "manifest.json" -File -ErrorAction SilentlyContinue)
+          if ($manifests.Count -ne 1) {
+            throw "expected exactly one V8 manifest under $root, found $($manifests.Count)"
+          }
+          $dir = $manifests[0].Directory
+          Write-Host "V8 cache dir: $($dir.FullName)"
+          foreach ($name in @("librusty_v8.a", "src_binding.rs", "args.gn", "manifest.json")) {
+            $p = Join-Path $dir.FullName $name
+            if (-not (Test-Path -LiteralPath $p)) { throw "V8 cache artifact missing: $p" }
+            Write-Host ("  {0,-16} {1,10} bytes" -f $name, (Get-Item -LiteralPath $p).Length)
+          }
+          $manifest = Get-Content -LiteralPath (Join-Path $dir.FullName "manifest.json") -Raw | ConvertFrom-Json
+          Write-Host "  v8 version      : $($manifest.configuration.version)"
+          Write-Host "  android_ndk_ver : $($manifest.configuration.gn.android_ndk_version)"
 
       - name: Install bootstrap Dart
         uses: dart-lang/setup-dart@v1
@@ -393,6 +504,55 @@ jobs:
           $lines += "cmake.dir=$escaped"
           Set-Content -LiteralPath $lp -Value $lines -Encoding utf8
           Write-Host "local.properties 已写入 cmake.dir=$escaped"
+
+      - name: Install Android NDK (mirror of Linux r29-beta4, keeps V8 cache key stable)
+        shell: pwsh
+        run: |
+          # prepare_android_v8.py 的 ndk_version() 从 NDK 目录名推导
+          # android_ndk_version 并写入 manifest.json；cache_valid() 会逐字段比对。
+          # build-android-v8 在 Linux 上用的是 android-ndk-r29-beta4（-> r29b），
+          # 因此 Windows 侧必须放一个同名目录，否则缓存校验必然失败，
+          # 并退回 gn（gn 在非 Linux 上直接断言 "Android builds are only supported on Linux."）。
+          $ErrorActionPreference = "Stop"
+          $cacheDir = Join-Path $env:RUNNER_TEMP "android-ndk"
+          $ndkDir   = Join-Path $cacheDir "android-ndk-r29-beta4"
+          $zip      = Join-Path $cacheDir "ndk.zip"
+          New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+
+          if (-not (Test-Path -LiteralPath (Join-Path $ndkDir "toolchains"))) {
+            Write-Host "Downloading Android NDK r29-beta4 (windows)..."
+            Invoke-WebRequest -Uri "https://dl.google.com/android/repository/android-ndk-r29-beta4-windows.zip" -OutFile $zip -TimeoutSec 1800 -UseBasicParsing
+            Write-Host "size: $((Get-Item $zip).Length) bytes"
+            if (Test-Path -LiteralPath $ndkDir) { Remove-Item -LiteralPath $ndkDir -Recurse -Force }
+            Expand-Archive -LiteralPath $zip -DestinationPath $cacheDir -Force
+            Remove-Item -LiteralPath $zip -Force
+          }
+
+          if (-not (Test-Path -LiteralPath $ndkDir)) {
+            throw "NDK extraction did not produce $ndkDir"
+          }
+          Write-Host "NDK ready: $ndkDir"
+
+      - name: Patch V8 NDK override in app/build.gradle.kts
+        shell: pwsh
+        run: |
+          # 让 Gradle 传给 prepare_android_v8.py 的 NDK 可被环境变量覆盖，
+          # 从而与 build-android-v8(manifest 里的 r29b) 完全一致；
+          # 否则 cache_valid() 失败会退回 gn，而 gn 非 Linux 直接断言失败。
+          $path = "apps/flutter/app/android/app/build.gradle.kts"
+          if (-not (Test-Path -LiteralPath $path)) { throw "未找到 $path" }
+          $text = Get-Content -LiteralPath $path -Raw
+          $old = 'environment("OPERIT_ANDROID_V8_NDK", android.ndkDirectory.absolutePath)'
+          $new = 'environment("OPERIT_ANDROID_V8_NDK", System.getenv("OPERIT_ANDROID_V8_NDK") ?: android.ndkDirectory.absolutePath)'
+          if ($text -like "*$old*") {
+            $text = $text.Replace($old, $new)
+            Set-Content -LiteralPath $path -Value $text -NoNewline -Encoding utf8
+            Write-Host "已修补：OPERIT_ANDROID_V8_NDK 允许环境变量覆盖"
+          } elseif ($text -like '*System.getenv("OPERIT_ANDROID_V8_NDK")*') {
+            Write-Host "已包含修补，跳过"
+          } else {
+            throw "未匹配到 OPERIT_ANDROID_V8_NDK 赋值，上游代码可能已变动"
+          }
 
       - name: Patch upstream Rust type error in AndroidJni.rs
         shell: pwsh
