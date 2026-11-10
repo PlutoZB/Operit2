@@ -185,6 +185,10 @@ jobs:
     # 必须等到 runtime 与 V8 两个产物 job 都成功；否则下载 artifact 会失败，
     # 白白浪费一次 30 分钟的 Windows 构建。
     needs: [build-android-runtime, build-android-v8]
+    # needs 默认会把上游 job 的 skipped 当成失败向传播：当 skip_runtime=true 时
+    # build-android-runtime 被跳过，build-android 就会整块被跳过、一个 APK 都不产。
+    # 这里显式覆盖：runtime 允许 skipped（前提是给了 runtime_run_id），V8 必须 success。
+    if: ${{ !cancelled() && needs.build-android-v8.result == 'success' && (needs.build-android-runtime.result == 'success' || (needs.build-android-runtime.result == 'skipped' && inputs.runtime_run_id != '')) }}
     runs-on: windows-2025
     timeout-minutes: 180
     env:
