@@ -638,17 +638,47 @@ jobs:
           }
           python tools/build_scripts/build_flutter_android.py --build-name $version[0].Groups[1].Value --build-number $version[0].Groups[2].Value --enforce-lockfile *> $log
           $code = $LASTEXITCODE
-          Write-Host "----- 构建日志末尾 200 行 -----"
-          if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Tail 200 }
+          Write-Host "----- 构建日志行数 -----"
+          if (Test-Path -LiteralPath $log) {
+            $lines = @(Get-Content -LiteralPath $log)
+            Write-Host "build log: $($lines.Count) lines,  $((Get-Item $log).Length) bytes"
+            # 只截末尾 200 行会丢掉 Gradle/V8 任务细节，排查时看不到
+            # prepareOperitAndroidV8 是否复用缓存。这里改为输出全部
+            # 含关键标记的行，便于事后核对。
+            Write-Host "----- V8 / NDK 关键行 -----"
+            $lines | Select-String -Pattern 'prepareOperitAndroidV8|Using verified V8 cache|first build takes time|V8 configuration mismatch|gn gen|BUILDCONFIG\.gn|RUSTY_V8_ARCHIVE' |
+              Select-Object -First 60 | ForEach-Object { Write-Host "  $_" }
+            Write-Host "----- 构建日志末尾 120 行 -----"
+            $lines | Select-Object -Last 120
+          }
           Write-Host "----- 结束 (exit=$code) -----"
           if ($code -ne 0) { exit $code }
+
+      - name: Verify APK produced
+        shell: pwsh
+        run: |
+          # 上游产出的文件名带完整版本号（含 prerelease），例如
+          # operit2-app-android-arm64-v8a-2.0.0-preview.30.apk。
+          # 之前 workflow 里写死成不带版本号的名字，导致 upload-artifact
+          # 只匹配到 keystore（2836 字节）却因另一项存在而没触发
+          # if-no-files-found: error，APK 静默丢失。这里显式校验。
+          $apks = @(Get-ChildItem -LiteralPath "tools/release/dist" -Filter "operit2-app-android-arm64-v8a-*.apk" -File -ErrorAction SilentlyContinue)
+          if ($apks.Count -ne 1) {
+            throw "expected exactly one Android APK under tools/release/dist, found $($apks.Count)"
+          }
+          $apk = $apks[0]
+          $mb = [math]::Round($apk.Length / 1MB, 1)
+          Write-Host "APK: $($apk.Name)  $mb MB"
+          if ($apk.Length -lt 50MB) {
+            throw "APK looks too small ($mb MB); expected a full release build"
+          }
 
       - name: Upload Android artifacts
         uses: actions/upload-artifact@v7
         with:
           name: operit2-android-${{ github.sha }}
           path: |
-            tools/release/dist/operit2-app-android-arm64-v8a.apk
+            tools/release/dist/operit2-app-android-arm64-v8a-*.apk
             tools/release/secrets/operit2-release.keystore
           if-no-files-found: error
           retention-days: 30
